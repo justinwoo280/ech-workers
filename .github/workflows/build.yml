@@ -114,23 +114,35 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ech-workers-core
-          path: release
+          path: client
 
       - name: Download Proxy Server
         uses: actions/download-artifact@v4
         with:
           name: proxy-server
-          path: release
+          path: server
 
       - name: Download GUI
         uses: actions/download-artifact@v4
         with:
           name: gui
-          path: release
+          path: client
+
+      - name: Package Client (Kernel + GUI)
+        run: |
+          cd client
+          zip -r ../ech-workers-client.zip .
+
+      - name: Package Server
+        run: |
+          cd server
+          zip -r ../proxy-server.zip .
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          files: release/*
+          files: |
+            ech-workers-client.zip
+            proxy-server.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
