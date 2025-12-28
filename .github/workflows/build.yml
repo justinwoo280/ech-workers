@@ -181,5 +181,17 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: release/*.zip
+          body: |
+            ## 📦 下载说明
+
+            - **ech-workers-client-*.zip** - 客户端完整包（GUI + 内核 + wintun.dll）
+            - **proxy-server-*.zip** - 代理服务端
+
+            ## ✨ 特性
+
+            - 支持 ECH (Encrypted Client Hello) 加密
+            - 支持 Yamux 多路复用协议
+            - 支持 SOCKS5 / HTTP 代理
+            - 支持 TUN 模式（全局代理）
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
