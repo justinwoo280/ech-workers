@@ -128,20 +128,27 @@ jobs:
           name: gui
           path: gui
 
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            ech-workers/wintun.dll
+
       - name: Package by architecture
         run: |
           mkdir -p release
 
-          # Client Windows amd64 (kernel + GUI)
+          # Client Windows amd64 (kernel + GUI + wintun.dll)
           mkdir -p tmp/client-win-amd64
           cp kernel/ech-workers-core-windows-amd64.exe tmp/client-win-amd64/ech-workers-core.exe
           cp gui/EchWorkersGui-x64.exe tmp/client-win-amd64/EchWorkersGui.exe
+          cp ech-workers/wintun.dll tmp/client-win-amd64/wintun.dll
           cd tmp/client-win-amd64 && zip -r ../../release/ech-workers-client-windows-amd64.zip . && cd ../..
 
-          # Client Windows arm64 (kernel + GUI)
+          # Client Windows arm64 (kernel + GUI + wintun.dll)
           mkdir -p tmp/client-win-arm64
           cp kernel/ech-workers-core-windows-arm64.exe tmp/client-win-arm64/ech-workers-core.exe
           cp gui/EchWorkersGui-arm64.exe tmp/client-win-arm64/EchWorkersGui.exe
+          cp ech-workers/wintun.dll tmp/client-win-arm64/wintun.dll
           cd tmp/client-win-arm64 && zip -r ../../release/ech-workers-client-windows-arm64.zip . && cd ../..
 
           # Server Windows amd64
