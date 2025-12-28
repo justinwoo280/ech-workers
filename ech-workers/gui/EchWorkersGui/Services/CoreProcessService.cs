@@ -329,7 +329,9 @@ public sealed class CoreProcessService
             UseShellExecute = false,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
-            CreateNoWindow = true
+            CreateNoWindow = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8
         };
 
         void Add(string arg)
