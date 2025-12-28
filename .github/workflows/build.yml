@@ -110,6 +110,12 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
+      # 先 checkout 获取 wintun.dll（必须在下载 artifacts 之前）
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            ech-workers/wintun.dll
+
       - name: Download Client Kernel
         uses: actions/download-artifact@v4
         with:
@@ -127,11 +133,6 @@ jobs:
         with:
           name: gui
           path: gui
-
-      - uses: actions/checkout@v4
-        with:
-          sparse-checkout: |
-            ech-workers/wintun.dll
 
       - name: Package by architecture
         run: |
