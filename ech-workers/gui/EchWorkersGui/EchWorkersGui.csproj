@@ -7,8 +7,6 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>EchWorkersGui</AssemblyName>
     <RootNamespace>EchWorkersGui</RootNamespace>
-    <!-- 应用图标 -->
-    <ApplicationIcon>app.ico</ApplicationIcon>
     <!-- 交叉编译支持 -->
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <!-- 确保包含所有 WPF 依赖 -->
