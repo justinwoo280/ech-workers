@@ -28,23 +28,12 @@ jobs:
       - name: Go mod tidy
         run: go mod tidy
 
+      # 注意：内核使用了 wintun 等 Windows 专属依赖，只能编译 Windows 版本
       - name: Build Windows amd64
         run: GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o ../artifacts/ech-workers-core-windows-amd64.exe .
 
       - name: Build Windows arm64
         run: GOOS=windows GOARCH=arm64 go build -ldflags="-s -w" -o ../artifacts/ech-workers-core-windows-arm64.exe .
-
-      - name: Build Linux amd64
-        run: GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o ../artifacts/ech-workers-core-linux-amd64 .
-
-      - name: Build Linux arm64
-        run: GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o ../artifacts/ech-workers-core-linux-arm64 .
-
-      - name: Build macOS amd64
-        run: GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o ../artifacts/ech-workers-core-darwin-amd64 .
-
-      - name: Build macOS arm64
-        run: GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o ../artifacts/ech-workers-core-darwin-arm64 .
 
       - name: Upload Client Kernel Artifacts
         uses: actions/upload-artifact@v4
