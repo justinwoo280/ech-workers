@@ -1,0 +1,135 @@
+name: Build ECH-Workers
+
+on:
+  push:
+    branches: [ main ]
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-client-kernel:
+    name: Build Client Kernel (ech-workers)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ech-workers
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Build Windows amd64
+        run: GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o ../artifacts/ech-workers-core-windows-amd64.exe .
+
+      - name: Build Windows arm64
+        run: GOOS=windows GOARCH=arm64 go build -ldflags="-s -w" -o ../artifacts/ech-workers-core-windows-arm64.exe .
+
+      - name: Build Linux amd64
+        run: GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o ../artifacts/ech-workers-core-linux-amd64 .
+
+      - name: Build Linux arm64
+        run: GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o ../artifacts/ech-workers-core-linux-arm64 .
+
+      - name: Build macOS amd64
+        run: GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o ../artifacts/ech-workers-core-darwin-amd64 .
+
+      - name: Build macOS arm64
+        run: GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o ../artifacts/ech-workers-core-darwin-arm64 .
+
+      - name: Upload Client Kernel Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ech-workers-core
+          path: artifacts/ech-workers-core-*
+
+  build-proxy-server:
+    name: Build Proxy Server (proxy-server)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: proxy-server
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Build Windows amd64
+        run: GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o ../artifacts/proxy-server-windows-amd64.exe .
+
+      - name: Build Linux amd64
+        run: GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o ../artifacts/proxy-server-linux-amd64 .
+
+      - name: Upload Proxy Server Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: proxy-server
+          path: artifacts/proxy-server-*
+
+  build-gui:
+    name: Build GUI (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Publish GUI win-x64 (self-contained single file)
+        shell: pwsh
+        run: |
+          cd ech-workers/gui/EchWorkersGui
+          dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o ..\..\..\artifacts\gui-win-x64
+          Move-Item ..\..\..\artifacts\gui-win-x64\EchWorkersGui.exe ..\..\..\artifacts\EchWorkersGui-x64.exe -Force
+
+      - name: Publish GUI win-arm64 (self-contained single file)
+        shell: pwsh
+        run: |
+          cd ech-workers/gui/EchWorkersGui
+          dotnet publish -c Release -r win-arm64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o ..\..\..\artifacts\gui-win-arm64
+          Move-Item ..\..\..\artifacts\gui-win-arm64\EchWorkersGui.exe ..\..\..\artifacts\EchWorkersGui-arm64.exe -Force
+
+      - name: Upload GUI Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui
+          path: artifacts/EchWorkersGui-*.exe
+
+  release:
+    name: Create Release
+    needs: [build-client-kernel, build-proxy-server, build-gui]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download Client Kernel
+        uses: actions/download-artifact@v4
+        with:
+          name: ech-workers-core
+          path: release
+
+      - name: Download Proxy Server
+        uses: actions/download-artifact@v4
+        with:
+          name: proxy-server
+          path: release
+
+      - name: Download GUI
+        uses: actions/download-artifact@v4
+        with:
+          name: gui
+          path: release
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: release/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

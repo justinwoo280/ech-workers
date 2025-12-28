@@ -1,0 +1,20 @@
+# .NET
+**/bin/
+**/obj/
+**/.vs/
+**/*.user
+**/*.suo
+
+# VS Code
+**/.vscode/
+
+# Build outputs
+/build/
+**/publish/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

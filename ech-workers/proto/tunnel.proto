@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package tunnel;
+
+option go_package = "ech-client/proto";
+
+// 定义隧道服务
+service ProxyService {
+  // 双向流：客户端发数据，服务端回数据
+  rpc Tunnel (stream SocketData) returns (stream SocketData) {}
+}
+
+// 数据包结构
+message SocketData {
+  // 发送的内容 (二进制)
+  bytes content = 1;
+}
