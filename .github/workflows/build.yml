@@ -122,6 +122,7 @@ jobs:
         with:
           sparse-checkout: |
             ech-workers/wintun.dll
+          sparse-checkout-cone-mode: false
 
       - name: Download Client Kernel
         uses: actions/download-artifact@v4
@@ -156,29 +157,31 @@ jobs:
           cp kernel/ech-workers-core-windows-amd64.exe tmp/client-win-amd64/ech-workers-core.exe
           cp -r gui-x64/* tmp/client-win-amd64/
           cp ech-workers/wintun.dll tmp/client-win-amd64/wintun.dll
-          cd tmp/client-win-amd64 && zip -r ../../release/ech-workers-client-windows-amd64.zip . && cd ../..
+          (cd tmp/client-win-amd64 && zip -r ../../release/ech-workers-client-windows-amd64.zip .)
 
           # Client Windows arm64 (kernel + GUI目录 + wintun.dll)
           mkdir -p tmp/client-win-arm64
           cp kernel/ech-workers-core-windows-arm64.exe tmp/client-win-arm64/ech-workers-core.exe
           cp -r gui-arm64/* tmp/client-win-arm64/
           cp ech-workers/wintun.dll tmp/client-win-arm64/wintun.dll
-          cd tmp/client-win-arm64 && zip -r ../../release/ech-workers-client-windows-arm64.zip . && cd ../..
+          (cd tmp/client-win-arm64 && zip -r ../../release/ech-workers-client-windows-arm64.zip .)
 
           # Server Windows amd64
           mkdir -p tmp/server-win-amd64
           cp server/proxy-server-windows-amd64.exe tmp/server-win-amd64/proxy-server.exe
-          cd tmp/server-win-amd64 && zip -r ../../release/proxy-server-windows-amd64.zip . && cd ../..
+          (cd tmp/server-win-amd64 && zip -r ../../release/proxy-server-windows-amd64.zip .)
 
           # Server Linux amd64
           mkdir -p tmp/server-linux-amd64
           cp server/proxy-server-linux-amd64 tmp/server-linux-amd64/proxy-server
-          cd tmp/server-linux-amd64 && zip -r ../../release/proxy-server-linux-amd64.zip . && cd ../..
+          (cd tmp/server-linux-amd64 && zip -r ../../release/proxy-server-linux-amd64.zip .)
 
           ls -lh release/
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           files: release/*.zip
           body: |
@@ -193,5 +196,3 @@ jobs:
             - 支持 Yamux 多路复用协议
             - 支持 SOCKS5 / HTTP 代理
             - 支持 TUN 模式（全局代理）
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
