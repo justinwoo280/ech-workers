@@ -211,7 +211,7 @@ func (t *WebSocketTransport) Dial() (TunnelConn, error) {
 		return nil, fmt.Errorf("yamux stream error: %w", err)
 	}
 
-	log.Printf("[Yamux] 新建 session 并打开 stream")
+	logV("[Yamux] 新建 session 并打开 stream")
 	return &YamuxStreamConn{stream: stream}, nil
 }
 
@@ -292,7 +292,7 @@ func (t *WebSocketTransport) dialSimple() (TunnelConn, error) {
 		return nil, err
 	}
 
-	log.Printf("[WebSocket] 新建简单协议连接")
+	logV("[WebSocket] 新建简单协议连接")
 	return &SimpleWSConn{conn: wsConn}, nil
 }
 

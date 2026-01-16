@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
@@ -6,6 +7,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Threading;
 using System.Net.Http;
 using EchWorkersGui.Infrastructure;
 using EchWorkersGui.Models;
@@ -18,8 +20,11 @@ public sealed class MainViewModel : ObservableObject
     private readonly ConfigService _configService = new();
     private readonly CoreProcessService _core = new();
 
+    private readonly ConcurrentQueue<string> _pendingLogs = new();
     private readonly Queue<string> _logLines = new();
-    private const int MaxLogLines = 5000;
+    private readonly DispatcherTimer _logUpdateTimer;
+    private readonly StringBuilder _logBuilder = new();
+    private const int MaxLogLines = 1500;
 
     public GlobalConfig Global { get; }
 
@@ -74,13 +79,22 @@ public sealed class MainViewModel : ObservableObject
         Nodes = new ObservableCollection<NodeConfig>(cfg.Nodes);
         SelectedNode = Nodes.FirstOrDefault(n => n.Id == cfg.SelectedNodeId) ?? Nodes.FirstOrDefault();
 
-        _core.OnLogLine += line => Application.Current.Dispatcher.Invoke(() => AppendLog(line));
-        _core.OnExited += () => Application.Current.Dispatcher.Invoke(() =>
+        // 优化：使用异步调度 + 批量更新日志（避免UI线程阻塞）
+        _core.OnLogLine += line => _pendingLogs.Enqueue(line);
+        _core.OnExited += () => Application.Current.Dispatcher.InvokeAsync(() =>
         {
             _isRunning = false;
             StatusText = "未运行";
             RaiseCommandStates();
         });
+
+        // 定时器：每100ms批量处理日志（降低UI更新频率）
+        _logUpdateTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(100)
+        };
+        _logUpdateTimer.Tick += (_, _) => ProcessPendingLogs();
+        _logUpdateTimer.Start();
 
         AppendLog("[GUI] 配置文件: " + _configService.ConfigFilePath);
     }
@@ -94,16 +108,56 @@ public sealed class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(CanStop));
     }
 
-    private void AppendLog(string line)
+    private void ProcessPendingLogs()
     {
-        _logLines.Enqueue(line);
-        
-        while (_logLines.Count > MaxLogLines)
+        if (_pendingLogs.IsEmpty) return;
+
+        var batchCount = 0;
+        var needsRebuild = false;
+
+        // 批量处理待处理日志（最多200条/次，避免单次处理时间过长）
+        while (batchCount < 200 && _pendingLogs.TryDequeue(out var line))
         {
-            _logLines.Dequeue();
+            _logLines.Enqueue(line);
+            batchCount++;
+
+            // 超过最大行数时需要重建
+            if (_logLines.Count > MaxLogLines)
+            {
+                _logLines.Dequeue();
+                needsRebuild = true;
+            }
         }
 
-        LogText = string.Join(Environment.NewLine, _logLines);
+        if (batchCount == 0) return;
+
+        // 优化：仅在需要时重建完整日志，否则增量追加
+        if (needsRebuild || _logBuilder.Length == 0)
+        {
+            _logBuilder.Clear();
+            foreach (var line in _logLines)
+            {
+                if (_logBuilder.Length > 0) _logBuilder.AppendLine();
+                _logBuilder.Append(line);
+            }
+        }
+        else
+        {
+            // 增量追加新行
+            var newLines = _logLines.Skip(_logLines.Count - batchCount);
+            foreach (var line in newLines)
+            {
+                if (_logBuilder.Length > 0) _logBuilder.AppendLine();
+                _logBuilder.Append(line);
+            }
+        }
+
+        LogText = _logBuilder.ToString();
+    }
+
+    private void AppendLog(string line)
+    {
+        _pendingLogs.Enqueue(line);
     }
 
     private void AddNode()

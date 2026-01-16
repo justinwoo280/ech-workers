@@ -57,6 +57,7 @@ var (
 	useYamux   bool   // 是否启用 Yamux 多路复用（仅 WebSocket 模式）
 	controlAddr string
 	logFilePath string
+	verbose     bool   // 详细日志模式
 
 	echListMu sync.RWMutex
 	echList   []byte
@@ -120,6 +121,7 @@ func init() {
 	flag.BoolVar(&useYamux, "yamux", true, "启用 Yamux 多路复用（仅 WebSocket 模式，默认启用；关闭后兼容 Cloudflare Workers）")
 	flag.StringVar(&controlAddr, "control", "", "本地控制接口监听地址（仅用于 GUI 控制退出），例如 127.0.0.1:0")
 	flag.StringVar(&logFilePath, "logfile", "", "将日志追加写入到文件（用于 GUI 提权启动时仍能显示日志）")
+	flag.BoolVar(&verbose, "verbose", false, "详细日志模式（记录每个连接详情，高并发时会产生大量日志）")
 	flag.BoolVar(&tunMode, "tun", false, "启用 TUN 模式 (全局代理)")
 	flag.StringVar(&tunIP, "tun-ip", "10.0.85.2", "TUN 设备 IP 地址")
 	flag.StringVar(&tunGateway, "tun-gateway", "10.0.85.1", "TUN 网关地址")
@@ -127,6 +129,13 @@ func init() {
 	flag.StringVar(&tunDNS, "tun-dns", "1.1.1.1", "TUN DNS 服务器")
 	flag.IntVar(&tunMTU, "tun-mtu", 1380, "TUN MTU（建议约 1380，用于减少隧道封装导致的分片）")
 	flag.BoolVar(&sysProxyMode, "sysproxy", false, "自动设置系统代理")
+}
+
+// logV 详细日志（仅在 verbose 模式下输出）
+func logV(format string, v ...interface{}) {
+	if verbose {
+		log.Printf(format, v...)
+	}
 }
 
 func main() {
@@ -716,7 +725,7 @@ func handleSOCKS5(conn net.Conn, clientAddr string, firstByte byte) {
 			target = fmt.Sprintf("%s:%d", host, port)
 		}
 
-		log.Printf("[SOCKS5] %s -> %s", clientAddr, target)
+		logV("[SOCKS5] %s -> %s", clientAddr, target)
 
 		if err := handleTunnel(conn, target, clientAddr, modeSOCKS5, ""); err != nil {
 			if !isNormalCloseError(err) {
@@ -859,10 +868,10 @@ func handleUDPRelay(udpConn *net.UDPConn, clientAddr string, stopChan chan struc
 
 		// 检查是否是 DNS 查询（端口 53）
 		if dstPort == 53 {
-			log.Printf("[UDP-DNS] %s -> %s (DoH 查询)", clientAddr, target)
+			logV("[UDP-DNS] %s -> %s (DoH 查询)", clientAddr, target)
 			go handleDNSQuery(udpConn, addr, udpData, data[:headerLen])
 		} else {
-			log.Printf("[UDP] %s -> %s (暂不支持非 DNS UDP)", clientAddr, target)
+			logV("[UDP] %s -> %s (暂不支持非 DNS UDP)", clientAddr, target)
 			// 这里可以扩展支持其他 UDP 流量
 		}
 	}
@@ -888,7 +897,7 @@ func handleDNSQuery(udpConn *net.UDPConn, clientAddr *net.UDPAddr, dnsQuery []by
 		return
 	}
 
-	log.Printf("[UDP-DNS] DoH 查询成功，响应 %d 字节", len(dnsResponse))
+	logV("[UDP-DNS] DoH 查询成功，响应 %d 字节", len(dnsResponse))
 }
 
 // ======================== HTTP 处理 ========================
@@ -938,7 +947,7 @@ func handleHTTP(conn net.Conn, clientAddr string, firstByte byte) {
 	switch method {
 	case "CONNECT":
 		// HTTPS 隧道代理 - 需要发送 200 响应
-		log.Printf("[HTTP-CONNECT] %s -> %s", clientAddr, requestURL)
+		logV("[HTTP-CONNECT] %s -> %s", clientAddr, requestURL)
 		if err := handleTunnel(conn, requestURL, clientAddr, modeHTTPConnect, ""); err != nil {
 			if !isNormalCloseError(err) {
 				log.Printf("[HTTP-CONNECT] %s 代理失败: %v", clientAddr, err)
@@ -947,7 +956,7 @@ func handleHTTP(conn net.Conn, clientAddr string, firstByte byte) {
 
 	case "GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "TRACE":
 		// HTTP 代理 - 直接转发，不发送 200 响应
-		log.Printf("[HTTP-%s] %s -> %s", method, clientAddr, requestURL)
+		logV("[HTTP-%s] %s -> %s", method, clientAddr, requestURL)
 
 		var target string
 		var path string
@@ -1072,7 +1081,7 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 		return err
 	}
 
-	log.Printf("[代理] %s 已连接: %s", clientAddr, target)
+	logV("[代理] %s 已连接: %s", clientAddr, target)
 
 	// 双向转发
 	done := make(chan bool, 2)
@@ -1115,7 +1124,7 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 	}()
 
 	<-done
-	log.Printf("[代理] %s 已断开: %s", clientAddr, target)
+	logV("[代理] %s 已断开: %s", clientAddr, target)
 	return nil
 }
 
