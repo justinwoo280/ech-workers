@@ -407,7 +407,6 @@ func handleYamuxWithFirstFrame(conn *websocket.Conn, firstFrame []byte) {
 	cfg.EnableKeepAlive = true
 	cfg.KeepAliveInterval = 30 * time.Second
 	cfg.MaxStreamWindowSize = 4 * 1024 * 1024
-	cfg.InitialWindowSize = 512 * 1024
 	cfg.StreamOpenTimeout = 15 * time.Second
 	cfg.StreamCloseTimeout = 5 * time.Second
 
@@ -417,22 +416,6 @@ func handleYamuxWithFirstFrame(conn *websocket.Conn, firstFrame []byte) {
 		return
 	}
 	defer session.Close()
-
-	// 启动定期内存回收
-	stopShrink := make(chan struct{})
-	defer close(stopShrink)
-	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				session.Shrink()
-			case <-stopShrink:
-				return
-			}
-		}
-	}()
 
 	// Accept streams
 	for {
@@ -492,7 +475,6 @@ func handleYamux(conn *websocket.Conn) {
 	cfg.EnableKeepAlive = true
 	cfg.KeepAliveInterval = 30 * time.Second
 	cfg.MaxStreamWindowSize = 4 * 1024 * 1024
-	cfg.InitialWindowSize = 512 * 1024
 	cfg.StreamOpenTimeout = 15 * time.Second
 	cfg.StreamCloseTimeout = 5 * time.Second
 
@@ -502,22 +484,6 @@ func handleYamux(conn *websocket.Conn) {
 		return
 	}
 	defer session.Close()
-
-	// 启动定期内存回收
-	stopShrink := make(chan struct{})
-	defer close(stopShrink)
-	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				session.Shrink()
-			case <-stopShrink:
-				return
-			}
-		}
-	}()
 
 	// Accept streams
 	for {

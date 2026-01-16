@@ -189,7 +189,6 @@ func (t *WebSocketTransport) Dial() (TunnelConn, error) {
 	cfg.EnableKeepAlive = true
 	cfg.KeepAliveInterval = 30 * time.Second
 	cfg.MaxStreamWindowSize = 4 * 1024 * 1024
-	cfg.InitialWindowSize = 512 * 1024
 	cfg.StreamOpenTimeout = 15 * time.Second
 	cfg.StreamCloseTimeout = 5 * time.Second
 
@@ -217,24 +216,8 @@ func (t *WebSocketTransport) Dial() (TunnelConn, error) {
 }
 
 func (t *WebSocketTransport) startShrinkWorker() {
-	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ticker.C:
-				t.sessionMu.Lock()
-				if t.session != nil && !t.session.IsClosed() {
-					t.session.Shrink()
-					log.Printf("[Yamux] 内存回收完成")
-				}
-				t.sessionMu.Unlock()
-			case <-t.stopShrink:
-				return
-			}
-		}
-	}()
+	// Note: yamux.Stream.Shrink() 存在，但 Session 无公开 API 获取所有流
+	// 暂不实现定期回收，由 GC 自动处理
 }
 
 func (t *WebSocketTransport) Close() error {
