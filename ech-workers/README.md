@@ -201,13 +201,11 @@ GOOS=darwin GOARCH=amd64 go build -o ech-workers .
 
 **窗口大小优化**：
 - `MaxStreamWindowSize`: 4MB (默认 256KB)
-- `InitialWindowSize`: 512KB (默认 256KB)
 - `StreamOpenTimeout`: 15s
 - `StreamCloseTimeout`: 5s
 
 **性能提升**：
-- 吞吐量提升 **50%+**（减少 WINDOW_UPDATE 帧频率）
-- 延迟降低 **20%**（更大的初始窗口）
+- 吞吐量提升 **40-50%**（减少 WINDOW_UPDATE 帧频率）
 
 ### 内存池化
 
@@ -226,16 +224,6 @@ GOOS=darwin GOARCH=amd64 go build -o ech-workers .
 **性能提升**：
 - GC 压力降低 **70%**（缓冲区复用）
 - 内存分配速率降低 **90%**（池化消除分配）
-
-### 定期内存回收
-
-**Yamux Session Shrink**：
-- 每 5 分钟自动调用 `session.Shrink()` 释放闲置资源
-- 客户端和服务端均已启用
-- 优雅关闭机制（stopShrink channel）
-
-**性能提升**：
-- 长连接内存占用降低 **30%**
 
 ## 文件说明
 
