@@ -85,6 +85,28 @@ var (
 	sysProxyMode bool
 )
 
+// ======================== Buffer Pool (性能优化) ========================
+
+var (
+	smallBufferPool = sync.Pool{
+		New: func() interface{} {
+			return make([]byte, 512)
+		},
+	}
+
+	largeBufferPool = sync.Pool{
+		New: func() interface{} {
+			return make([]byte, 32*1024)
+		},
+	}
+
+	udpBufferPool = sync.Pool{
+		New: func() interface{} {
+			return make([]byte, 65536)
+		},
+	}
+)
+
 func init() {
 	flag.StringVar(&listenAddr, "l", "127.0.0.1:30000", "代理监听地址 (支持 SOCKS5 和 HTTP)")
 	flag.StringVar(&serverAddr, "f", "", "服务端地址 (格式: x.x.workers.dev:443 或 grpc://host:port)")
@@ -757,7 +779,9 @@ func handleUDPAssociate(tcpConn net.Conn, clientAddr string) {
 }
 
 func handleUDPRelay(udpConn *net.UDPConn, clientAddr string, stopChan chan struct{}) {
-	buf := make([]byte, 65535)
+	buf := udpBufferPool.Get().([]byte)
+	defer udpBufferPool.Put(buf)
+
 	for {
 		select {
 		case <-stopChan:
@@ -1028,12 +1052,13 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 	// 如果没有预设的 firstFrame，尝试读取第一帧数据（仅 SOCKS5）
 	if firstFrame == "" && mode == modeSOCKS5 {
 		_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-		buffer := make([]byte, 32768)
+		buffer := largeBufferPool.Get().([]byte)
 		n, _ := conn.Read(buffer)
 		_ = conn.SetReadDeadline(time.Time{})
 		if n > 0 {
 			firstFrame = string(buffer[:n])
 		}
+		largeBufferPool.Put(buffer)
 	}
 
 	// 发送连接请求（使用 Transport 抽象）
@@ -1054,7 +1079,9 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 
 	// Client -> Server (上传)
 	go func() {
-		buf := make([]byte, 32768)
+		buf := largeBufferPool.Get().([]byte)
+		defer largeBufferPool.Put(buf)
+
 		for {
 			n, err := conn.Read(buf)
 			if err != nil {
@@ -1530,7 +1557,9 @@ func handleTCPConnection(ep tcpip.Endpoint, wq *waiter.Queue) {
 
 	// Client -> Server
 	go func() {
-		buf := make([]byte, 32768)
+		buf := largeBufferPool.Get().([]byte)
+		defer largeBufferPool.Put(buf)
+
 		for {
 			n, err := conn.Read(buf)
 			if err != nil {

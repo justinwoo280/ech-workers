@@ -146,8 +146,12 @@ public sealed class CoreProcessService
                 var url = $"http://{_controlAddr}/quit";
                 _ = await client.PostAsync(url, new StringContent(""));
 
-                // 给内核一点时间做清理并退出
-                await Task.Delay(1500);
+                // 等待进程优雅退出（最多 3 秒）
+                var maxWait = 30; // 30 * 100ms = 3s
+                for (var i = 0; i < maxWait && IsRunning; i++)
+                {
+                    await Task.Delay(100);
+                }
             }
             catch
             {
@@ -182,7 +186,7 @@ public sealed class CoreProcessService
 
         _logTailTask = Task.Run(async () =>
         {
-            // 等待文件出现
+            // 等待文件出现（最多 5 秒）
             for (var i = 0; i < 50 && !File.Exists(logFilePath) && !token.IsCancellationRequested; i++)
             {
                 await Task.Delay(100, token);
@@ -198,14 +202,15 @@ public sealed class CoreProcessService
 
             while (!token.IsCancellationRequested)
             {
-                var line = await reader.ReadLineAsync();
-                if (line == null)
+                string? line;
+                while ((line = await reader.ReadLineAsync()) != null)
                 {
-                    await Task.Delay(100, token);
-                    continue;
+                    HandleLogLine(line);
+                    if (token.IsCancellationRequested) return;
                 }
 
-                HandleLogLine(line);
+                // 只有在没有新数据时才等待
+                await Task.Delay(50, token);
             }
         }, token);
     }

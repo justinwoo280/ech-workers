@@ -149,25 +149,20 @@ public partial class MainWindow : Window
             await _viewModel.StopCoreAsync();
         }
 
-        // 清理托盘图标
-        if (_trayIcon != null)
-        {
-            _trayIcon.Dispose();
-            _trayIcon = null;
-        }
-
+        CleanupTrayIcon();
         Application.Current.Shutdown();
     }
 
     protected override void OnClosed(EventArgs e)
     {
-        // 清理托盘图标
-        if (_trayIcon != null)
-        {
-            _trayIcon.Dispose();
-            _trayIcon = null;
-        }
-
+        CleanupTrayIcon();
         base.OnClosed(e);
+    }
+
+    private void CleanupTrayIcon()
+    {
+        if (_trayIcon == null) return;
+        _trayIcon.Dispose();
+        _trayIcon = null;
     }
 }

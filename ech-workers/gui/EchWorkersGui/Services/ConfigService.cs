@@ -57,6 +57,10 @@ public sealed class ConfigService
     public void Save(AppConfig config)
     {
         var json = JsonSerializer.Serialize(config, JsonOptions);
-        File.WriteAllText(ConfigFilePath, json);
+        
+        // 原子性写入：先写临时文件，成功后替换原文件
+        var tempPath = ConfigFilePath + ".tmp";
+        File.WriteAllText(tempPath, json);
+        File.Move(tempPath, ConfigFilePath, overwrite: true);
     }
 }

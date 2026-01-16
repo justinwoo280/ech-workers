@@ -7,6 +7,7 @@ const WS_READY_STATE_CLOSING = 2;
 const CF_FALLBACK_IPS = ['[2a00:1098:2b::1:6815:5881]'];
 
 const encoder = new TextEncoder();
+const BUFFER_SIZE = 64 * 1024;
 
 import { connect } from 'cloudflare:sockets';
 

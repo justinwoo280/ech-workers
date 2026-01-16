@@ -38,7 +38,14 @@ public partial class App : Application
             Directory.CreateDirectory(logDir);
             var logFile = Path.Combine(logDir, "crash.log");
             var msg = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {source}\n{ex}\n\n";
-            File.AppendAllText(logFile, msg);
+            
+            // 使用 FileStream 追加，避免文件锁冲突
+            using (var fs = new FileStream(logFile, FileMode.Append, FileAccess.Write, FileShare.Read))
+            using (var writer = new StreamWriter(fs))
+            {
+                writer.Write(msg);
+            }
+            
             MessageBox.Show($"发生错误，已记录到:\n{logFile}\n\n{ex?.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         catch

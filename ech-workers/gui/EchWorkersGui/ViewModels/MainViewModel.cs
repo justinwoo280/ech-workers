@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
@@ -17,7 +18,8 @@ public sealed class MainViewModel : ObservableObject
     private readonly ConfigService _configService = new();
     private readonly CoreProcessService _core = new();
 
-    private readonly StringBuilder _logBuffer = new();
+    private readonly Queue<string> _logLines = new();
+    private const int MaxLogLines = 5000;
 
     public GlobalConfig Global { get; }
 
@@ -94,19 +96,14 @@ public sealed class MainViewModel : ObservableObject
 
     private void AppendLog(string line)
     {
-        // 简单环形：最多保留约 5000 行
-        _logBuffer.AppendLine(line);
-        var text = _logBuffer.ToString();
-        var lines = text.Split('\n');
-        if (lines.Length > 5000)
+        _logLines.Enqueue(line);
+        
+        while (_logLines.Count > MaxLogLines)
         {
-            var trimmed = string.Join('\n', lines.Skip(lines.Length - 5000));
-            _logBuffer.Clear();
-            _logBuffer.Append(trimmed);
-            text = _logBuffer.ToString();
+            _logLines.Dequeue();
         }
 
-        LogText = text;
+        LogText = string.Join(Environment.NewLine, _logLines);
     }
 
     private void AddNode()
@@ -283,8 +280,6 @@ public sealed class MainViewModel : ObservableObject
         _isRunning = true;
         StatusText = "运行中";
         RaiseCommandStates();
-
-        await Task.CompletedTask;
     }
 
     private async Task StopCoreInternalAsync()

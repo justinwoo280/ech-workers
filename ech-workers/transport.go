@@ -22,6 +22,14 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
+// ======================== Buffer Pool (性能优化) ========================
+
+var bufferPool = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, 32*1024)
+	},
+}
+
 // ======================== Transport 接口定义 ========================
 
 // TunnelConn 表示一个隧道连接（抽象接口）
@@ -56,20 +64,28 @@ type WebSocketTransport struct {
 	useECH     bool
 	useYamux   bool
 	// Yamux session 管理
-	sessionMu sync.Mutex
-	session   *yamux.Session
-	wsConn    *websocket.Conn
+	sessionMu  sync.Mutex
+	session    *yamux.Session
+	wsConn     *websocket.Conn
+	stopShrink chan struct{}
 }
 
 func NewWebSocketTransport(serverAddr, serverIP, token string, useECH, useYamux bool) *WebSocketTransport {
-	return &WebSocketTransport{
+	t := &WebSocketTransport{
 		serverAddr: serverAddr,
 		serverIP:   serverIP,
 		token:      token,
 		useTLS:     true,
 		useECH:     useECH,
 		useYamux:   useYamux,
+		stopShrink: make(chan struct{}),
 	}
+
+	if useYamux {
+		t.startShrinkWorker()
+	}
+
+	return t
 }
 
 func (t *WebSocketTransport) Name() string {
@@ -168,10 +184,14 @@ func (t *WebSocketTransport) Dial() (TunnelConn, error) {
 	// 创建 WebSocket 到 net.Conn 的适配器
 	wsNetConn := &wsConnAdapter{conn: wsConn}
 
-	// 创建 Yamux client session
+	// 创建 Yamux client session（性能优化配置）
 	cfg := yamux.DefaultConfig()
 	cfg.EnableKeepAlive = true
 	cfg.KeepAliveInterval = 30 * time.Second
+	cfg.MaxStreamWindowSize = 4 * 1024 * 1024
+	cfg.InitialWindowSize = 512 * 1024
+	cfg.StreamOpenTimeout = 15 * time.Second
+	cfg.StreamCloseTimeout = 5 * time.Second
 
 	session, err := yamux.Client(wsNetConn, cfg)
 	if err != nil {
@@ -194,6 +214,46 @@ func (t *WebSocketTransport) Dial() (TunnelConn, error) {
 
 	log.Printf("[Yamux] 新建 session 并打开 stream")
 	return &YamuxStreamConn{stream: stream}, nil
+}
+
+func (t *WebSocketTransport) startShrinkWorker() {
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				t.sessionMu.Lock()
+				if t.session != nil && !t.session.IsClosed() {
+					t.session.Shrink()
+					log.Printf("[Yamux] 内存回收完成")
+				}
+				t.sessionMu.Unlock()
+			case <-t.stopShrink:
+				return
+			}
+		}
+	}()
+}
+
+func (t *WebSocketTransport) Close() error {
+	close(t.stopShrink)
+
+	t.sessionMu.Lock()
+	defer t.sessionMu.Unlock()
+
+	if t.session != nil {
+		t.session.Close()
+		t.session = nil
+	}
+
+	if t.wsConn != nil {
+		t.wsConn.Close()
+		t.wsConn = nil
+	}
+
+	return nil
 }
 
 // dialSimple 简单 WebSocket 协议（兼容 Cloudflare Workers）
@@ -424,12 +484,17 @@ func (c *YamuxStreamConn) Connect(target string, initialData []byte) error {
 }
 
 func (c *YamuxStreamConn) Read() ([]byte, error) {
-	buf := make([]byte, 32*1024)
+	buf := bufferPool.Get().([]byte)
+	defer bufferPool.Put(buf)
+
 	n, err := c.stream.Read(buf)
 	if err != nil {
 		return nil, err
 	}
-	return buf[:n], nil
+
+	data := make([]byte, n)
+	copy(data, buf[:n])
+	return data, nil
 }
 
 func (c *YamuxStreamConn) Write(data []byte) error {
