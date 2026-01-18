@@ -76,6 +76,38 @@ jobs:
           name: proxy-server
           path: artifacts/proxy-server-*
 
+  build-proxy-server-tls:
+    name: Build Proxy Server TLS (proxy-server-tls)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: proxy-server-tls
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Prepare artifacts dir
+        run: mkdir -p ../artifacts
+
+      - name: Go mod tidy
+        run: go mod tidy
+
+      - name: Build Windows amd64
+        run: GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o ../artifacts/proxy-server-tls-windows-amd64.exe .
+
+      - name: Build Linux amd64
+        run: GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o ../artifacts/proxy-server-tls-linux-amd64 .
+
+      - name: Upload Proxy Server TLS Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: proxy-server-tls
+          path: artifacts/proxy-server-tls-*
+
   build-gui:
     name: Build GUI (Windows)
     runs-on: windows-latest
@@ -113,7 +145,7 @@ jobs:
 
   release:
     name: Create Release
-    needs: [build-client-kernel, build-proxy-server, build-gui]
+    needs: [build-client-kernel, build-proxy-server, build-proxy-server-tls, build-gui]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
@@ -135,6 +167,12 @@ jobs:
         with:
           name: proxy-server
           path: server
+
+      - name: Download Proxy Server TLS
+        uses: actions/download-artifact@v4
+        with:
+          name: proxy-server-tls
+          path: server-tls
 
       - name: Download GUI x64
         uses: actions/download-artifact@v4
@@ -176,6 +214,16 @@ jobs:
           cp server/proxy-server-linux-amd64 tmp/server-linux-amd64/proxy-server
           (cd tmp/server-linux-amd64 && zip -r ../../release/proxy-server-linux-amd64.zip .)
 
+          # Server TLS Windows amd64
+          mkdir -p tmp/server-tls-win-amd64
+          cp server-tls/proxy-server-tls-windows-amd64.exe tmp/server-tls-win-amd64/proxy-server-tls.exe
+          (cd tmp/server-tls-win-amd64 && zip -r ../../release/proxy-server-tls-windows-amd64.zip .)
+
+          # Server TLS Linux amd64
+          mkdir -p tmp/server-tls-linux-amd64
+          cp server-tls/proxy-server-tls-linux-amd64 tmp/server-tls-linux-amd64/proxy-server-tls
+          (cd tmp/server-tls-linux-amd64 && zip -r ../../release/proxy-server-tls-linux-amd64.zip .)
+
           ls -lh release/
 
       - name: Create Release
@@ -188,7 +236,8 @@ jobs:
             ## 📦 下载说明
 
             - **ech-workers-client-*.zip** - 客户端完整包（GUI + 内核 + wintun.dll）
-            - **proxy-server-*.zip** - 代理服务端
+            - **proxy-server-*.zip** - 代理服务端（HTTP/WebSocket）
+            - **proxy-server-tls-*.zip** - 代理服务端 TLS 版本（gRPC over TLS + HTTP/2，配合 cloudflared tunnel 使用）
 
             ## ✨ 特性
 
@@ -196,3 +245,4 @@ jobs:
             - 支持 Yamux 多路复用协议
             - 支持 SOCKS5 / HTTP 代理
             - 支持 TUN 模式（全局代理）
+            - gRPC 模式支持 TLS 自签名证书（适配 cloudflared --no-tls-verify）
