@@ -708,6 +708,16 @@ var (
 )
 
 func startXHTTPServer() {
+	cert, err := generateSelfSignedCert()
+	if err != nil {
+		log.Fatalf("❌ Failed to generate self-signed cert: %v", err)
+	}
+
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/healthz", healthHandler)
@@ -717,12 +727,14 @@ func startXHTTPServer() {
 	mux.HandleFunc("/", disguiseHandler)
 
 	server := &http.Server{
-		Addr:    ":" + port,
-		Handler: mux,
+		Addr:      ":" + port,
+		Handler:   mux,
+		TLSConfig: tlsConfig,
 	}
 
 	go cleanupExpiredSessions()
-	log.Fatal(server.ListenAndServe())
+	log.Println("🔒 XHTTP server with TLS enabled")
+	log.Fatal(server.ListenAndServeTLS("", ""))
 }
 
 func xhttpHandler(w http.ResponseWriter, r *http.Request) {
