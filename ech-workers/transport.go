@@ -1085,8 +1085,9 @@ func (t *XHTTPTransport) dialStreamOne() (TunnelConn, error) {
 			}
 			return tls.Client(rawConn, tlsCfg), nil
 		},
-		IdleConnTimeout: 90 * time.Second,
-		ReadIdleTimeout: 30 * time.Second,
+		IdleConnTimeout:            90 * time.Second,
+		ReadIdleTimeout:            30 * time.Second,
+		StrictMaxConcurrentStreams: true, // 防止流重试导致 PROTOCOL_ERROR
 	}
 
 	httpClient := &http.Client{
@@ -1349,8 +1350,9 @@ func (t *XHTTPTransport) dialStreamDown() (TunnelConn, error) {
 			}
 			return tls.Client(rawConn, tlsCfg), nil
 		},
-		IdleConnTimeout: 90 * time.Second,
-		ReadIdleTimeout: 30 * time.Second,
+		IdleConnTimeout:            90 * time.Second,
+		ReadIdleTimeout:            30 * time.Second,
+		StrictMaxConcurrentStreams: true, // 防止流重试导致 PROTOCOL_ERROR
 	}
 
 	httpClient := &http.Client{

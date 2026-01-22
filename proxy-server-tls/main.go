@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/binary"
 	"encoding/pem"
 	"flag"
 	"fmt"
@@ -525,9 +526,12 @@ func startXHTTPServer() {
 	mux.HandleFunc("/", disguiseHandler)
 
 	server := &http.Server{
-		Addr:      ":" + port,
-		Handler:   mux,
-		TLSConfig: tlsConfig,
+		Addr:              ":" + port,
+		Handler:           mux,
+		TLSConfig:         tlsConfig,
+		ReadHeaderTimeout: 30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		// 注意：不设置 ReadTimeout 和 WriteTimeout，因为 stream-one 是长连接
 	}
 
 	go cleanupExpiredSessions()
@@ -644,19 +648,67 @@ func cleanupExpiredSessions() {
 }
 
 func xhttpStreamOneHandler(w http.ResponseWriter, r *http.Request) {
-	buf := smallBufferPool.Get().([]byte)
-	n, err := r.Body.Read(buf)
-	if err != nil && err != io.EOF {
-		smallBufferPool.Put(buf)
+	// 获取客户端 IP
+	clientIP := r.RemoteAddr
+	if idx := strings.LastIndex(clientIP, ":"); idx != -1 {
+		clientIP = clientIP[:idx]
+	}
+
+	// 读取 EWP 握手请求（先读取 15 字节头部获取长度）
+	header := make([]byte, 15)
+	if _, err := io.ReadFull(r.Body, header); err != nil {
+		log.Printf("❌ XHTTP stream-one: Failed to read header: %v", err)
 		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
 
-	target, extraData := parseConnect(buf[:n])
-	smallBufferPool.Put(buf)
+	// 解析长度字段
+	plaintextLen := binary.BigEndian.Uint16(header[13:15])
+	totalLen := 15 + int(plaintextLen) + 16 + 16 // header + ciphertext + poly1305tag + hmac
 
-	if target == "" {
-		http.Error(w, "Invalid target", http.StatusBadRequest)
+	// 读取完整握手数据
+	handshakeData := make([]byte, totalLen)
+	copy(handshakeData[:15], header)
+	if _, err := io.ReadFull(r.Body, handshakeData[15:]); err != nil {
+		log.Printf("❌ XHTTP stream-one: Failed to read handshake: %v", err)
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return
+	}
+
+	// 处理 EWP 握手
+	req, respData, err := handleEWPHandshakeBinary(handshakeData, clientIP)
+	if err != nil {
+		log.Printf("❌ XHTTP stream-one: EWP handshake failed: %v", err)
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write(respData)
+		return
+	}
+
+	target := req.TargetAddr.String()
+
+	// 检查是否是 UDP 模式
+	if req.Command == ewp.CommandUDP {
+		log.Printf("📦 stream-one UDP mode")
+		
+		// 发送 EWP 握手响应
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(http.StatusOK)
+		
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			return
+		}
+		
+		if _, err := w.Write(respData); err != nil {
+			log.Printf("❌ Failed to send handshake response: %v", err)
+			return
+		}
+		flusher.Flush()
+		
+		// 处理 UDP 流
+		HandleUDPConnection(r.Body, &flushWriter{w: w, f: flusher})
 		return
 	}
 
@@ -670,6 +722,7 @@ func xhttpStreamOneHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer remote.Close()
 
+	// 发送 EWP 握手响应
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/octet-stream")
@@ -679,29 +732,55 @@ func xhttpStreamOneHandler(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+
+	// 先发送握手响应
+	if _, err := w.Write(respData); err != nil {
+		log.Printf("❌ Failed to send handshake response: %v", err)
+		return
+	}
 	flusher.Flush()
 
-	if len(extraData) > 0 {
-		remote.Write(extraData)
-	}
+	// 初始化 Vision 流控状态
+	flowState := ewp.NewFlowState(req.UUID[:])
 
 	done := make(chan struct{}, 2)
 
-	go func() {
-		defer func() { done <- struct{}{} }()
-		buf := largeBufferPool.Get().([]byte)
-		defer largeBufferPool.Put(buf)
-		io.CopyBuffer(remote, r.Body, buf)
-	}()
-
+	// HTTP/2 body -> remote (uplink: 解包 Vision 填充)
 	go func() {
 		defer func() { done <- struct{}{} }()
 		buf := largeBufferPool.Get().([]byte)
 		defer largeBufferPool.Put(buf)
 		for {
+			n, err := r.Body.Read(buf)
+			if n > 0 {
+				// 处理 Vision 流控（自动检测并解包）
+				processedData := flowState.ProcessUplink(buf[:n])
+				if len(processedData) > 0 {
+					if _, e := remote.Write(processedData); e != nil {
+						return
+					}
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	// remote -> HTTP/2 body (downlink: 添加 Vision 填充)
+	go func() {
+		defer func() { done <- struct{}{} }()
+		buf := largeBufferPool.Get().([]byte)
+		defer largeBufferPool.Put(buf)
+		writeOnceUserUUID := make([]byte, 16)
+		copy(writeOnceUserUUID, req.UUID[:])
+
+		for {
 			n, err := remote.Read(buf)
 			if n > 0 {
-				if _, e := w.Write(buf[:n]); e != nil {
+				// 应用 Vision 流控填充
+				paddedData := flowState.PadDownlink(buf[:n], &writeOnceUserUUID)
+				if _, e := w.Write(paddedData); e != nil {
 					return
 				}
 				flusher.Flush()
@@ -712,7 +791,9 @@ func xhttpStreamOneHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	// 等待任意一个方向完成（表示连接应该关闭）
 	<-done
+	// 注意：不需要等待两个 done，因为一方关闭后另一方也会因为读写错误而退出
 	log.Printf("✅ stream-one closed: %s", target)
 }
 
@@ -877,4 +958,18 @@ func generatePadding(minLen, maxLen int) string {
 		padding[i] = chars[padding[i]%byte(len(chars))]
 	}
 	return string(padding)
+}
+
+// flushWriter 实现自动 flush 的 Writer
+type flushWriter struct {
+	w io.Writer
+	f http.Flusher
+}
+
+func (fw *flushWriter) Write(p []byte) (int, error) {
+	n, err := fw.w.Write(p)
+	if err == nil && fw.f != nil {
+		fw.f.Flush()
+	}
+	return n, err
 }

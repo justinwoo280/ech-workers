@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"encoding/binary"
 	"flag"
 	"fmt"
 	"io"
@@ -235,11 +236,15 @@ func startXHTTPServer() {
 	mux.HandleFunc("/", disguiseHandler)
 
 	server := &http.Server{
-		Addr:    ":" + port,
-		Handler: mux,
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadHeaderTimeout: 30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		// 注意：不设置 ReadTimeout 和 WriteTimeout，因为 stream-one 是长连接
 	}
 
 	go cleanupExpiredSessions()
+	log.Println("� XHTTP server listening (no TLS, behind Cloudflare)")
 	log.Fatal(server.ListenAndServe())
 }
 
@@ -352,18 +357,24 @@ func cleanupExpiredSessions() {
 }
 
 func xhttpStreamOneHandler(w http.ResponseWriter, r *http.Request) {
-	// 读取 EWP 握手请求
-	buf := smallBufferPool.Get().([]byte)
-	n, err := r.Body.Read(buf)
-	if err != nil && err != io.EOF {
-		smallBufferPool.Put(buf)
+	// 读取 EWP 握手请求（先读取 15 字节头部获取长度）
+	header := make([]byte, 15)
+	if _, err := io.ReadFull(r.Body, header); err != nil {
 		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
 
-	handshakeData := make([]byte, n)
-	copy(handshakeData, buf[:n])
-	smallBufferPool.Put(buf)
+	// 解析长度字段
+	plaintextLen := binary.BigEndian.Uint16(header[13:15])
+	totalLen := 15 + int(plaintextLen) + 16 + 16 // header + ciphertext + poly1305tag + hmac
+	
+	// 读取完整握手数据
+	handshakeData := make([]byte, totalLen)
+	copy(handshakeData[:15], header)
+	if _, err := io.ReadFull(r.Body, handshakeData[15:]); err != nil {
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return
+	}
 
 	// 处理 EWP 握手
 	req, respData, err := handleEWPHandshakeBinary(handshakeData)
@@ -375,6 +386,33 @@ func xhttpStreamOneHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	target := req.TargetAddr.String()
+
+	// 检查是否是 UDP 模式
+	if req.Command == ewp.CommandUDP {
+		log.Printf("📦 stream-one UDP mode")
+		
+		// 发送 EWP 握手响应
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(http.StatusOK)
+		
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			return
+		}
+		
+		if _, err := w.Write(respData); err != nil {
+			log.Printf("❌ Failed to send handshake response: %v", err)
+			return
+		}
+		flusher.Flush()
+		
+		// 处理 UDP 流
+		HandleUDPConnection(r.Body, &flushWriter{w: w, f: flusher})
+		return
+	}
+
 	log.Printf("🔗 stream-one: %s", target)
 
 	remote, err := net.Dial("tcp", target)
@@ -839,4 +877,18 @@ func handleSimpleProtocol(conn *websocket.Conn, firstMsg []byte) {
 	<-done
 	// 发送关闭消息
 	conn.WriteMessage(websocket.TextMessage, []byte("CLOSE"))
+}
+
+// flushWriter 实现自动 flush 的 Writer
+type flushWriter struct {
+	w io.Writer
+	f http.Flusher
+}
+
+func (fw *flushWriter) Write(p []byte) (int, error) {
+	n, err := fw.w.Write(p)
+	if err == nil && fw.f != nil {
+		fw.f.Flush()
+	}
+	return n, err
 }
