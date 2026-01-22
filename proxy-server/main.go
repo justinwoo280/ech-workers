@@ -361,7 +361,8 @@ func xhttpStreamOneHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	handshakeData := buf[:n]
+	handshakeData := make([]byte, n)
+	copy(handshakeData, buf[:n])
 	smallBufferPool.Put(buf)
 
 	// 处理 EWP 握手
