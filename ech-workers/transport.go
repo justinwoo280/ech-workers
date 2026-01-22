@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"encoding/hex"
 	"errors"
@@ -1369,7 +1370,10 @@ func (t *XHTTPTransport) dialStreamDown() (TunnelConn, error) {
 		Timeout:   0,
 	}
 
-	sessionID := fmt.Sprintf("%x", t.uuid[:8])
+	// 为每个连接生成唯一的 sessionID（UUID前缀 + 随机后缀）
+	randomBytes := make([]byte, 8)
+	rand.Read(randomBytes)
+	sessionID := fmt.Sprintf("%x%x", t.uuid[:4], randomBytes)
 
 	return &XHTTPStreamDownConn{
 		httpClient: httpClient,
