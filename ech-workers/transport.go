@@ -1159,6 +1159,10 @@ func (c *XHTTPStreamOneConn) Connect(target string, initialData []byte) error {
 	// 构造请求 URL
 	reqURL := fmt.Sprintf("https://%s:%s%s?x_padding=%s", c.host, c.port, c.path, padding)
 	
+	// 调试：打印 XHTTP stream-one 请求信息
+	fmt.Printf("[DEBUG] XHTTP stream-one: POST %s\n", reqURL)
+	fmt.Printf("[DEBUG] X-Auth-Token: %s\n", c.uuidStr)
+	
 	req, err := http.NewRequest("POST", reqURL, c.pipeReader)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
