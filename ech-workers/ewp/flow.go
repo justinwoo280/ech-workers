@@ -6,8 +6,6 @@ import (
 	"encoding/binary"
 	"io"
 	"math/big"
-
-	"github.com/xtls/xray-core/common/errors"
 )
 
 // EWP Flow Protocol - Vision-based flow control
