@@ -1083,19 +1083,21 @@ func (t *XHTTPTransport) dialStreamOne() (TunnelConn, error) {
 			if err != nil {
 				return nil, err
 			}
-			tlsConn := tls.Client(rawConn, tlsCfg)
-			if err := tlsConn.Handshake(); err != nil {
-				rawConn.Close()
-				return nil, err
-			}
-			return tlsConn, nil
+			return tls.Client(rawConn, tlsCfg), nil
 		},
+		IdleConnTimeout: 90 * time.Second,
+		ReadIdleTimeout: 30 * time.Second,
+	}
+
+	httpClient := &http.Client{
+		Transport: h2Transport,
+		Timeout:   0,
 	}
 
 	logV("[XHTTP] HTTP/2 transport ready for %s", host)
 
 	return &XHTTPStreamOneConn{
-		h2Transport: h2Transport,
+		httpClient: httpClient,
 		host:        host,
 		port:        port,
 		path:        t.path,
@@ -1113,15 +1115,15 @@ func (t *XHTTPTransport) Close() error {
 
 // XHTTPStreamOneConn XHTTP stream-one模式连接（HTTP/2 双向流）
 type XHTTPStreamOneConn struct {
-	h2Transport *http2.Transport
-	host        string
-	port        string
-	path        string
-	uuid        [16]byte
-	uuidStr     string
-	enableFlow  bool
-	paddingMin  int
-	paddingMax  int
+	httpClient *http.Client
+	host       string
+	port       string
+	path       string
+	uuid       [16]byte
+	uuidStr    string
+	enableFlow bool
+	paddingMin int
+	paddingMax int
 	
 	pipeReader *io.PipeReader
 	pipeWriter *io.PipeWriter
@@ -1158,46 +1160,49 @@ func (c *XHTTPStreamOneConn) Connect(target string, initialData []byte) error {
 	req.Header.Set("X-Auth-Token", c.uuidStr)
 	req.Header.Set("Content-Type", "application/octet-stream")
 
-	// 初始化 Flow State
+	// 构造 EWP 握手请求
+	addr, err := ewp.ParseAddress(target)
+	if err != nil {
+		return fmt.Errorf("parse address: %w", err)
+	}
+	
+	ewpReq := ewp.NewHandshakeRequest(c.uuid, ewp.CommandTCP, addr)
+	handshakeData, err := ewpReq.Encode()
+	if err != nil {
+		return fmt.Errorf("encode EWP handshake: %w", err)
+	}
+	
+	// 初始化 Flow State（握手完成后才启用）
 	if c.enableFlow {
 		c.flowState = ewp.NewFlowState(c.uuid[:])
 		c.writeOnceUserUUID = make([]byte, 16)
 		copy(c.writeOnceUserUUID, c.uuid[:])
 	}
-
-	// 异步发送请求
+	
+	// 异步发送请求并等待连接建立
+	connEstablished := make(chan struct{})
 	respChan := make(chan *http.Response, 1)
 	errChan := make(chan error, 1)
 	
 	go func() {
-		resp, err := c.h2Transport.RoundTrip(req)
+		resp, err := c.httpClient.Do(req)
+		close(connEstablished)
 		if err != nil {
 			errChan <- err
 			return
 		}
 		respChan <- resp
 	}()
-
-	// 构造连接数据: "CONNECT:host:port\n" + initialData
-	addr, err := ewp.ParseAddress(target)
-	if err != nil {
-		return fmt.Errorf("parse address: %w", err)
-	}
 	
-	connectMsg := fmt.Sprintf("CONNECT:%s\n", addr.String())
-	var connectData []byte
-	if len(initialData) > 0 {
-		connectData = append([]byte(connectMsg), initialData...)
-	} else {
-		connectData = []byte(connectMsg)
+	// 发送 EWP 握手数据（立即发送）
+	if _, err := c.pipeWriter.Write(handshakeData); err != nil {
+		return fmt.Errorf("send EWP handshake: %w", err)
 	}
 
-	// 发送 CONNECT 消息
-	if _, err := c.pipeWriter.Write(connectData); err != nil {
-		return fmt.Errorf("send connect data: %w", err)
-	}
-
-	// 等待响应
+	// 等待连接建立
+	<-connEstablished
+	
+	// 检查是否有错误或获取响应
 	select {
 	case resp := <-respChan:
 		if resp.StatusCode != http.StatusOK {
@@ -1208,12 +1213,35 @@ func (c *XHTTPStreamOneConn) Connect(target string, initialData []byte) error {
 		c.respBody = resp.Body
 	case err := <-errChan:
 		return fmt.Errorf("http request failed: %w", err)
-	case <-time.After(10 * time.Second):
+	case <-time.After(5 * time.Second):
 		return errors.New("connect timeout")
+	}
+	
+	// 读取 EWP 握手响应
+	handshakeResp := make([]byte, 64)
+	n, err := c.respBody.Read(handshakeResp)
+	if err != nil {
+		return fmt.Errorf("read EWP handshake response: %w", err)
+	}
+	
+	resp, err := ewp.DecodeHandshakeResponse(handshakeResp[:n], ewpReq.Version, ewpReq.Nonce, c.uuid)
+	if err != nil {
+		return fmt.Errorf("decode EWP handshake response: %w", err)
+	}
+	
+	if resp.Status != ewp.StatusOK {
+		return fmt.Errorf("EWP handshake failed with status: %d", resp.Status)
+	}
+	
+	// 握手成功，发送初始数据（如果有）
+	if len(initialData) > 0 {
+		if err := c.Write(initialData); err != nil {
+			return fmt.Errorf("send initial data: %w", err)
+		}
 	}
 
 	c.connected = true
-	logV("[XHTTP] stream-one 连接成功，目标: %s", target)
+	logV("[XHTTP] stream-one EWP 握手成功，目标: %s", target)
 	return nil
 }
 
@@ -1319,19 +1347,21 @@ func (t *XHTTPTransport) dialStreamDown() (TunnelConn, error) {
 			if err != nil {
 				return nil, err
 			}
-			tlsConn := tls.Client(rawConn, tlsCfg)
-			if err := tlsConn.Handshake(); err != nil {
-				rawConn.Close()
-				return nil, err
-			}
-			return tlsConn, nil
+			return tls.Client(rawConn, tlsCfg), nil
 		},
+		IdleConnTimeout: 90 * time.Second,
+		ReadIdleTimeout: 30 * time.Second,
+	}
+
+	httpClient := &http.Client{
+		Transport: h2Transport,
+		Timeout:   0,
 	}
 
 	sessionID := fmt.Sprintf("%x", t.uuid[:8])
 
 	return &XHTTPStreamDownConn{
-		h2Transport: h2Transport,
+		httpClient: httpClient,
 		host:        host,
 		port:        port,
 		path:        t.path,
@@ -1346,22 +1376,22 @@ func (t *XHTTPTransport) dialStreamDown() (TunnelConn, error) {
 }
 
 type XHTTPStreamDownConn struct {
-	h2Transport   *http2.Transport
-	host          string
-	port          string
-	path          string
-	uuid          [16]byte
-	uuidStr       string
-	sessionID     string
-	enableFlow    bool
-	paddingMin    int
-	paddingMax    int
-	uploadSeq     uint64
-	respBody      io.ReadCloser
-	uploadMu      sync.Mutex
-	connected     bool
-	mu            sync.Mutex
-	flowState     *ewp.FlowState
+	httpClient *http.Client
+	host       string
+	port       string
+	path       string
+	uuid       [16]byte
+	uuidStr    string
+	sessionID  string
+	enableFlow bool
+	paddingMin int
+	paddingMax int
+	uploadSeq  uint64
+	respBody   io.ReadCloser
+	uploadMu   sync.Mutex
+	connected  bool
+	mu         sync.Mutex
+	flowState  *ewp.FlowState
 	writeOnceUserUUID []byte
 }
 
@@ -1374,41 +1404,88 @@ func (c *XHTTPStreamDownConn) Connect(target string, initialData []byte) error {
 		return fmt.Errorf("parse address: %w", err)
 	}
 
-	paddingLen := c.paddingMin
-	if c.paddingMax > c.paddingMin {
-		paddingLen += int(time.Now().UnixNano() % int64(c.paddingMax-c.paddingMin))
-	}
-	padding := generatePadding(paddingLen)
-
-	// 发起 GET 请求用于下行流
-	reqURL := fmt.Sprintf("https://%s:%s%s/%s?x_padding=%s", c.host, c.port, c.path, c.sessionID, padding)
-	req, err := http.NewRequest("GET", reqURL, nil)
+	// 构造 EWP 握手请求
+	ewpReq := ewp.NewHandshakeRequest(c.uuid, ewp.CommandTCP, addr)
+	handshakeData, err := ewpReq.Encode()
 	if err != nil {
-		return err
+		return fmt.Errorf("encode EWP handshake: %w", err)
 	}
 
-	req.Header.Set("X-Auth-Token", c.uuidStr)
-	req.Header.Set("X-Target", addr.String())
-
-	resp, err := c.h2Transport.RoundTrip(req)
-	if err != nil {
-		return fmt.Errorf("http request failed: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		return fmt.Errorf("http error: %d %s, body: %s", resp.StatusCode, resp.Status, body)
-	}
-
-	c.respBody = resp.Body
-
+	// 初始化 Flow State（握手完成后才启用）
 	if c.enableFlow {
 		c.flowState = ewp.NewFlowState(c.uuid[:])
 		c.writeOnceUserUUID = make([]byte, 16)
 		copy(c.writeOnceUserUUID, c.uuid[:])
 	}
 
+	paddingLen := c.paddingMin
+	if c.paddingMax > c.paddingMin {
+		paddingLen += int(time.Now().UnixNano() % int64(c.paddingMax-c.paddingMin))
+	}
+	padding := generatePadding(paddingLen)
+
+	// 第一步：通过 POST 发送 EWP 握手请求（seq=0）
+	handshakeURL := fmt.Sprintf("https://%s:%s%s/%s/0?x_padding=%s", c.host, c.port, c.path, c.sessionID, padding)
+	handshakeReq, err := http.NewRequest("POST", handshakeURL, bytes.NewReader(handshakeData))
+	if err != nil {
+		return fmt.Errorf("create handshake request: %w", err)
+	}
+
+	handshakeReq.Header.Set("X-Auth-Token", c.uuidStr)
+	handshakeReq.ContentLength = int64(len(handshakeData))
+
+	handshakeResp, err := c.httpClient.Do(handshakeReq)
+	if err != nil {
+		return fmt.Errorf("handshake request failed: %w", err)
+	}
+	defer handshakeResp.Body.Close()
+
+	if handshakeResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(handshakeResp.Body)
+		return fmt.Errorf("handshake http error: %d %s, body: %s", handshakeResp.StatusCode, handshakeResp.Status, body)
+	}
+
+	// 读取 EWP 握手响应
+	handshakeRespData, err := io.ReadAll(handshakeResp.Body)
+	if err != nil {
+		return fmt.Errorf("read handshake response: %w", err)
+	}
+
+	resp, err := ewp.DecodeHandshakeResponse(handshakeRespData, ewpReq.Version, ewpReq.Nonce, c.uuid)
+	if err != nil {
+		return fmt.Errorf("decode EWP handshake response: %w", err)
+	}
+
+	if resp.Status != ewp.StatusOK {
+		return fmt.Errorf("EWP handshake failed with status: %d", resp.Status)
+	}
+
+	c.uploadSeq = 1 // 握手用了seq=0，从1开始计数
+
+	// 第二步：发起 GET 请求建立下行流
+	padding = generatePadding(paddingLen)
+	getURL := fmt.Sprintf("https://%s:%s%s/%s?x_padding=%s", c.host, c.port, c.path, c.sessionID, padding)
+	getReq, err := http.NewRequest("GET", getURL, nil)
+	if err != nil {
+		return fmt.Errorf("create GET request: %w", err)
+	}
+
+	getReq.Header.Set("X-Auth-Token", c.uuidStr)
+
+	getResp, err := c.httpClient.Do(getReq)
+	if err != nil {
+		return fmt.Errorf("GET request failed: %w", err)
+	}
+
+	if getResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(getResp.Body)
+		getResp.Body.Close()
+		return fmt.Errorf("GET http error: %d %s, body: %s", getResp.StatusCode, getResp.Status, body)
+	}
+
+	c.respBody = getResp.Body
+
+	// 发送初始数据（如果有）
 	if len(initialData) > 0 {
 		if err := c.Write(initialData); err != nil {
 			return fmt.Errorf("send initial data: %w", err)
@@ -1416,7 +1493,7 @@ func (c *XHTTPStreamDownConn) Connect(target string, initialData []byte) error {
 	}
 
 	c.connected = true
-	logV("[XHTTP] stream-down 连接成功，目标: %s, SessionID: %s", target, c.sessionID)
+	logV("[XHTTP] stream-down EWP 握手成功，目标: %s, SessionID: %s", target, c.sessionID)
 	return nil
 }
 
@@ -1468,7 +1545,7 @@ func (c *XHTTPStreamDownConn) Write(data []byte) error {
 	req.Header.Set("X-Auth-Token", c.uuidStr)
 	req.ContentLength = int64(len(writeData))
 
-	resp, err := c.h2Transport.RoundTrip(req)
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err
 	}

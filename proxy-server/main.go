@@ -211,10 +211,12 @@ func startGRPCServer() {
 // ======================== XHTTP 服务 (基于 Xray-core 实现) ========================
 
 type xhttpSession struct {
-	remote           net.Conn
-	uploadQueue      *uploadQueue
-	done             chan struct{}
-	isFullyConnected chan struct{}
+	remote            net.Conn
+	uploadQueue       *uploadQueue
+	done              chan struct{}
+	isFullyConnected  chan struct{}
+	flowState         *ewp.FlowState
+	writeOnceUserUUID []byte
 }
 
 var (
@@ -350,6 +352,7 @@ func cleanupExpiredSessions() {
 }
 
 func xhttpStreamOneHandler(w http.ResponseWriter, r *http.Request) {
+	// 读取 EWP 握手请求
 	buf := smallBufferPool.Get().([]byte)
 	n, err := r.Body.Read(buf)
 	if err != nil && err != io.EOF {
@@ -358,14 +361,19 @@ func xhttpStreamOneHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	target, extraData := parseConnect(buf[:n])
+	handshakeData := buf[:n]
 	smallBufferPool.Put(buf)
 
-	if target == "" {
-		http.Error(w, "Invalid target", http.StatusBadRequest)
+	// 处理 EWP 握手
+	req, respData, err := handleEWPHandshakeBinary(handshakeData)
+	if err != nil {
+		log.Printf("❌ XHTTP stream-one: EWP handshake failed: %v", err)
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write(respData)
 		return
 	}
 
+	target := req.TargetAddr.String()
 	log.Printf("🔗 stream-one: %s", target)
 
 	remote, err := net.Dial("tcp", target)
@@ -376,6 +384,7 @@ func xhttpStreamOneHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer remote.Close()
 
+	// 发送 EWP 握手响应
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/octet-stream")
@@ -385,29 +394,55 @@ func xhttpStreamOneHandler(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+
+	// 先发送握手响应
+	if _, err := w.Write(respData); err != nil {
+		log.Printf("❌ Failed to send handshake response: %v", err)
+		return
+	}
 	flusher.Flush()
 
-	if len(extraData) > 0 {
-		remote.Write(extraData)
-	}
+	// 初始化 Vision 流控状态
+	flowState := ewp.NewFlowState(req.UUID[:])
 
 	done := make(chan struct{}, 2)
 
-	go func() {
-		defer func() { done <- struct{}{} }()
-		buf := largeBufferPool.Get().([]byte)
-		defer largeBufferPool.Put(buf)
-		io.CopyBuffer(remote, r.Body, buf)
-	}()
-
+	// HTTP/2 body -> remote (uplink: 解包 Vision 填充)
 	go func() {
 		defer func() { done <- struct{}{} }()
 		buf := largeBufferPool.Get().([]byte)
 		defer largeBufferPool.Put(buf)
 		for {
+			n, err := r.Body.Read(buf)
+			if n > 0 {
+				// 处理 Vision 流控（自动检测并解包）
+				processedData := flowState.ProcessUplink(buf[:n])
+				if len(processedData) > 0 {
+					if _, e := remote.Write(processedData); e != nil {
+						return
+					}
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	// remote -> HTTP/2 body (downlink: 添加 Vision 填充)
+	go func() {
+		defer func() { done <- struct{}{} }()
+		buf := largeBufferPool.Get().([]byte)
+		defer largeBufferPool.Put(buf)
+		writeOnceUserUUID := make([]byte, 16)
+		copy(writeOnceUserUUID, req.UUID[:])
+		
+		for {
 			n, err := remote.Read(buf)
 			if n > 0 {
-				if _, e := w.Write(buf[:n]); e != nil {
+				// 应用 Vision 流控填充
+				paddedData := flowState.PadDownlink(buf[:n], &writeOnceUserUUID)
+				if _, e := w.Write(paddedData); e != nil {
 					return
 				}
 				flusher.Flush()
@@ -482,7 +517,15 @@ func xhttpDownloadHandler(w http.ResponseWriter, r *http.Request, sessionID stri
 		default:
 			n, err := session.remote.Read(buf)
 			if n > 0 {
-				if _, e := w.Write(buf[:n]); e != nil {
+				// 应用 Vision 流控填充（如果已初始化）
+				var writeData []byte
+				if session.flowState != nil {
+					writeData = session.flowState.PadDownlink(buf[:n], &session.writeOnceUserUUID)
+				} else {
+					writeData = buf[:n]
+				}
+				
+				if _, e := w.Write(writeData); e != nil {
 					return
 				}
 				if flusher != nil {
@@ -497,6 +540,75 @@ func xhttpDownloadHandler(w http.ResponseWriter, r *http.Request, sessionID stri
 }
 
 func xhttpUploadHandler(w http.ResponseWriter, r *http.Request, sessionID, seqStr string) {
+	// seq=0 是 EWP 握手请求
+	if seqStr == "0" {
+		session := upsertSession(sessionID)
+		
+		payload, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "Read error", http.StatusBadRequest)
+			return
+		}
+
+		// 处理 EWP 握手
+		req, respData, err := handleEWPHandshakeBinary(payload)
+		if err != nil {
+			log.Printf("❌ XHTTP stream-down: EWP handshake failed: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write(respData)
+			return
+		}
+
+		target := req.TargetAddr.String()
+		log.Printf("🔗 stream-down handshake: %s, SessionID: %s", target, sessionID)
+
+		// 建立到目标的连接
+		remote, err := net.Dial("tcp", target)
+		if err != nil {
+			log.Printf("❌ Dial failed: %v", err)
+			http.Error(w, "Connection failed", http.StatusBadGateway)
+			return
+		}
+		session.remote = remote
+
+		// 初始化 Vision 流控状态
+		session.flowState = ewp.NewFlowState(req.UUID[:])
+		session.writeOnceUserUUID = make([]byte, 16)
+		copy(session.writeOnceUserUUID, req.UUID[:])
+
+		// 启动上行数据处理协程
+		go func() {
+			buf := largeBufferPool.Get().([]byte)
+			defer largeBufferPool.Put(buf)
+			for {
+				select {
+				case <-session.done:
+					return
+				default:
+					n, err := session.uploadQueue.Read(buf)
+					if n > 0 {
+						// 处理 Vision 流控（自动检测并解包）
+						processedData := session.flowState.ProcessUplink(buf[:n])
+						if len(processedData) > 0 {
+							if _, e := remote.Write(processedData); e != nil {
+								return
+							}
+						}
+					}
+					if err != nil {
+						return
+					}
+				}
+			}
+		}()
+
+		// 返回 EWP 握手响应
+		w.WriteHeader(http.StatusOK)
+		w.Write(respData)
+		return
+	}
+
+	// 普通上行数据包
 	val, ok := xhttpSessions.Load(sessionID)
 	if !ok {
 		http.Error(w, "Session not found", http.StatusNotFound)
