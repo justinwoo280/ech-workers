@@ -1700,11 +1700,9 @@ func handleUDPLoop(ep tcpip.Endpoint, notifyCh chan struct{}, isIPv6 bool) {
 	}
 
 	for {
-		var addr tcpip.FullAddress
 		var buf bytes.Buffer
 		res, err := ep.Read(&buf, tcpip.ReadOptions{
 			NeedRemoteAddr: true,
-			NeedLocalAddr:  true,
 		})
 		if err != nil {
 			if _, ok := err.(*tcpip.ErrWouldBlock); ok {
@@ -1713,8 +1711,7 @@ func handleUDPLoop(ep tcpip.Endpoint, notifyCh chan struct{}, isIPv6 bool) {
 			}
 			continue
 		}
-		addr = res.RemoteAddr
-		localAddr := res.LocalAddr
+		addr := res.RemoteAddr
 
 		data := buf.Bytes()
 		if len(data) > 0 {
@@ -1725,10 +1722,17 @@ func handleUDPLoop(ep tcpip.Endpoint, notifyCh chan struct{}, isIPv6 bool) {
 			}
 
 			// 其他 UDP 流量通过代理
+			// 注意：gvisor 旧版本不支持 LocalAddr，使用 TUN 虚拟 IP 作为源地址
 			if tunUDPHandler != nil {
+				var srcIP net.IP
+				if isIPv6 {
+					srcIP = net.ParseIP("fd00::1") // TUN IPv6 地址
+				} else {
+					srcIP = net.ParseIP("10.0.0.1") // TUN IPv4 地址
+				}
 				srcAddr := &net.UDPAddr{
-					IP:   net.IP(localAddr.Addr.AsSlice()),
-					Port: int(localAddr.Port),
+					IP:   srcIP,
+					Port: 12345, // 使用固定端口，Full-Cone NAT 会基于目标地址映射
 				}
 				dstAddr := &net.UDPAddr{
 					IP:   net.IP(addr.Addr.AsSlice()),
