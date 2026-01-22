@@ -20,6 +20,7 @@ import (
 	"ech-client/ewp"
 
 	"github.com/gorilla/websocket"
+	"golang.org/x/net/http2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -1063,46 +1064,47 @@ func (t *XHTTPTransport) dialStreamOne() (TunnelConn, error) {
 		if err != nil {
 			return nil, err
 		}
-		// 强制使用 HTTP/2
-		tlsCfg.NextProtos = []string{"h2", "http/1.1"}
+		tlsCfg.NextProtos = []string{"h2"}
 	} else {
 		tlsCfg = &tls.Config{
 			ServerName: host,
 			MinVersion: tls.VersionTLS13,
-			NextProtos: []string{"h2", "http/1.1"},
+			NextProtos: []string{"h2"},
 		}
 	}
 
-	var rawConn net.Conn
 	target := net.JoinHostPort(host, port)
 	if t.serverIP != "" {
 		target = net.JoinHostPort(t.serverIP, port)
 	}
 
-	rawConn, err = net.DialTimeout("tcp", target, 10*time.Second)
-	if err != nil {
-		return nil, err
+	h2Transport := &http2.Transport{
+		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+			rawConn, err := net.DialTimeout("tcp", target, 10*time.Second)
+			if err != nil {
+				return nil, err
+			}
+			tlsConn := tls.Client(rawConn, tlsCfg)
+			if err := tlsConn.Handshake(); err != nil {
+				rawConn.Close()
+				return nil, err
+			}
+			return tlsConn, nil
+		},
 	}
 
-	tlsConn := tls.Client(rawConn, tlsCfg)
-	if err := tlsConn.Handshake(); err != nil {
-		rawConn.Close()
-		return nil, err
-	}
-
-	// 检查协商的协议
-	negotiatedProto := tlsConn.ConnectionState().NegotiatedProtocol
-	logV("[XHTTP] TLS连接建立，协议: %s", negotiatedProto)
+	logV("[XHTTP] HTTP/2 transport ready for %s", host)
 
 	return &XHTTPStreamOneConn{
-		conn:       tlsConn,
-		host:       host,
-		path:       t.path,
-		uuid:       t.uuid,
-		uuidStr:    t.uuidStr,
-		enableFlow: t.enableFlow,
-		paddingMin: t.paddingMin,
-		paddingMax: t.paddingMax,
+		h2Transport: h2Transport,
+		host:        host,
+		port:        port,
+		path:        t.path,
+		uuid:        t.uuid,
+		uuidStr:     t.uuidStr,
+		enableFlow:  t.enableFlow,
+		paddingMin:  t.paddingMin,
+		paddingMax:  t.paddingMax,
 	}, nil
 }
 
@@ -1110,18 +1112,22 @@ func (t *XHTTPTransport) Close() error {
 	return nil
 }
 
-// XHTTPStreamOneConn XHTTP stream-one模式连接（最简单的双向流）
+// XHTTPStreamOneConn XHTTP stream-one模式连接（HTTP/2 双向流）
 type XHTTPStreamOneConn struct {
-	conn       net.Conn
-	host       string
-	path       string
-	uuid       [16]byte
-	uuidStr    string
-	enableFlow bool
-	paddingMin int
-	paddingMax int
-	reader     *bufio.Reader
-	writer     *bufio.Writer
+	h2Transport *http2.Transport
+	host        string
+	port        string
+	path        string
+	uuid        [16]byte
+	uuidStr     string
+	enableFlow  bool
+	paddingMin  int
+	paddingMax  int
+	
+	pipeReader *io.PipeReader
+	pipeWriter *io.PipeWriter
+	respBody   io.ReadCloser
+	
 	connected  bool
 	mu         sync.Mutex
 	flowState  *ewp.FlowState
@@ -1132,6 +1138,9 @@ func (c *XHTTPStreamOneConn) Connect(target string, initialData []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// 创建 pipe 用于双向通信
+	c.pipeReader, c.pipeWriter = io.Pipe()
+
 	// 生成随机padding
 	paddingLen := c.paddingMin
 	if c.paddingMax > c.paddingMin {
@@ -1139,20 +1148,36 @@ func (c *XHTTPStreamOneConn) Connect(target string, initialData []byte) error {
 	}
 	padding := generatePadding(paddingLen)
 
-	// 构造HTTP POST请求（stream-one模式）
-	reqBuilder := &strings.Builder{}
-	reqBuilder.WriteString(fmt.Sprintf("POST %s?x_padding=%s HTTP/1.1\r\n", c.path, padding))
-	reqBuilder.WriteString(fmt.Sprintf("Host: %s\r\n", c.host))
-	reqBuilder.WriteString(fmt.Sprintf("X-Auth-Token: %s\r\n", c.uuidStr))
-	reqBuilder.WriteString("Content-Type: application/octet-stream\r\n")
-	reqBuilder.WriteString("Transfer-Encoding: chunked\r\n")
-	reqBuilder.WriteString("Cache-Control: no-cache\r\n")
-	reqBuilder.WriteString("\r\n")
-
-	// 发送HTTP头
-	if _, err := c.conn.Write([]byte(reqBuilder.String())); err != nil {
-		return fmt.Errorf("send http headers: %w", err)
+	// 构造请求 URL
+	reqURL := fmt.Sprintf("https://%s:%s%s?x_padding=%s", c.host, c.port, c.path, padding)
+	
+	req, err := http.NewRequest("POST", reqURL, c.pipeReader)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
 	}
+
+	req.Header.Set("X-Auth-Token", c.uuidStr)
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	// 初始化 Flow State
+	if c.enableFlow {
+		c.flowState = ewp.NewFlowState(c.uuid[:])
+		c.writeOnceUserUUID = make([]byte, 16)
+		copy(c.writeOnceUserUUID, c.uuid[:])
+	}
+
+	// 异步发送请求
+	respChan := make(chan *http.Response, 1)
+	errChan := make(chan error, 1)
+	
+	go func() {
+		resp, err := c.h2Transport.RoundTrip(req)
+		if err != nil {
+			errChan <- err
+			return
+		}
+		respChan <- resp
+	}()
 
 	// 构造连接数据: "CONNECT:host:port\n" + initialData
 	addr, err := ewp.ParseAddress(target)
@@ -1168,39 +1193,24 @@ func (c *XHTTPStreamOneConn) Connect(target string, initialData []byte) error {
 		connectData = []byte(connectMsg)
 	}
 
-	// 发送第一个chunk（CONNECT消息）
-	chunkHeader := fmt.Sprintf("%x\r\n", len(connectData))
-	if _, err := c.conn.Write([]byte(chunkHeader)); err != nil {
-		return fmt.Errorf("send chunk header: %w", err)
-	}
-	if _, err := c.conn.Write(connectData); err != nil {
+	// 发送 CONNECT 消息
+	if _, err := c.pipeWriter.Write(connectData); err != nil {
 		return fmt.Errorf("send connect data: %w", err)
 	}
-	if _, err := c.conn.Write([]byte("\r\n")); err != nil {
-		return fmt.Errorf("send chunk trailer: %w", err)
-	}
 
-	// 初始化reader和writer
-	c.reader = bufio.NewReader(c.conn)
-	c.writer = bufio.NewWriter(c.conn)
-
-	// 读取HTTP响应
-	resp, err := http.ReadResponse(c.reader, nil)
-	if err != nil {
-		return fmt.Errorf("read http response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		return fmt.Errorf("http error: %d %s, body: %s", resp.StatusCode, resp.Status, body)
-	}
-
-	// 初始化 Flow State
-	if c.enableFlow {
-		c.flowState = ewp.NewFlowState(c.uuid[:])
-		c.writeOnceUserUUID = make([]byte, 16)
-		copy(c.writeOnceUserUUID, c.uuid[:])
+	// 等待响应
+	select {
+	case resp := <-respChan:
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			return fmt.Errorf("http error: %d %s, body: %s", resp.StatusCode, resp.Status, body)
+		}
+		c.respBody = resp.Body
+	case err := <-errChan:
+		return fmt.Errorf("http request failed: %w", err)
+	case <-time.After(10 * time.Second):
+		return errors.New("connect timeout")
 	}
 
 	c.connected = true
@@ -1209,11 +1219,11 @@ func (c *XHTTPStreamOneConn) Connect(target string, initialData []byte) error {
 }
 
 func (c *XHTTPStreamOneConn) Read(buf []byte) (int, error) {
-	if c.reader == nil {
-		c.reader = bufio.NewReader(c.conn)
+	if c.respBody == nil {
+		return 0, errors.New("not connected")
 	}
 
-	n, err := c.reader.Read(buf)
+	n, err := c.respBody.Read(buf)
 	if err != nil {
 		return 0, err
 	}
@@ -1228,8 +1238,9 @@ func (c *XHTTPStreamOneConn) Read(buf []byte) (int, error) {
 }
 
 func (c *XHTTPStreamOneConn) Write(data []byte) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	if c.pipeWriter == nil {
+		return errors.New("not connected")
+	}
 
 	// 应用 Flow 协议填充
 	var writeData []byte
@@ -1239,27 +1250,23 @@ func (c *XHTTPStreamOneConn) Write(data []byte) error {
 		writeData = data
 	}
 
-	// 写入chunked格式
-	chunkHeader := fmt.Sprintf("%x\r\n", len(writeData))
-	if _, err := c.conn.Write([]byte(chunkHeader)); err != nil {
-		return err
-	}
-	if _, err := c.conn.Write(writeData); err != nil {
-		return err
-	}
-	if _, err := c.conn.Write([]byte("\r\n")); err != nil {
-		return err
-	}
-
-	return nil
+	// 写入 pipe，HTTP/2 会自动处理分帧
+	_, err := c.pipeWriter.Write(writeData)
+	return err
 }
 
 func (c *XHTTPStreamOneConn) Close() error {
-	// 发送结束chunk
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.conn.Write([]byte("0\r\n\r\n"))
-	return c.conn.Close()
+	var err error
+	if c.pipeWriter != nil {
+		err = c.pipeWriter.Close()
+	}
+	if c.respBody != nil {
+		err2 := c.respBody.Close()
+		if err == nil {
+			err = err2
+		}
+	}
+	return err
 }
 
 func (c *XHTTPStreamOneConn) StartPing(interval time.Duration) chan struct{} {
@@ -1292,52 +1299,70 @@ func (t *XHTTPTransport) dialStreamDown() (TunnelConn, error) {
 		if err != nil {
 			return nil, err
 		}
-		tlsCfg.NextProtos = []string{"h2", "http/1.1"}
+		tlsCfg.NextProtos = []string{"h2"}
 	} else {
 		tlsCfg = &tls.Config{
 			ServerName: host,
 			MinVersion: tls.VersionTLS13,
-			NextProtos: []string{"h2", "http/1.1"},
+			NextProtos: []string{"h2"},
 		}
+	}
+
+	target := net.JoinHostPort(host, port)
+	if t.serverIP != "" {
+		target = net.JoinHostPort(t.serverIP, port)
+	}
+
+	// HTTP/2 transport 用于下行和上行
+	h2Transport := &http2.Transport{
+		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+			rawConn, err := net.DialTimeout("tcp", target, 10*time.Second)
+			if err != nil {
+				return nil, err
+			}
+			tlsConn := tls.Client(rawConn, tlsCfg)
+			if err := tlsConn.Handshake(); err != nil {
+				rawConn.Close()
+				return nil, err
+			}
+			return tlsConn, nil
+		},
 	}
 
 	sessionID := fmt.Sprintf("%x", t.uuid[:8])
 
 	return &XHTTPStreamDownConn{
-		host:       host,
-		port:       port,
-		serverIP:   t.serverIP,
-		path:       t.path,
-		uuid:       t.uuid,
-		uuidStr:    t.uuidStr,
-		sessionID:  sessionID,
-		tlsCfg:     tlsCfg,
-		enableFlow: t.enableFlow,
-		paddingMin: t.paddingMin,
-		paddingMax: t.paddingMax,
-		uploadSeq:  0,
+		h2Transport: h2Transport,
+		host:        host,
+		port:        port,
+		path:        t.path,
+		uuid:        t.uuid,
+		uuidStr:     t.uuidStr,
+		sessionID:   sessionID,
+		enableFlow:  t.enableFlow,
+		paddingMin:  t.paddingMin,
+		paddingMax:  t.paddingMax,
+		uploadSeq:   0,
 	}, nil
 }
 
 type XHTTPStreamDownConn struct {
-	host            string
-	port            string
-	serverIP        string
-	path            string
-	uuid            [16]byte
-	uuidStr         string
-	sessionID       string
-	tlsCfg          *tls.Config
-	enableFlow      bool
-	paddingMin      int
-	paddingMax      int
-	uploadSeq       uint64
-	downloadConn    net.Conn
-	downloadReader  *bufio.Reader
-	uploadMu        sync.Mutex
-	connected       bool
-	mu              sync.Mutex
-	flowState       *ewp.FlowState
+	h2Transport   *http2.Transport
+	host          string
+	port          string
+	path          string
+	uuid          [16]byte
+	uuidStr       string
+	sessionID     string
+	enableFlow    bool
+	paddingMin    int
+	paddingMax    int
+	uploadSeq     uint64
+	respBody      io.ReadCloser
+	uploadMu      sync.Mutex
+	connected     bool
+	mu            sync.Mutex
+	flowState     *ewp.FlowState
 	writeOnceUserUUID []byte
 }
 
@@ -1350,59 +1375,34 @@ func (c *XHTTPStreamDownConn) Connect(target string, initialData []byte) error {
 		return fmt.Errorf("parse address: %w", err)
 	}
 
-	targetAddr := net.JoinHostPort(c.host, c.port)
-	if c.serverIP != "" {
-		targetAddr = net.JoinHostPort(c.serverIP, c.port)
-	}
-
-	rawConn, err := net.DialTimeout("tcp", targetAddr, 10*time.Second)
-	if err != nil {
-		return err
-	}
-
-	tlsConn := tls.Client(rawConn, c.tlsCfg)
-	if err := tlsConn.Handshake(); err != nil {
-		rawConn.Close()
-		return err
-	}
-
-	c.downloadConn = tlsConn
-
 	paddingLen := c.paddingMin
 	if c.paddingMax > c.paddingMin {
 		paddingLen += int(time.Now().UnixNano() % int64(c.paddingMax-c.paddingMin))
 	}
 	padding := generatePadding(paddingLen)
 
-	reqURL := fmt.Sprintf("https://%s%s/%s?x_padding=%s", c.host, c.path, c.sessionID, padding)
+	// 发起 GET 请求用于下行流
+	reqURL := fmt.Sprintf("https://%s:%s%s/%s?x_padding=%s", c.host, c.port, c.path, c.sessionID, padding)
 	req, err := http.NewRequest("GET", reqURL, nil)
 	if err != nil {
-		tlsConn.Close()
 		return err
 	}
 
-	req.Host = c.host
 	req.Header.Set("X-Auth-Token", c.uuidStr)
 	req.Header.Set("X-Target", addr.String())
 
-	if err := req.Write(tlsConn); err != nil {
-		tlsConn.Close()
-		return err
-	}
-
-	c.downloadReader = bufio.NewReader(tlsConn)
-	resp, err := http.ReadResponse(c.downloadReader, req)
+	resp, err := c.h2Transport.RoundTrip(req)
 	if err != nil {
-		tlsConn.Close()
-		return err
+		return fmt.Errorf("http request failed: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		tlsConn.Close()
 		return fmt.Errorf("http error: %d %s, body: %s", resp.StatusCode, resp.Status, body)
 	}
+
+	c.respBody = resp.Body
 
 	if c.enableFlow {
 		c.flowState = ewp.NewFlowState(c.uuid[:])
@@ -1422,11 +1422,11 @@ func (c *XHTTPStreamDownConn) Connect(target string, initialData []byte) error {
 }
 
 func (c *XHTTPStreamDownConn) Read(buf []byte) (int, error) {
-	if c.downloadReader == nil {
+	if c.respBody == nil {
 		return 0, errors.New("not connected")
 	}
 
-	n, err := c.downloadReader.Read(buf)
+	n, err := c.respBody.Read(buf)
 	if err != nil {
 		return 0, err
 	}
@@ -1450,22 +1450,6 @@ func (c *XHTTPStreamDownConn) Write(data []byte) error {
 		writeData = data
 	}
 
-	targetAddr := net.JoinHostPort(c.host, c.port)
-	if c.serverIP != "" {
-		targetAddr = net.JoinHostPort(c.serverIP, c.port)
-	}
-
-	rawConn, err := net.DialTimeout("tcp", targetAddr, 10*time.Second)
-	if err != nil {
-		return err
-	}
-	defer rawConn.Close()
-
-	tlsConn := tls.Client(rawConn, c.tlsCfg)
-	if err := tlsConn.Handshake(); err != nil {
-		return err
-	}
-
 	paddingLen := c.paddingMin
 	if c.paddingMax > c.paddingMin {
 		paddingLen += int(time.Now().UnixNano() % int64(c.paddingMax-c.paddingMin))
@@ -1475,25 +1459,22 @@ func (c *XHTTPStreamDownConn) Write(data []byte) error {
 	seq := c.uploadSeq
 	c.uploadSeq++
 
-	reqURL := fmt.Sprintf("https://%s%s/%s/%d?x_padding=%s", c.host, c.path, c.sessionID, seq, padding)
+	// 使用 HTTP/2 POST 上传数据
+	reqURL := fmt.Sprintf("https://%s:%s%s/%s/%d?x_padding=%s", c.host, c.port, c.path, c.sessionID, seq, padding)
 	req, err := http.NewRequest("POST", reqURL, bytes.NewReader(writeData))
 	if err != nil {
 		return err
 	}
 
-	req.Host = c.host
 	req.Header.Set("X-Auth-Token", c.uuidStr)
 	req.ContentLength = int64(len(writeData))
 
-	if err := req.Write(tlsConn); err != nil {
-		return err
-	}
-
-	resp, err := http.ReadResponse(bufio.NewReader(tlsConn), req)
+	resp, err := c.h2Transport.RoundTrip(req)
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("upload failed: %s", resp.Status)
@@ -1503,8 +1484,8 @@ func (c *XHTTPStreamDownConn) Write(data []byte) error {
 }
 
 func (c *XHTTPStreamDownConn) Close() error {
-	if c.downloadConn != nil {
-		return c.downloadConn.Close()
+	if c.respBody != nil {
+		return c.respBody.Close()
 	}
 	return nil
 }
@@ -1521,7 +1502,7 @@ var (
 )
 
 // InitTransport 初始化传输层（支持自动协议检测）
-func InitTransport(mode, serverAddr, serverIP, token string, useECH, enableFlow bool) {
+func InitTransport(mode, serverAddr, serverIP, token string, useECH, enableFlow bool, xhttpMode string) {
 	// 解析地址以获取协议信息
 	parsed, err := parseAddress(serverAddr)
 	if err != nil {
@@ -1554,9 +1535,19 @@ func InitTransport(mode, serverAddr, serverIP, token string, useECH, enableFlow 
 			parsed.Host, parsed.Port, parsed.Path, parsed.UseTLS, useECH, enableFlow)
 
 	case TransportXHTTP:
-		currentTransport = NewXHTTPTransport(serverAddr, serverIP, token, useECH, enableFlow, parsed.Path)
-		log.Printf("[传输层] XHTTP: %s:%s%s (ECH: %v, Vision: %v)", 
-			parsed.Host, parsed.Port, parsed.Path, useECH, enableFlow)
+		// 自动选择 XHTTP 模式（参考 Xray-core）
+		actualMode := xhttpMode
+		if actualMode == "" || actualMode == "auto" {
+			// 默认使用 stream-one（单流双向模式）
+			actualMode = "stream-one"
+		}
+		
+		transport := NewXHTTPTransport(serverAddr, serverIP, token, useECH, enableFlow, parsed.Path)
+		transport.SetMode(actualMode)
+		currentTransport = transport
+		
+		log.Printf("[传输层] XHTTP: %s:%s%s (Mode: %s, ECH: %v, Vision: %v)", 
+			parsed.Host, parsed.Port, parsed.Path, actualMode, useECH, enableFlow)
 
 	default:
 		currentTransport = NewWebSocketTransport(serverAddr, serverIP, token, useECH, enableFlow, parsed.Path)

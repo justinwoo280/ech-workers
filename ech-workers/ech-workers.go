@@ -54,6 +54,7 @@ var (
 	fallback   bool
 	numConns   int
 	protoMode  string // 传输协议模式: ws/grpc/xhttp
+	xhttpMode  string // XHTTP 模式: auto/stream-one/stream-down
 	enableFlow bool   // 启用 Vision 流控协议
 	controlAddr string
 	logFilePath string
@@ -106,6 +107,7 @@ func init() {
 	flag.BoolVar(&fallback, "fallback", false, "禁用 ECH (普通 TLS 模式)")
 	flag.IntVar(&numConns, "n", 1, "并发连接数 (默认 1)")
 	flag.StringVar(&protoMode, "mode", "ws", "传输协议模式: ws (WebSocket)、grpc 或 xhttp")
+	flag.StringVar(&xhttpMode, "xhttp-mode", "auto", "XHTTP 模式: auto (自动选择)、stream-one (双向流) 或 stream-down (分离上下行)")
 	flag.BoolVar(&enableFlow, "flow", true, "启用 Vision 流控协议（默认启用，提供流量混淆和零拷贝优化）")
 	flag.StringVar(&controlAddr, "control", "", "本地控制接口监听地址（仅用于 GUI 控制退出），例如 127.0.0.1:0")
 	flag.StringVar(&logFilePath, "logfile", "", "将日志追加写入到文件（用于 GUI 提权启动时仍能显示日志）")
@@ -204,7 +206,7 @@ func main() {
 	}
 
 	// 初始化传输层
-	InitTransport(protoMode, serverAddr, serverIP, token, useECH, enableFlow)
+	InitTransport(protoMode, serverAddr, serverIP, token, useECH, enableFlow, xhttpMode)
 	log.Printf("[启动] 传输层: %s", GetTransport().Name())
 
 	if tunMode {
