@@ -845,7 +845,7 @@ func xhttpHandshakeHandler(w http.ResponseWriter, r *http.Request, sessionID str
 	}
 
 	// 连接目标服务器
-	target := req.Address.String()
+	target := req.TargetAddr.String()
 	remote, err := net.DialTimeout("tcp", target, 10*time.Second)
 	if err != nil {
 		log.Printf("❌ XHTTP handshake: Dial failed: %v", err)
