@@ -116,9 +116,9 @@ func receiveUDPResponses(session *ewp.UDPSession, writer io.Writer) {
 	defer udpBufferPool.Put(buf)
 
 	for {
-		session.mu.Lock()
+		session.Lock()
 		conn := session.RemoteConn
-		session.mu.Unlock()
+		session.Unlock()
 
 		if conn == nil {
 			return
