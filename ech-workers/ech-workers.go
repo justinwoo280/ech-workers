@@ -1583,26 +1583,128 @@ func handleTCPConnection(ep tcpip.Endpoint, wq *waiter.Queue) {
 	log.Printf("[TCP:%d] 已断开: %s", connID, target)
 }
 
+// 全局 UDP 处理器
+var tunUDPHandler *UDPConnectionHandler
+
 func handleUDPPackets() {
+	// 启动 IPv4 和 IPv6 UDP 处理
+	go handleUDPPacketsV4()
+	go handleUDPPacketsV6()
+
+	// 阻塞等待
+	select {}
+}
+
+// writeUDPResponse 将 UDP 响应写回 TUN (支持 IPv4/IPv6)
+func writeUDPResponse(src, dst *net.UDPAddr, payload []byte) {
+	// 判断是 IPv4 还是 IPv6
+	isIPv6 := src.IP.To4() == nil
+
+	var srcIP, dstIP []byte
+	var networkProto tcpip.NetworkProtocolNumber
+
+	if isIPv6 {
+		srcIP = src.IP.To16()
+		dstIP = dst.IP.To16()
+		networkProto = ipv6.ProtocolNumber
+	} else {
+		srcIP = src.IP.To4()
+		dstIP = dst.IP.To4()
+		networkProto = ipv4.ProtocolNumber
+	}
+
+	srcAddr := tcpip.FullAddress{
+		Addr: tcpip.AddrFromSlice(srcIP),
+		Port: uint16(src.Port),
+	}
+	dstAddr := tcpip.FullAddress{
+		Addr: tcpip.AddrFromSlice(dstIP),
+		Port: uint16(dst.Port),
+	}
+
+	// 创建新的 UDP endpoint 发送响应
+	var respWq waiter.Queue
+	respEp, err := tunStack.NewEndpoint(udp.ProtocolNumber, networkProto, &respWq)
+	if err != nil {
+		logV("[UDP] 创建响应端点失败: %v", err)
+		return
+	}
+	defer respEp.Close()
+
+	// 绑定到源地址（模拟远程服务器）
+	if err := respEp.Bind(srcAddr); err != nil {
+		logV("[UDP] 绑定源地址失败: %v", err)
+		return
+	}
+
+	// 发送响应到客户端
+	var buf bytes.Buffer
+	buf.Write(payload)
+	_, tcpipErr := respEp.Write(&buf, tcpip.WriteOptions{
+		To: &dstAddr,
+	})
+	if tcpipErr != nil {
+		logV("[UDP] 发送响应失败: %v", tcpipErr)
+	}
+}
+
+func handleUDPPacketsV4() {
 	var wq waiter.Queue
 	ep, err := tunStack.NewEndpoint(udp.ProtocolNumber, ipv4.ProtocolNumber, &wq)
 	if err != nil {
-		log.Fatalf("[UDP] 创建端点失败: %v", err)
+		log.Fatalf("[UDP4] 创建端点失败: %v", err)
 	}
 
 	if err := ep.Bind(tcpip.FullAddress{}); err != nil {
-		log.Fatalf("[UDP] 绑定失败: %v", err)
+		log.Fatalf("[UDP4] 绑定失败: %v", err)
+	}
+
+	// 初始化 UDP 处理器（使用当前传输层）
+	transport := GetTransport()
+	if transport != nil && tunUDPHandler == nil {
+		tunUDPHandler = NewUDPConnectionHandler(transport, writeUDPResponse)
+		log.Printf("[UDP] Full-Cone NAT 处理器已启动 (IPv4/IPv6)")
 	}
 
 	waitEntry, notifyCh := waiter.NewChannelEntry(waiter.EventIn)
 	wq.EventRegister(&waitEntry)
 	defer wq.EventUnregister(&waitEntry)
 
+	handleUDPLoop(ep, notifyCh, false)
+}
+
+func handleUDPPacketsV6() {
+	var wq waiter.Queue
+	ep, err := tunStack.NewEndpoint(udp.ProtocolNumber, ipv6.ProtocolNumber, &wq)
+	if err != nil {
+		log.Printf("[UDP6] 创建端点失败: %v (IPv6 可能未启用)", err)
+		return
+	}
+
+	if err := ep.Bind(tcpip.FullAddress{}); err != nil {
+		log.Printf("[UDP6] 绑定失败: %v", err)
+		return
+	}
+
+	waitEntry, notifyCh := waiter.NewChannelEntry(waiter.EventIn)
+	wq.EventRegister(&waitEntry)
+	defer wq.EventUnregister(&waitEntry)
+
+	handleUDPLoop(ep, notifyCh, true)
+}
+
+func handleUDPLoop(ep tcpip.Endpoint, notifyCh chan struct{}, isIPv6 bool) {
+	protoName := "UDP4"
+	if isIPv6 {
+		protoName = "UDP6"
+	}
+
 	for {
 		var addr tcpip.FullAddress
 		var buf bytes.Buffer
 		res, err := ep.Read(&buf, tcpip.ReadOptions{
 			NeedRemoteAddr: true,
+			NeedLocalAddr:  true,
 		})
 		if err != nil {
 			if _, ok := err.(*tcpip.ErrWouldBlock); ok {
@@ -1612,15 +1714,33 @@ func handleUDPPackets() {
 			continue
 		}
 		addr = res.RemoteAddr
+		localAddr := res.LocalAddr
 
 		data := buf.Bytes()
 		if len(data) > 0 {
-			target := fmt.Sprintf("%s:%d", net.IP(addr.Addr.AsSlice()).String(), addr.Port)
-
+			// DNS 查询优先使用 DoH（更快）
 			if addr.Port == 53 {
 				go handleTUNDNSQuery(ep, &addr, data)
+				continue
+			}
+
+			// 其他 UDP 流量通过代理
+			if tunUDPHandler != nil {
+				srcAddr := &net.UDPAddr{
+					IP:   net.IP(localAddr.Addr.AsSlice()),
+					Port: int(localAddr.Port),
+				}
+				dstAddr := &net.UDPAddr{
+					IP:   net.IP(addr.Addr.AsSlice()),
+					Port: int(addr.Port),
+				}
+
+				if err := tunUDPHandler.HandlePacket(srcAddr, dstAddr, data); err != nil {
+					logV("[%s] 处理失败: %v", protoName, err)
+				}
 			} else {
-				log.Printf("[UDP] 收到数据包 -> %s (暂不支持非 DNS UDP)", target)
+				target := fmt.Sprintf("%s:%d", net.IP(addr.Addr.AsSlice()).String(), addr.Port)
+				logV("[%s] 收到数据包 -> %s (UDP 处理器未初始化)", protoName, target)
 			}
 		}
 	}

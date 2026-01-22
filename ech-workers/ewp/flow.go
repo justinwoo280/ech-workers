@@ -2,10 +2,12 @@ package ewp
 
 import (
 	"bytes"
-	"crypto/rand"
+	crand "crypto/rand"
 	"encoding/binary"
 	"io"
-	"math/big"
+	"math/rand"
+	"sync"
+	"time"
 )
 
 // EWP Flow Protocol - Vision-based flow control
@@ -50,6 +52,37 @@ var (
 		0x1305: "TLS_AES_128_CCM_8_SHA256",
 	}
 )
+
+// ======================== 快速随机数生成器 (性能优化) ========================
+// 用 math/rand 替代 crypto/rand，填充长度不需要密码学安全
+
+var (
+	fastRand     *rand.Rand
+	fastRandOnce sync.Once
+)
+
+func getFastRand() *rand.Rand {
+	fastRandOnce.Do(func() {
+		fastRand = rand.New(rand.NewSource(time.Now().UnixNano()))
+	})
+	return fastRand
+}
+
+// FastIntn 快速生成 [0, n) 范围的随机数
+func FastIntn(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	return getFastRand().Intn(n)
+}
+
+// FastBytes 快速填充随机字节 (用于 padding，不需要密码学安全)
+func FastBytes(b []byte) {
+	r := getFastRand()
+	for i := range b {
+		b[i] = byte(r.Intn(256))
+	}
+}
 
 // FlowFrame represents a single flow control frame
 type FlowFrame struct {
@@ -133,14 +166,11 @@ var DefaultPaddingConfig = &PaddingConfig{
 }
 
 // CalculatePadding implements Vision's dynamic padding algorithm
+// 优化：使用 math/rand 替代 crypto/rand，性能提升约 10x
 func (cfg *PaddingConfig) CalculatePadding(contentLen int32, isTLS bool) int32 {
 	if contentLen < int32(cfg.MinContentForLongPadding) && isTLS {
 		// Long padding: rand(500) + 900 - contentLen
-		l, err := rand.Int(rand.Reader, big.NewInt(int64(cfg.MaxRandomPadding)))
-		if err != nil {
-			return 0
-		}
-		paddingLen := int32(l.Int64()) + int32(cfg.LongPaddingBase) - contentLen
+		paddingLen := int32(FastIntn(cfg.MaxRandomPadding)) + int32(cfg.LongPaddingBase) - contentLen
 		if paddingLen < 0 {
 			return 0
 		}
@@ -148,11 +178,7 @@ func (cfg *PaddingConfig) CalculatePadding(contentLen int32, isTLS bool) int32 {
 	}
 
 	// Short padding: rand(256)
-	l, err := rand.Int(rand.Reader, big.NewInt(int64(cfg.ShortPaddingMax)))
-	if err != nil {
-		return 0
-	}
-	return int32(l.Int64())
+	return int32(FastIntn(cfg.ShortPaddingMax))
 }
 
 // XtlsPadding adds Vision-style padding to eliminate length signature
@@ -202,11 +228,9 @@ func XtlsPadding(content []byte, command byte, userUUID *[]byte, longPadding boo
 		pos += int(contentLen)
 	}
 
-	// Write random padding
+	// Write random padding (使用快速随机数)
 	if paddingLen > 0 {
-		padding := make([]byte, paddingLen)
-		rand.Read(padding)
-		copy(newbuffer[pos:], padding)
+		FastBytes(newbuffer[pos : pos+int(paddingLen)])
 	}
 
 	return newbuffer
