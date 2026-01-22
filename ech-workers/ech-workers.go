@@ -89,18 +89,6 @@ var (
 // ======================== Buffer Pool (性能优化) ========================
 
 var (
-	smallBufferPool = sync.Pool{
-		New: func() interface{} {
-			return make([]byte, 512)
-		},
-	}
-
-	largeBufferPool = sync.Pool{
-		New: func() interface{} {
-			return make([]byte, 32*1024)
-		},
-	}
-
 	udpBufferPool = sync.Pool{
 		New: func() interface{} {
 			return make([]byte, 65536)
@@ -1574,14 +1562,15 @@ func handleTCPConnection(ep tcpip.Endpoint, wq *waiter.Queue) {
 
 	// Server -> Client
 	go func() {
+		buf := make([]byte, 32*1024)
 		for {
-			data, err := tunnelConn.Read()
+			n, err := tunnelConn.Read(buf)
 			if err != nil {
 				done <- true
 				return
 			}
 
-			if _, err := conn.Write(data); err != nil {
+			if _, err := conn.Write(buf[:n]); err != nil {
 				done <- true
 				return
 			}

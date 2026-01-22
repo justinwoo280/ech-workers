@@ -41,6 +41,12 @@ var (
 	}
 )
 
+const (
+	TransportWebSocket = "ws"
+	TransportGRPC      = "grpc"
+	TransportXHTTP     = "xhttp"
+)
+
 // ======================== 地址解析 ========================
 
 // ParsedAddress 解析后的服务器地址

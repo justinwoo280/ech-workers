@@ -20,7 +20,6 @@ import (
 	"proxy-server/ewp"
 
 	"github.com/gorilla/websocket"
-	"github.com/hashicorp/yamux"
 	"google.golang.org/grpc"
 )
 
@@ -621,36 +620,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	handleWebSocket(conn)
 }
 
-// WebSocket adapter for yamux
-type wsConn struct {
-	*websocket.Conn
-	reader io.Reader
-}
-
-func (c *wsConn) Read(p []byte) (int, error) {
-	for {
-		if c.reader == nil {
-			_, r, err := c.NextReader()
-			if err != nil {
-				return 0, err
-			}
-			c.reader = r
-		}
-		n, err := c.reader.Read(p)
-		if err == io.EOF {
-			c.reader = nil
-			continue
-		}
-		return n, err
-	}
-}
-
-func (c *wsConn) Write(p []byte) (int, error) {
-	err := c.WriteMessage(websocket.BinaryMessage, p)
-	return len(p), err
-}
-
-// handleWebSocket 自动检测客户端协议：Yamux 或 EWP 简单模式
+// handleWebSocket 处理 EWP 协议（支持 Vision 流控）
 func handleWebSocket(conn *websocket.Conn) {
 	_, firstMsg, err := conn.ReadMessage()
 	if err != nil {
@@ -663,15 +633,7 @@ func handleWebSocket(conn *websocket.Conn) {
 		return
 	}
 
-	// Yamux 协议的 magic: 第一个字节是 0x00（version）
-	// EWP 协议：第一个字节是随机 1-255（version）
-	if firstMsg[0] == 0x00 {
-		log.Println("🔄 Detected Yamux protocol")
-		handleYamuxWithFirstFrame(conn, firstMsg)
-	} else {
-		log.Println("🔄 Detected EWP simple protocol")
-		handleSimpleProtocol(conn, firstMsg)
-	}
+	handleSimpleProtocol(conn, firstMsg)
 }
 
 // handleSimpleProtocol 处理 EWP 协议（支持 Vision 流控自动检测）
@@ -765,147 +727,4 @@ func handleSimpleProtocol(conn *websocket.Conn, firstMsg []byte) {
 	<-done
 	// 发送关闭消息
 	conn.WriteMessage(websocket.TextMessage, []byte("CLOSE"))
-}
-
-// handleYamuxWithFirstFrame 处理 Yamux 协议（带已读取的第一帧）
-func handleYamuxWithFirstFrame(conn *websocket.Conn, firstFrame []byte) {
-	ws := &wsConnWithBuffer{
-		Conn:        conn,
-		firstFrame:  firstFrame,
-		firstFrameRead: false,
-	}
-
-	// Create yamux server session（性能优化配置）
-	cfg := yamux.DefaultConfig()
-	cfg.EnableKeepAlive = true
-	cfg.KeepAliveInterval = 30 * time.Second
-	cfg.MaxStreamWindowSize = 4 * 1024 * 1024
-	cfg.StreamOpenTimeout = 15 * time.Second
-	cfg.StreamCloseTimeout = 5 * time.Second
-
-	session, err := yamux.Server(ws, cfg)
-	if err != nil {
-		log.Printf("❌ Yamux session error: %v", err)
-		return
-	}
-	defer session.Close()
-
-	// Accept streams
-	for {
-		stream, err := session.Accept()
-		if err != nil {
-			if err != io.EOF {
-				log.Printf("📴 Session closed: %v", err)
-			}
-			return
-		}
-		go handleStream(stream)
-	}
-}
-
-// wsConnWithBuffer 带缓冲的 WebSocket 适配器（用于回放第一帧）
-type wsConnWithBuffer struct {
-	*websocket.Conn
-	firstFrame     []byte
-	firstFrameRead bool
-	reader         io.Reader
-}
-
-func (c *wsConnWithBuffer) Read(p []byte) (int, error) {
-	// 先返回已读取的第一帧
-	if !c.firstFrameRead && len(c.firstFrame) > 0 {
-		c.firstFrameRead = true
-		c.reader = bytes.NewReader(c.firstFrame)
-	}
-
-	for {
-		if c.reader == nil {
-			_, r, err := c.NextReader()
-			if err != nil {
-				return 0, err
-			}
-			c.reader = r
-		}
-		n, err := c.reader.Read(p)
-		if err == io.EOF {
-			c.reader = nil
-			continue
-		}
-		return n, err
-	}
-}
-
-func (c *wsConnWithBuffer) Write(p []byte) (int, error) {
-	err := c.WriteMessage(websocket.BinaryMessage, p)
-	return len(p), err
-}
-
-func handleYamux(conn *websocket.Conn) {
-	ws := &wsConn{Conn: conn}
-
-	// Create yamux server session（性能优化配置）
-	cfg := yamux.DefaultConfig()
-	cfg.EnableKeepAlive = true
-	cfg.KeepAliveInterval = 30 * time.Second
-	cfg.MaxStreamWindowSize = 4 * 1024 * 1024
-	cfg.StreamOpenTimeout = 15 * time.Second
-	cfg.StreamCloseTimeout = 5 * time.Second
-
-	session, err := yamux.Server(ws, cfg)
-	if err != nil {
-		log.Printf("❌ Yamux session error: %v", err)
-		return
-	}
-	defer session.Close()
-
-	// Accept streams
-	for {
-		stream, err := session.Accept()
-		if err != nil {
-			if err != io.EOF {
-				log.Printf("📴 Session closed: %v", err)
-			}
-			return
-		}
-		go handleStream(stream)
-	}
-}
-
-func handleStream(stream net.Conn) {
-	defer stream.Close()
-
-	req, respData, err := handleEWPHandshake(stream)
-	if err != nil {
-		stream.Write(respData)
-		return
-	}
-
-	if _, err := stream.Write(respData); err != nil {
-		log.Printf("❌ Failed to send handshake response: %v", err)
-		return
-	}
-
-	target := req.TargetAddr.String()
-	log.Printf("🔗 Yamux stream connecting to %s", target)
-
-	remote, err := net.Dial("tcp", target)
-	if err != nil {
-		log.Printf("❌ Dial error: %v", err)
-		return
-	}
-	defer remote.Close()
-
-	log.Printf("✅ Yamux stream connected to %s", target)
-
-	// Bidirectional copy
-	done := make(chan struct{})
-	go func() {
-		io.Copy(remote, stream)
-		done <- struct{}{}
-	}()
-	go func() {
-		io.Copy(stream, remote)
-		done <- struct{}{}
-	}()
-	<-done
 }

@@ -68,20 +68,6 @@ func GetTLSConnectionInfo(state tls.ConnectionState) string {
 
 	info += fmt.Sprintf(", Cipher: %s", tls.CipherSuiteName(state.CipherSuite))
 
-	// Check if PQC was used
-	if state.CurveID == tls.X25519MLKEM768 {
-		info += ", PQC: X25519MLKEM768 ✓"
-	} else if state.CurveID == tls.X25519 {
-		info += ", Curve: X25519"
-	} else if state.CurveID == tls.CurveP256 {
-		info += ", Curve: P256"
-	}
-
-	// Check ECH status
-	if len(state.EncryptedClientHello) > 0 {
-		info += ", ECH: enabled ✓"
-	}
-
 	return info
 }
 
