@@ -33,6 +33,7 @@ var (
 	port          = getEnv("PORT", "8080")
 	wsPath        = getEnv("WS_PATH", "/")
 	xhttpPath     = getEnv("XHTTP_PATH", "/xhttp")
+	grpcService   = getEnv("GRPC_SERVICE", "ProxyService")  // gRPC 服务名（不含包名前缀）
 	paddingMin    = getEnvInt("PADDING_MIN", 100)
 	paddingMax    = getEnvInt("PADDING_MAX", 1000)
 	grpcMode      = false
@@ -135,6 +136,28 @@ func main() {
 
 type proxyServer struct {
 	pb.UnimplementedProxyServiceServer
+}
+
+// tunnelHandler 是自定义服务名注册时使用的处理函数
+func tunnelHandler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(*proxyServer).Tunnel(&grpcServerStream{stream})
+}
+
+// grpcServerStream 包装 grpc.ServerStream 以实现 pb.ProxyService_TunnelServer 接口
+type grpcServerStream struct {
+	grpc.ServerStream
+}
+
+func (s *grpcServerStream) Send(m *pb.SocketData) error {
+	return s.ServerStream.SendMsg(m)
+}
+
+func (s *grpcServerStream) Recv() (*pb.SocketData, error) {
+	m := new(pb.SocketData)
+	if err := s.ServerStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
 }
 
 func (s *proxyServer) Tunnel(stream pb.ProxyService_TunnelServer) error {
@@ -268,7 +291,24 @@ func startGRPCServer() {
 		grpc.WriteBufferSize(32*1024),
 		grpc.ReadBufferSize(32*1024),
 	)
-	pb.RegisterProxyServiceServer(s, &proxyServer{})
+	
+	// 使用自定义服务名注册 gRPC 服务
+	customServiceDesc := grpc.ServiceDesc{
+		ServiceName: grpcService,
+		HandlerType: (*pb.ProxyServiceServer)(nil),
+		Methods:     []grpc.MethodDesc{},
+		Streams: []grpc.StreamDesc{
+			{
+				StreamName:    "Tunnel",
+				Handler:       tunnelHandler,
+				ServerStreams: true,
+				ClientStreams: true,
+			},
+		},
+		Metadata: "tunnel.proto",
+	}
+	s.RegisterService(&customServiceDesc, &proxyServer{})
+	log.Printf("📡 gRPC 服务名: /%s/Tunnel", grpcService)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
@@ -278,7 +318,7 @@ func startGRPCServer() {
 		s.GracefulStop()
 	}()
 
-	log.Println("� gRPC server listening (no TLS, behind Cloudflare Tunnel)")
+	log.Println("🚀 gRPC server listening (no TLS, behind Cloudflare Tunnel)")
 	if err := s.Serve(lis); err != nil {
 		log.Fatalf("❌ gRPC serve failed: %v", err)
 	}

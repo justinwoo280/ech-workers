@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"golang.org/x/sys/windows"
-	"golang.org/x/sys/windows/registry"
 	"golang.zx2c4.com/wintun"
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -83,9 +82,6 @@ var (
 	totalUpload   int64
 	totalDownload int64
 	activeConns   int64
-
-	// 系统代理模式
-	sysProxyMode bool
 )
 
 // ======================== Buffer Pool (性能优化) ========================
@@ -120,7 +116,7 @@ func init() {
 	flag.StringVar(&tunMask, "tun-mask", "255.255.255.0", "TUN 子网掩码")
 	flag.StringVar(&tunDNS, "tun-dns", "1.1.1.1", "TUN DNS 服务器")
 	flag.IntVar(&tunMTU, "tun-mtu", 1380, "TUN MTU（建议约 1380，用于减少隧道封装导致的分片）")
-	flag.BoolVar(&sysProxyMode, "sysproxy", false, "自动设置系统代理")
+	// 注意: 系统代理设置由 GUI 处理，内核不再支持 -sysproxy 参数
 }
 
 // logV 详细日志（仅在 verbose 模式下输出）
@@ -159,9 +155,6 @@ func main() {
 	// 清理函数
 	cleanup := func() {
 		log.Printf("[清理] 正在清理资源...")
-		if sysProxyMode {
-			disableSystemProxy()
-		}
 		if tunMode && tunAdapter != nil {
 			cleanupTUN()
 		}
@@ -217,24 +210,12 @@ func main() {
 			log.Fatal("[错误] TUN 模式需要管理员权限，请以管理员身份运行")
 		}
 
-		// TUN 模式下忽略系统代理设置（TUN 已经捕获全部流量）
-		if sysProxyMode {
-			log.Printf("[提示] TUN 模式已启用，系统代理设置将被忽略（TUN 已捕获全部流量）")
-		}
-
 		if err := startTUNMode(); err != nil {
 			log.Fatalf("[启动] TUN 模式初始化失败: %v", err)
 		}
 	} else {
 		// 非 TUN 模式：启动本地代理服务器
-		// 如果启用系统代理模式，自动配置
-		if sysProxyMode {
-			if err := enableSystemProxy(listenAddr); err != nil {
-				log.Printf("[警告] 设置系统代理失败: %v", err)
-			} else {
-				log.Printf("[系统代理] 已启用，代理地址: %s", listenAddr)
-			}
-		}
+		// 注意: 系统代理设置由 GUI 处理，内核只负责启动 SOCKS5/HTTP 代理
 		runProxyServer(listenAddr)
 	}
 }
@@ -1157,80 +1138,8 @@ func sendSuccessResponse(conn net.Conn, mode int) error {
 	return nil
 }
 
-// ======================== 系统代理设置 ========================
-
-const (
-	internetSettingsKey = `Software\Microsoft\Windows\CurrentVersion\Internet Settings`
-)
-
-// enableSystemProxy 启用 Windows 系统代理
-func enableSystemProxy(proxyAddr string) error {
-	key, err := registry.OpenKey(registry.CURRENT_USER, internetSettingsKey, registry.SET_VALUE)
-	if err != nil {
-		return fmt.Errorf("打开注册表失败: %w", err)
-	}
-	defer key.Close()
-
-	// 启用代理
-	if err := key.SetDWordValue("ProxyEnable", 1); err != nil {
-		return fmt.Errorf("设置 ProxyEnable 失败: %w", err)
-	}
-
-	// 设置代理服务器地址
-	if err := key.SetStringValue("ProxyServer", proxyAddr); err != nil {
-		return fmt.Errorf("设置 ProxyServer 失败: %w", err)
-	}
-
-	// 设置不使用代理的地址（本地地址）
-	bypass := "localhost;127.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*;192.168.*;<local>"
-	if err := key.SetStringValue("ProxyOverride", bypass); err != nil {
-		return fmt.Errorf("设置 ProxyOverride 失败: %w", err)
-	}
-
-	// 通知系统代理设置已更改
-	notifyProxyChange()
-
-	return nil
-}
-
-// disableSystemProxy 禁用 Windows 系统代理
-func disableSystemProxy() {
-	key, err := registry.OpenKey(registry.CURRENT_USER, internetSettingsKey, registry.SET_VALUE)
-	if err != nil {
-		log.Printf("[系统代理] 关闭时打开注册表失败: %v", err)
-		return
-	}
-	defer key.Close()
-
-	// 禁用代理
-	if err := key.SetDWordValue("ProxyEnable", 0); err != nil {
-		log.Printf("[系统代理] 禁用失败: %v", err)
-		return
-	}
-
-	// 通知系统代理设置已更改
-	notifyProxyChange()
-
-	log.Printf("[系统代理] 已禁用")
-}
-
-// notifyProxyChange 通知系统代理设置已更改
-func notifyProxyChange() {
-	// 调用 InternetSetOption 通知系统刷新代理设置
-	// 这需要调用 wininet.dll
-	wininet := windows.NewLazySystemDLL("wininet.dll")
-	internetSetOption := wininet.NewProc("InternetSetOptionW")
-
-	const (
-		INTERNET_OPTION_SETTINGS_CHANGED = 39
-		INTERNET_OPTION_REFRESH          = 37
-	)
-
-	internetSetOption.Call(0, INTERNET_OPTION_SETTINGS_CHANGED, 0, 0)
-	internetSetOption.Call(0, INTERNET_OPTION_REFRESH, 0, 0)
-}
-
 // ======================== TUN 模式实现 ========================
+// 注意: 系统代理设置已移至 GUI 层处理，内核只负责代理功能
 
 // cleanupTUN 清理 TUN 资源
 func cleanupTUN() {
