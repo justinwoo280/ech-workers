@@ -964,12 +964,6 @@ func (c *GRPCConn) Connect(target string, initialData []byte) error {
 		return fmt.Errorf("encode handshake: %w", err)
 	}
 
-	// 调试：打印发送的原始数据摘要
-	if len(handshakeData) >= 32 {
-		fmt.Printf("[DEBUG] gRPC sending: len=%d, first16=%x, last16=%x\n", 
-			len(handshakeData), handshakeData[:16], handshakeData[len(handshakeData)-16:])
-	}
-
 	c.mu.Lock()
 	err = c.stream.Send(&pb.SocketData{Content: handshakeData})
 	c.mu.Unlock()
@@ -1231,11 +1225,7 @@ func (c *XHTTPStreamOneConn) Connect(target string, initialData []byte) error {
 
 	// 构造请求 URL
 	reqURL := fmt.Sprintf("https://%s:%s%s?x_padding=%s", c.host, c.port, c.path, padding)
-	
-	// 调试：打印 XHTTP stream-one 请求信息
-	fmt.Printf("[DEBUG] XHTTP stream-one: POST %s\n", reqURL)
-	fmt.Printf("[DEBUG] X-Auth-Token: %s\n", c.uuidStr)
-	
+
 	req, err := http.NewRequest("POST", reqURL, c.pipeReader)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)

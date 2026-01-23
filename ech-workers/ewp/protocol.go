@@ -142,12 +142,7 @@ func (r *HandshakeRequest) Encode() ([]byte, error) {
 	// === 4. 计算外层 HMAC (快速熔断器) ===
 	authTag := computeHMAC(r.UUID, ad, ciphertext)
 	copy(buf[15+len(ciphertext):], authTag)
-	
-	// 调试：打印发送的数据摘要
-	fmt.Printf("[DEBUG] Encode: totalLen=%d, plaintextLen=%d, ciphertextLen=%d\n", len(buf), plaintextLen, len(ciphertext))
-	fmt.Printf("[DEBUG] authTag (sent): %x\n", authTag)
-	fmt.Printf("[DEBUG] UUID: %x\n", r.UUID)
-	
+
 	return buf, nil
 }
 
