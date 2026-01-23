@@ -108,44 +108,57 @@ jobs:
           name: proxy-server-tls
           path: artifacts/proxy-server-tls-*
 
-  # build-gui:
-  #   name: Build GUI (Windows)
-  #   runs-on: windows-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
+  build-gui:
+    name: Build GUI (Qt6 Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
 
-  #     - name: Setup .NET
-  #       uses: actions/setup-dotnet@v4
-  #       with:
-  #         dotnet-version: '8.0.x'
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.6.0'
+          host: 'windows'
+          target: 'desktop'
+          arch: 'win64_msvc2019_64'
+          modules: 'qtnetworkauth'
 
-  #     - name: Publish GUI win-x64
-  #       shell: pwsh
-  #       run: |
-  #         cd ech-workers/gui/EchWorkersGui
-  #         dotnet publish -c Release -r win-x64 --self-contained true -o ..\..\..\artifacts\gui-win-x64
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
 
-  #     - name: Publish GUI win-arm64
-  #       shell: pwsh
-  #       run: |
-  #         cd ech-workers/gui/EchWorkersGui
-  #         dotnet publish -c Release -r win-arm64 --self-contained true -o ..\..\..\artifacts\gui-win-arm64
+      - name: Configure CMake
+        shell: pwsh
+        run: |
+          cd ech-workers-gui
+          mkdir build
+          cd build
+          cmake .. -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$env:Qt6_DIR"
 
-  #     - name: Upload GUI x64 Artifacts
-  #       uses: actions/upload-artifact@v4
-  #       with:
-  #         name: gui-x64
-  #         path: artifacts/gui-win-x64/
+      - name: Build GUI
+        shell: pwsh
+        run: |
+          cd ech-workers-gui/build
+          cmake --build . --config Release
 
-  #     - name: Upload GUI arm64 Artifacts
-  #       uses: actions/upload-artifact@v4
-  #       with:
-  #         name: gui-arm64
-  #         path: artifacts/gui-win-arm64/
+      - name: Deploy Qt dependencies
+        shell: pwsh
+        run: |
+          mkdir artifacts
+          cp ech-workers-gui/build/ECHWorkersGUI.exe artifacts/
+          cd artifacts
+          windeployqt --release --no-translations --no-system-d3d-compiler --no-opengl-sw ECHWorkersGUI.exe
+
+      - name: Upload GUI Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-windows-x64
+          path: artifacts/
 
   release:
     name: Create Release
-    needs: [build-client-kernel, build-proxy-server, build-proxy-server-tls]
+    needs: [build-client-kernel, build-proxy-server, build-proxy-server-tls, build-gui]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
@@ -174,17 +187,11 @@ jobs:
           name: proxy-server-tls
           path: server-tls
 
-      # - name: Download GUI x64
-      #   uses: actions/download-artifact@v4
-      #   with:
-      #     name: gui-x64
-      #     path: gui-x64
-
-      # - name: Download GUI arm64
-      #   uses: actions/download-artifact@v4
-      #   with:
-      #     name: gui-arm64
-      #     path: gui-arm64
+      - name: Download GUI
+        uses: actions/download-artifact@v4
+        with:
+          name: gui-windows-x64
+          path: gui
 
       - name: Package by architecture
         run: |
@@ -222,6 +229,13 @@ jobs:
           cp server-tls/proxy-server-tls-linux-amd64 tmp/server-tls-linux-amd64/proxy-server-tls
           (cd tmp/server-tls-linux-amd64 && zip -r ../../release/proxy-server-tls-linux-amd64.zip .)
 
+          # GUI Windows amd64 (GUI + kernel + wintun.dll)
+          mkdir -p tmp/gui-win-amd64
+          cp -r gui/* tmp/gui-win-amd64/
+          cp kernel/ech-workers-core-windows-amd64.exe tmp/gui-win-amd64/ech-workers.exe
+          cp ech-workers/wintun.dll tmp/gui-win-amd64/wintun.dll
+          (cd tmp/gui-win-amd64 && zip -r ../../release/ech-workers-gui-windows-amd64.zip .)
+
           ls -lh release/
 
       - name: Create Release
@@ -233,15 +247,17 @@ jobs:
           body: |
             ## 📦 下载说明
 
-            - **ech-workers-client-*.zip** - 客户端核心包（内核 + wintun.dll，命令行使用）
+            - **ech-workers-gui-*.zip** - 🖥️ **图形界面客户端**（推荐，包含 GUI + 内核 + wintun.dll）
+            - **ech-workers-client-*.zip** - 命令行客户端（内核 + wintun.dll）
             - **proxy-server-*.zip** - 代理服务端（HTTP/WebSocket）
-            - **proxy-server-tls-*.zip** - 代理服务端 TLS 版本（gRPC over TLS + HTTP/2，配合 cloudflared tunnel 使用）
+            - **proxy-server-tls-*.zip** - 代理服务端 TLS 版本（gRPC over TLS + HTTP/2）
 
             ## ✨ 特性
 
+            - 🖥️ **全新 Qt6 图形界面** - 节点管理、延迟测试、分享链接、系统托盘
             - 支持 ECH (Encrypted Client Hello) 加密
-            - 支持 Yamux 多路复用协议
+            - 支持 WebSocket / gRPC / XHTTP 传输协议
             - 支持 SOCKS5 / HTTP 代理
             - 支持 TUN 模式（全局代理）
-            - gRPC 模式支持 TLS 自签名证书（适配 cloudflared --no-tls-verify）
-            - **新增 EWP (ECH-Worker Protocol) 协议** - 自定义应用层协议，提供加密握手和动态混淆
+            - 支持 Vision 流控协议
+            - **EWP (ECH-Worker Protocol)** - 自定义应用层协议，提供加密握手和动态混淆
