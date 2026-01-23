@@ -740,8 +740,10 @@ func NewGRPCTransport(serverAddr, serverIP, uuidStr string, useTLS, useECH, enab
 	}
 
 	if serviceName == "" {
-		serviceName = "/ProxyService"
+		serviceName = "ProxyService"
 	}
+	// 确保 serviceName 不以斜杠开头（URL 路径已包含斜杠）
+	serviceName = strings.TrimPrefix(serviceName, "/")
 
 	return &GRPCTransport{
 		serverAddr:          serverAddr,
@@ -816,9 +818,16 @@ func (t *GRPCTransport) Dial() (TunnelConn, error) {
 		return nil, err
 	}
 
-	client := pb.NewProxyServiceClient(conn)
-
-	stream, err := client.Tunnel(context.Background())
+	// 使用自定义服务名创建流（支持服务端自定义 GRPC_SERVICE）
+	// 服务路径格式: /{serviceName}/Tunnel
+	streamPath := "/" + t.serviceName + "/Tunnel"
+	streamDesc := &grpc.StreamDesc{
+		StreamName:    "Tunnel",
+		ServerStreams: true,
+		ClientStreams: true,
+	}
+	
+	stream, err := conn.NewStream(context.Background(), streamDesc, streamPath)
 	if err != nil {
 		return nil, fmt.Errorf("gRPC stream failed: %w", err)
 	}
@@ -943,7 +952,7 @@ func (t *GRPCTransport) getOrCreateConn(host, addr string) (*grpc.ClientConn, er
 // GRPCConn gRPC 连接实现
 type GRPCConn struct {
 	conn              *grpc.ClientConn
-	stream            pb.ProxyService_TunnelClient
+	stream            grpc.ClientStream  // 使用通用流接口支持自定义服务名
 	uuid              [16]byte
 	mu                sync.Mutex
 	enableFlow        bool
@@ -965,13 +974,14 @@ func (c *GRPCConn) Connect(target string, initialData []byte) error {
 	}
 
 	c.mu.Lock()
-	err = c.stream.Send(&pb.SocketData{Content: handshakeData})
+	err = c.stream.SendMsg(&pb.SocketData{Content: handshakeData})
 	c.mu.Unlock()
 	if err != nil {
 		return fmt.Errorf("send handshake: %w", err)
 	}
 
-	respMsg, err := c.stream.Recv()
+	respMsg := &pb.SocketData{}
+	err = c.stream.RecvMsg(respMsg)
 	if err != nil {
 		return fmt.Errorf("read handshake response: %w", err)
 	}
@@ -1003,7 +1013,8 @@ func (c *GRPCConn) Connect(target string, initialData []byte) error {
 }
 
 func (c *GRPCConn) Read(buf []byte) (int, error) {
-	resp, err := c.stream.Recv()
+	resp := &pb.SocketData{}
+	err := c.stream.RecvMsg(resp)
 	if err != nil {
 		return 0, err
 	}
@@ -1031,7 +1042,7 @@ func (c *GRPCConn) Write(data []byte) error {
 		writeData = data
 	}
 
-	return c.stream.Send(&pb.SocketData{Content: writeData})
+	return c.stream.SendMsg(&pb.SocketData{Content: writeData})
 }
 
 func (c *GRPCConn) Close() error {

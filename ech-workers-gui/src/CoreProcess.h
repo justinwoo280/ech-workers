@@ -3,6 +3,8 @@
 #include <QObject>
 #include <QProcess>
 #include <QString>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
 #include "EWPNode.h"
 
 class CoreProcess : public QObject
@@ -37,8 +39,13 @@ private:
     QStringList buildArguments(const EWPNode &node, bool tunMode);
     QString findCoreExecutable();
 
+    void sendQuitRequest();
+
     QProcess *process = nullptr;
+    QNetworkAccessManager *networkManager = nullptr;
     QString coreExecutable;
     QString listenAddr = "127.0.0.1:30000";
+    QString controlAddr;
     QString lastError;
+    bool gracefulStop = false;
 };

@@ -85,7 +85,7 @@ EWPNode EditNodeDialog::getNode() const
     
     // gRPC 配置
     node.grpcServiceName = ui->editGrpcService->text().trimmed();
-    if (node.grpcServiceName.isEmpty()) node.grpcServiceName = "/ProxyService";
+    if (node.grpcServiceName.isEmpty()) node.grpcServiceName = "ProxyService";
     
     // ECH 配置
     node.enableECH = ui->checkEnableECH->isChecked();

@@ -2,11 +2,14 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QDebug>
+#include <QNetworkRequest>
+#include <QUrl>
 
 CoreProcess::CoreProcess(QObject *parent)
     : QObject(parent)
 {
     coreExecutable = findCoreExecutable();
+    networkManager = new QNetworkAccessManager(this);
 }
 
 CoreProcess::~CoreProcess()
@@ -82,14 +85,39 @@ void CoreProcess::stop()
 {
     if (!isRunning()) return;
     
+    // 尝试通过控制服务器优雅退出
+    if (!controlAddr.isEmpty()) {
+        gracefulStop = true;
+        sendQuitRequest();
+        if (process->waitForFinished(3000)) {
+            delete process;
+            process = nullptr;
+            return;
+        }
+    }
+    
+    // 回退到强制终止
+    gracefulStop = true;
     process->terminate();
-    if (!process->waitForFinished(5000)) {
+    if (!process->waitForFinished(3000)) {
         process->kill();
         process->waitForFinished(2000);
     }
     
     delete process;
     process = nullptr;
+}
+
+void CoreProcess::sendQuitRequest()
+{
+    if (controlAddr.isEmpty()) return;
+    
+    QUrl url(QString("http://%1/quit").arg(controlAddr));
+    QNetworkRequest request(url);
+    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    
+    QNetworkReply *reply = networkManager->post(request, QByteArray());
+    connect(reply, &QNetworkReply::finished, reply, &QNetworkReply::deleteLater);
 }
 
 bool CoreProcess::isRunning() const
@@ -164,6 +192,9 @@ QStringList CoreProcess::buildArguments(const EWPNode &node, bool tunMode)
         args << "-tun";
     }
     
+    // 控制服务器（用于优雅退出）
+    args << "-control" << "127.0.0.1:0";
+    
     return args;
 }
 
@@ -176,10 +207,13 @@ void CoreProcess::onProcessFinished(int exitCode, QProcess::ExitStatus exitStatu
 {
     Q_UNUSED(exitCode)
     
-    if (exitStatus == QProcess::CrashExit) {
+    // 如果是优雅退出，不报告崩溃
+    if (exitStatus == QProcess::CrashExit && !gracefulStop) {
         emit errorOccurred("核心进程崩溃");
     }
     
+    gracefulStop = false;
+    controlAddr.clear();
     emit stopped();
 }
 
@@ -214,7 +248,12 @@ void CoreProcess::onReadyReadStandardOutput()
     
     if (!text.isEmpty()) {
         for (const auto &line : text.split('\n')) {
-            emit logReceived(line.trimmed());
+            QString trimmedLine = line.trimmed();
+            // 解析控制服务器地址
+            if (trimmedLine.startsWith("CONTROL_ADDR=")) {
+                controlAddr = trimmedLine.mid(13);
+            }
+            emit logReceived(trimmedLine);
         }
     }
 }
