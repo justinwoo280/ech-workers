@@ -148,7 +148,7 @@ func (r *HandshakeRequest) Encode() ([]byte, error) {
 
 func DecodeHandshakeRequest(data []byte, validUUIDs [][16]byte) (*HandshakeRequest, error) {
 	if len(data) < 15+MinPayloadLength+16 {
-		return nil, ErrInvalidLength
+		return nil, fmt.Errorf("%w: got %d bytes, need at least %d", ErrInvalidLength, len(data), 15+MinPayloadLength+16)
 	}
 
 	version := data[0]
@@ -161,21 +161,26 @@ func DecodeHandshakeRequest(data []byte, validUUIDs [][16]byte) (*HandshakeReque
 
 	payloadLen := binary.BigEndian.Uint16(data[13:15])
 	if payloadLen < MinPayloadLength || payloadLen > MaxPayloadLength {
-		return nil, ErrInvalidLength
+		return nil, fmt.Errorf("%w: payloadLen=%d (min=%d, max=%d)", ErrInvalidLength, payloadLen, MinPayloadLength, MaxPayloadLength)
 	}
 
 	// ciphertextLen = plaintextLen + 16 (Poly1305 tag)
 	ciphertextLen := int(payloadLen) + 16
 	if len(data) < 15+ciphertextLen+16 {
-		return nil, ErrInvalidLength
+		return nil, fmt.Errorf("%w: data too short for payload", ErrInvalidLength)
 	}
 
 	ad := data[0:15]
 	ciphertext := data[15 : 15+ciphertextLen]
 	authTag := data[15+ciphertextLen : 15+ciphertextLen+16]
 
-	for _, uuid := range validUUIDs {
+	// 调试：打印收到的数据摘要
+	fmt.Printf("[DEBUG] DecodeHandshakeRequest: dataLen=%d, version=%d, payloadLen=%d\n", len(data), version, payloadLen)
+	fmt.Printf("[DEBUG] authTag (received): %x\n", authTag)
+
+	for i, uuid := range validUUIDs {
 		expectedTag := computeHMAC(uuid, ad, ciphertext)
+		fmt.Printf("[DEBUG] UUID[%d] expectedTag: %x\n", i, expectedTag)
 		if !hmac.Equal(authTag, expectedTag) {
 			continue
 		}
