@@ -22,6 +22,8 @@ import (
 	"github.com/gorilla/websocket"
 	"golang.org/x/net/http2"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/backoff"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
@@ -701,6 +703,19 @@ func (c *FlowWSConn) StartPing(interval time.Duration) chan struct{} {
 
 // ======================== gRPC Transport ========================
 
+// gRPC 连接池（复用连接，避免重复建立）
+type grpcConnKey struct {
+	addr      string
+	authority string
+	useTLS    bool
+	useECH    bool
+}
+
+var (
+	grpcConnPool      = make(map[grpcConnKey]*grpc.ClientConn)
+	grpcConnPoolMutex sync.Mutex
+)
+
 type GRPCTransport struct {
 	serverAddr         string
 	serverIP           string
@@ -795,10 +810,67 @@ func (t *GRPCTransport) Dial() (TunnelConn, error) {
 		addr = net.JoinHostPort(t.serverIP, port)
 	}
 
+	// 获取或创建 gRPC 连接（连接池复用）
+	conn, err := t.getOrCreateConn(host, addr)
+	if err != nil {
+		return nil, err
+	}
+
+	client := pb.NewProxyServiceClient(conn)
+
+	stream, err := client.Tunnel(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("gRPC stream failed: %w", err)
+	}
+
+	return &GRPCConn{
+		conn:       conn,
+		stream:     stream,
+		uuid:       t.uuid,
+		enableFlow: t.enableFlow,
+	}, nil
+}
+
+// getOrCreateConn 获取或创建 gRPC 连接（连接池复用）
+func (t *GRPCTransport) getOrCreateConn(host, addr string) (*grpc.ClientConn, error) {
+	key := grpcConnKey{
+		addr:      addr,
+		authority: t.authority,
+		useTLS:    t.useTLS,
+		useECH:    t.useECH,
+	}
+
+	grpcConnPoolMutex.Lock()
+	defer grpcConnPoolMutex.Unlock()
+
+	// 检查连接池中是否有可用连接
+	if conn, found := grpcConnPool[key]; found {
+		state := conn.GetState()
+		if state != connectivity.Shutdown && state != connectivity.TransientFailure {
+			return conn, nil
+		}
+		// 连接已关闭或失败，删除并重新创建
+		conn.Close()
+		delete(grpcConnPool, key)
+	}
+
+	// 创建新连接
 	var opts []grpc.DialOption
+
+	// Backoff 配置（参考 Xray-core）
+	opts = append(opts, grpc.WithConnectParams(grpc.ConnectParams{
+		Backoff: backoff.Config{
+			BaseDelay:  500 * time.Millisecond,
+			Multiplier: 1.5,
+			Jitter:     0.2,
+			MaxDelay:   19 * time.Second,
+		},
+		MinConnectTimeout: 5 * time.Second,
+	}))
 
 	if t.useTLS || t.useECH {
 		var tlsCfg *tls.Config
+		var err error
 
 		if t.useECH {
 			echBytes, echErr := getECHList()
@@ -809,7 +881,6 @@ func (t *GRPCTransport) Dial() (TunnelConn, error) {
 			if err != nil {
 				return nil, fmt.Errorf("构建 ECH TLS 配置失败: %w", err)
 			}
-			log.Printf("[gRPC] 使用 ECH + TLS 1.3 连接")
 		} else {
 			tlsCfg = &tls.Config{
 				ServerName: host,
@@ -826,16 +897,27 @@ func (t *GRPCTransport) Dial() (TunnelConn, error) {
 		opts = append(opts, grpc.WithAuthority(t.authority))
 	}
 
-	if t.idleTimeout > 0 || t.healthCheckTimeout > 0 || t.permitWithoutStream {
-		opts = append(opts, grpc.WithKeepaliveParams(keepalive.ClientParameters{
-			Time:                t.idleTimeout,
-			Timeout:             t.healthCheckTimeout,
-			PermitWithoutStream: t.permitWithoutStream,
-		}))
+	// Keepalive 配置
+	idleTimeout := t.idleTimeout
+	if idleTimeout == 0 {
+		idleTimeout = 60 * time.Second // 默认 60 秒
 	}
+	healthCheckTimeout := t.healthCheckTimeout
+	if healthCheckTimeout == 0 {
+		healthCheckTimeout = 10 * time.Second // 默认 10 秒
+	}
+	opts = append(opts, grpc.WithKeepaliveParams(keepalive.ClientParameters{
+		Time:                idleTimeout,
+		Timeout:             healthCheckTimeout,
+		PermitWithoutStream: true, // 允许在没有活动流时发送 keepalive
+	}))
 
 	if t.initialWindowSize > 0 {
 		opts = append(opts, grpc.WithInitialWindowSize(t.initialWindowSize))
+	} else {
+		// 默认 4MB window size
+		opts = append(opts, grpc.WithInitialWindowSize(4*1024*1024))
+		opts = append(opts, grpc.WithInitialConnWindowSize(4*1024*1024))
 	}
 
 	if t.userAgent != "" {
@@ -851,20 +933,11 @@ func (t *GRPCTransport) Dial() (TunnelConn, error) {
 		return nil, fmt.Errorf("gRPC dial failed: %w", err)
 	}
 
-	client := pb.NewProxyServiceClient(conn)
+	// 存入连接池
+	grpcConnPool[key] = conn
+	logV("[gRPC] 新建连接: %s", addr)
 
-	stream, err := client.Tunnel(context.Background())
-	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("gRPC stream failed: %w", err)
-	}
-
-	return &GRPCConn{
-		conn:       conn,
-		stream:     stream,
-		uuid:       t.uuid,
-		enableFlow: t.enableFlow,
-	}, nil
+	return conn, nil
 }
 
 // GRPCConn gRPC 连接实现
@@ -971,9 +1044,8 @@ func (c *GRPCConn) Close() error {
 	if c.stream != nil {
 		c.stream.CloseSend()
 	}
-	if c.conn != nil {
-		return c.conn.Close()
-	}
+	// 注意：不关闭 conn，因为它是连接池中的共享连接
+	// 连接会在状态变为 Shutdown 或 TransientFailure 时自动清理
 	return nil
 }
 

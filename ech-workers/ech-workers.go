@@ -56,6 +56,7 @@ var (
 	protoMode  string // 传输协议模式: ws/grpc/xhttp
 	xhttpMode  string // XHTTP 模式: auto/stream-one/stream-down
 	enableFlow bool   // 启用 Vision 流控协议
+	enablePQC  bool   // 启用后量子密钥交换 (X25519MLKEM768)
 	controlAddr string
 	logFilePath string
 	verbose     bool   // 详细日志模式
@@ -109,6 +110,7 @@ func init() {
 	flag.StringVar(&protoMode, "mode", "ws", "传输协议模式: ws (WebSocket)、grpc 或 xhttp")
 	flag.StringVar(&xhttpMode, "xhttp-mode", "auto", "XHTTP 模式: auto (自动选择)、stream-one (双向流) 或 stream-down (分离上下行)")
 	flag.BoolVar(&enableFlow, "flow", true, "启用 Vision 流控协议（默认启用，提供流量混淆和零拷贝优化）")
+	flag.BoolVar(&enablePQC, "pqc", false, "启用后量子密钥交换 X25519MLKEM768（需要 Go 1.24+，默认使用经典 X25519）")
 	flag.StringVar(&controlAddr, "control", "", "本地控制接口监听地址（仅用于 GUI 控制退出），例如 127.0.0.1:0")
 	flag.StringVar(&logFilePath, "logfile", "", "将日志追加写入到文件（用于 GUI 提权启动时仍能显示日志）")
 	flag.BoolVar(&verbose, "verbose", false, "详细日志模式（记录每个连接详情，高并发时会产生大量日志）")
@@ -339,7 +341,7 @@ func buildTLSConfigWithECH(serverName string, echList []byte) (*tls.Config, erro
 	if err != nil {
 		return nil, fmt.Errorf("加载系统根证书失败: %w", err)
 	}
-	return &tls.Config{
+	cfg := &tls.Config{
 		MinVersion:                     tls.VersionTLS13,
 		ServerName:                     serverName,
 		EncryptedClientHelloConfigList: echList,
@@ -347,7 +349,27 @@ func buildTLSConfigWithECH(serverName string, echList []byte) (*tls.Config, erro
 			return errors.New("服务器拒绝 ECH")
 		},
 		RootCAs: roots,
-	}, nil
+	}
+
+	// 设置密钥交换算法
+	if enablePQC {
+		// 启用后量子密钥交换 (X25519MLKEM768 = X25519 + Kyber768)
+		// Go 1.24+ 原生支持
+		cfg.CurvePreferences = []tls.CurveID{
+			tls.X25519MLKEM768, // 后量子混合模式 (X25519 + Kyber768)
+			tls.X25519,         // 经典回退
+			tls.CurveP256,      // 额外回退
+		}
+		log.Printf("[🔒 PQC] 启用后量子密钥交换 X25519MLKEM768")
+	} else {
+		// 默认使用经典 X25519
+		cfg.CurvePreferences = []tls.CurveID{
+			tls.X25519,    // 经典模式
+			tls.CurveP256, // 回退
+		}
+	}
+
+	return cfg, nil
 }
 
 // queryHTTPSRecord 通过 DoH 查询 HTTPS 记录
