@@ -54,7 +54,13 @@ add_executable(${PROJECT_NAME} WIN32
 # 包含目录
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/ui
     ${CMAKE_CURRENT_BINARY_DIR}
+)
+
+# 设置 AUTOUIC 路径
+set_target_properties(${PROJECT_NAME} PROPERTIES
+    AUTOUIC_SEARCH_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/ui
 )
 
 # 链接 Qt 库
