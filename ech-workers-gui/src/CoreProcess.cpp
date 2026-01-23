@@ -17,18 +17,18 @@ CoreProcess::~CoreProcess()
 QString CoreProcess::findCoreExecutable()
 {
     QString appDir = QCoreApplication::applicationDirPath();
-    QString path = appDir + "/ech-workers.exe";
+    QString path = appDir + "/ech-workers-core.exe";
     
     if (QFile::exists(path)) {
         return path;
     }
     
-    path = appDir + "/../ech-workers.exe";
+    path = appDir + "/../ech-workers-core.exe";
     if (QFile::exists(path)) {
         return QDir(path).absolutePath();
     }
     
-    return "ech-workers.exe";
+    return "ech-workers-core.exe";
 }
 
 bool CoreProcess::start(const EWPNode &node, bool tunMode)

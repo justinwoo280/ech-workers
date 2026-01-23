@@ -96,8 +96,8 @@ void MainWindow::setupSystemTray()
 {
     trayIcon = new QSystemTrayIcon(this);
     
-    // 使用系统默认图标，避免图标文件问题
-    trayIcon->setIcon(style()->standardIcon(QStyle::SP_ComputerIcon));
+    // 使用自定义图标
+    trayIcon->setIcon(QIcon(":/icons/logo.ico"));
     trayIcon->setToolTip("ECH Workers");
     
     // 检查系统托盘支持

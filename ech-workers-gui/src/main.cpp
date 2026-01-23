@@ -4,6 +4,7 @@
 #include <QLocalSocket>
 #include <QLocalServer>
 #include <QMessageBox>
+#include <QIcon>
 #include "MainWindow.h"
 
 int main(int argc, char *argv[])
@@ -13,6 +14,9 @@ int main(int argc, char *argv[])
     app.setApplicationName("ECH Workers");
     app.setApplicationVersion("1.0.0");
     app.setOrganizationName("ECH Workers");
+    
+    // 设置应用程序图标
+    app.setWindowIcon(QIcon(":/icons/logo.ico"));
     
     // 防止重复开启
     QString socketName = "ECHWorkersGUI_SingleInstance";
