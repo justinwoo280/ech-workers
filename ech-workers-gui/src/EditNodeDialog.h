@@ -4,7 +4,7 @@
 #include "EWPNode.h"
 
 QT_BEGIN_NAMESPACE
-namespace Ui { class EditNode; }
+namespace Ui { class EditNodeDialog; }
 QT_END_NAMESPACE
 
 class EditNodeDialog : public QDialog

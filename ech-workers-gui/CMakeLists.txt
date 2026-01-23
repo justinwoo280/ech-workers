@@ -35,7 +35,7 @@ set(HEADERS
 
 set(UI_FILES
     ui/MainWindow.ui
-    ui/EditNode.ui
+    ui/EditNodeDialog.ui
     ui/Settings.ui
 )
 

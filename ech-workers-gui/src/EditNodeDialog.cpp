@@ -1,11 +1,11 @@
 #include "EditNodeDialog.h"
-#include "ui_EditNode.h"
+#include "ui_EditNodeDialog.h"
 
 #include <QUuid>
 
 EditNodeDialog::EditNodeDialog(QWidget *parent)
     : QDialog(parent)
-    , ui(new Ui::EditNode)
+    , ui(new Ui::EditNodeDialog)
 {
     ui->setupUi(this);
     
