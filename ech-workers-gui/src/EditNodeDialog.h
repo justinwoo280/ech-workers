@@ -26,6 +26,6 @@ private slots:
 private:
     void updateVisibility();
     
-    Ui::EditNode *ui;
+    Ui::EditNodeDialog *ui;
     EWPNode currentNode;
 };
