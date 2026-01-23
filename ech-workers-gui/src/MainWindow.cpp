@@ -300,7 +300,7 @@ void MainWindow::onImportFromClipboard()
         return;
     }
     
-    for (const auto &node : nodes) {
+    for (auto &node : nodes) {
         nodeManager->addNode(node);
     }
     
