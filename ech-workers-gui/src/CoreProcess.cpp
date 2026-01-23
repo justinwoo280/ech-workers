@@ -115,7 +115,7 @@ QStringList CoreProcess::buildArguments(const EWPNode &node, bool tunMode)
             args << "-mode" << "ws";
             break;
         case EWPNode::GRPC:
-            serverUrl = QString("grpcs://%1:%2%3")
+            serverUrl = QString("grpcs://%1:%2/%3")
                 .arg(node.serverAddress)
                 .arg(node.serverPort)
                 .arg(node.grpcServiceName);

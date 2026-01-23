@@ -170,7 +170,7 @@
       <item row="0" column="1">
        <widget class="QLineEdit" name="editGrpcService">
         <property name="text">
-         <string>/ProxyService</string>
+         <string>ProxyService</string>
         </property>
         <property name="placeholderText">
          <string>与服务端 GRPC_SERVICE 环境变量对应</string>

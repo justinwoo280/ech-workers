@@ -20,7 +20,7 @@ struct EWPNode {
     QString wsPath = "/";              // WebSocket 路径
     
     // gRPC 配置
-    QString grpcServiceName = "/ProxyService";  // gRPC 服务名（与服务端 GRPC_SERVICE 环境变量对应）
+    QString grpcServiceName = "ProxyService";  // gRPC 服务名（与服务端 GRPC_SERVICE 环境变量对应）
     
     // ECH 配置
     bool enableECH = true;
@@ -70,7 +70,7 @@ struct EWPNode {
         node.serverIP = obj["serverIP"].toString();
         node.transportMode = static_cast<TransportMode>(obj["transportMode"].toInt(0));
         node.wsPath = obj["wsPath"].toString("/");
-        node.grpcServiceName = obj["grpcServiceName"].toString("/ProxyService");
+        node.grpcServiceName = obj["grpcServiceName"].toString("ProxyService");
         node.enableECH = obj["enableECH"].toBool(true);
         node.echDomain = obj["echDomain"].toString("cloudflare-ech.com");
         node.dnsServer = obj["dnsServer"].toString("dns.alidns.com/dns-query");

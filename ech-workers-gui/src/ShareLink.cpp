@@ -123,7 +123,7 @@ QString ShareLink::generateLink(const EWPNode &node)
         case EWPNode::GRPC:
             query.addQueryItem("mode", "grpc");
             // gRPC 服务名
-            if (node.grpcServiceName != "/ProxyService") {
+            if (node.grpcServiceName != "ProxyService") {
                 query.addQueryItem("grpcService", node.grpcServiceName);
             }
             break;
