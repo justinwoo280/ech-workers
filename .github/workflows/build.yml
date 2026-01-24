@@ -67,8 +67,14 @@ jobs:
       - name: Build Windows amd64
         run: GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o ../artifacts/proxy-server-windows-amd64.exe .
 
+      - name: Build Windows arm64
+        run: GOOS=windows GOARCH=arm64 go build -ldflags="-s -w" -o ../artifacts/proxy-server-windows-arm64.exe .
+
       - name: Build Linux amd64
         run: GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o ../artifacts/proxy-server-linux-amd64 .
+
+      - name: Build Linux arm64
+        run: GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o ../artifacts/proxy-server-linux-arm64 .
 
       - name: Upload Proxy Server Artifacts
         uses: actions/upload-artifact@v4
@@ -99,8 +105,14 @@ jobs:
       - name: Build Windows amd64
         run: GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o ../artifacts/proxy-server-tls-windows-amd64.exe .
 
+      - name: Build Windows arm64
+        run: GOOS=windows GOARCH=arm64 go build -ldflags="-s -w" -o ../artifacts/proxy-server-tls-windows-arm64.exe .
+
       - name: Build Linux amd64
         run: GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o ../artifacts/proxy-server-tls-linux-amd64 .
+
+      - name: Build Linux arm64
+        run: GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o ../artifacts/proxy-server-tls-linux-arm64 .
 
       - name: Upload Proxy Server TLS Artifacts
         uses: actions/upload-artifact@v4
@@ -214,20 +226,40 @@ jobs:
           cp server/proxy-server-windows-amd64.exe tmp/server-win-amd64/proxy-server.exe
           (cd tmp/server-win-amd64 && zip -r ../../release/proxy-server-windows-amd64.zip .)
 
+          # Server Windows arm64
+          mkdir -p tmp/server-win-arm64
+          cp server/proxy-server-windows-arm64.exe tmp/server-win-arm64/proxy-server.exe
+          (cd tmp/server-win-arm64 && zip -r ../../release/proxy-server-windows-arm64.zip .)
+
           # Server Linux amd64
           mkdir -p tmp/server-linux-amd64
           cp server/proxy-server-linux-amd64 tmp/server-linux-amd64/proxy-server
           (cd tmp/server-linux-amd64 && zip -r ../../release/proxy-server-linux-amd64.zip .)
+
+          # Server Linux arm64
+          mkdir -p tmp/server-linux-arm64
+          cp server/proxy-server-linux-arm64 tmp/server-linux-arm64/proxy-server
+          (cd tmp/server-linux-arm64 && zip -r ../../release/proxy-server-linux-arm64.zip .)
 
           # Server TLS Windows amd64
           mkdir -p tmp/server-tls-win-amd64
           cp server-tls/proxy-server-tls-windows-amd64.exe tmp/server-tls-win-amd64/proxy-server-tls.exe
           (cd tmp/server-tls-win-amd64 && zip -r ../../release/proxy-server-tls-windows-amd64.zip .)
 
+          # Server TLS Windows arm64
+          mkdir -p tmp/server-tls-win-arm64
+          cp server-tls/proxy-server-tls-windows-arm64.exe tmp/server-tls-win-arm64/proxy-server-tls.exe
+          (cd tmp/server-tls-win-arm64 && zip -r ../../release/proxy-server-tls-windows-arm64.zip .)
+
           # Server TLS Linux amd64
           mkdir -p tmp/server-tls-linux-amd64
           cp server-tls/proxy-server-tls-linux-amd64 tmp/server-tls-linux-amd64/proxy-server-tls
           (cd tmp/server-tls-linux-amd64 && zip -r ../../release/proxy-server-tls-linux-amd64.zip .)
+
+          # Server TLS Linux arm64
+          mkdir -p tmp/server-tls-linux-arm64
+          cp server-tls/proxy-server-tls-linux-arm64 tmp/server-tls-linux-arm64/proxy-server-tls
+          (cd tmp/server-tls-linux-arm64 && zip -r ../../release/proxy-server-tls-linux-arm64.zip .)
 
           # GUI Windows amd64 (GUI + kernel + wintun.dll)
           mkdir -p tmp/gui-win-amd64
