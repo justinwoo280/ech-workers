@@ -2,7 +2,7 @@
 nixPkgs = ["go_1_24"]
 
 [phases.build]
-cmds = ["go build -ldflags="-s -w" -o out ."]
+cmds = ["go build -o out ."]
 
 [start]
 cmd = "./out"
