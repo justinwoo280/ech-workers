@@ -1,8 +1,8 @@
 [phases.setup]
-nixPkgs = ["go_1_23"]
+nixPkgs = ["go_1_24"]
 
 [phases.build]
-cmds = ["go build -o out"]
+cmds = ["GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o out"]
 
 [start]
 cmd = "./out"
