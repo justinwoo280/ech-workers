@@ -1,0 +1,412 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>EditNodeDialog</class>
+ <widget class="QDialog" name="EditNodeDialog">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>500</width>
+    <height>550</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>编辑节点</string>
+  </property>
+  <layout class="QVBoxLayout" name="mainLayout">
+   <!-- 基本配置 -->
+   <item>
+    <widget class="QGroupBox" name="basicGroup">
+     <property name="title">
+      <string>基本配置</string>
+     </property>
+     <layout class="QFormLayout" name="basicLayout">
+      <item row="0" column="0">
+       <widget class="QLabel" name="labelName">
+        <property name="text">
+         <string>名称</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="QLineEdit" name="editName">
+        <property name="placeholderText">
+         <string>节点名称</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="labelAddress">
+        <property name="text">
+         <string>服务器地址</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="QLineEdit" name="editAddress">
+        <property name="placeholderText">
+         <string>example.com</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="0">
+       <widget class="QLabel" name="labelPort">
+        <property name="text">
+         <string>端口</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="1">
+       <widget class="QSpinBox" name="spinPort">
+        <property name="minimum">
+         <number>1</number>
+        </property>
+        <property name="maximum">
+         <number>65535</number>
+        </property>
+        <property name="value">
+         <number>443</number>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="0">
+       <widget class="QLabel" name="labelProtocol">
+        <property name="text">
+         <string>应用协议</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="1">
+       <widget class="QComboBox" name="comboProtocol">
+        <item>
+         <property name="text">
+          <string>EWP (默认)</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>Trojan</string>
+         </property>
+        </item>
+       </widget>
+      </item>
+      <item row="4" column="0">
+       <widget class="QLabel" name="labelUUID">
+        <property name="text">
+         <string>UUID</string>
+        </property>
+       </widget>
+      </item>
+      <item row="4" column="1">
+       <widget class="QLineEdit" name="editUUID">
+        <property name="placeholderText">
+         <string>EWP 认证令牌 (与服务端一致)</string>
+        </property>
+       </widget>
+      </item>
+      <item row="5" column="0">
+       <widget class="QLabel" name="labelTrojanPassword">
+        <property name="text">
+         <string>Trojan 密码</string>
+        </property>
+       </widget>
+      </item>
+      <item row="5" column="1">
+       <widget class="QLineEdit" name="editTrojanPassword">
+        <property name="placeholderText">
+         <string>Trojan 认证密码</string>
+        </property>
+        <property name="echoMode">
+         <enum>QLineEdit::Password</enum>
+        </property>
+       </widget>
+      </item>
+      <item row="6" column="0">
+       <widget class="QLabel" name="labelServerIP">
+        <property name="text">
+         <string>优选 IP</string>
+        </property>
+       </widget>
+      </item>
+      <item row="6" column="1">
+       <widget class="QLineEdit" name="editServerIP">
+        <property name="placeholderText">
+         <string>可选，Cloudflare 优选 IP 或 CNAME</string>
+        </property>
+       </widget>
+      </item>
+      <item row="7" column="0">
+       <widget class="QLabel" name="labelTransport">
+        <property name="text">
+         <string>传输协议</string>
+        </property>
+       </widget>
+      </item>
+      <item row="7" column="1">
+       <widget class="QComboBox" name="comboTransport">
+        <item>
+         <property name="text">
+          <string>WebSocket</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>gRPC</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>XHTTP</string>
+         </property>
+        </item>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <!-- WebSocket 配置 -->
+   <item>
+    <widget class="QGroupBox" name="wsGroup">
+     <property name="title">
+      <string>WebSocket 配置</string>
+     </property>
+     <layout class="QFormLayout" name="wsLayout">
+      <item row="0" column="0">
+       <widget class="QLabel" name="labelWsPath">
+        <property name="text">
+         <string>路径 (Path)</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="QLineEdit" name="editWsPath">
+        <property name="text">
+         <string>/</string>
+        </property>
+        <property name="placeholderText">
+         <string>例如: /ws-path 或 /uuid</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <!-- gRPC 配置 -->
+   <item>
+    <widget class="QGroupBox" name="grpcGroup">
+     <property name="title">
+      <string>gRPC 配置</string>
+     </property>
+     <layout class="QFormLayout" name="grpcLayout">
+      <item row="0" column="0">
+       <widget class="QLabel" name="labelGrpcService">
+        <property name="text">
+         <string>服务名 (ServiceName)</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="QLineEdit" name="editGrpcService">
+        <property name="text">
+         <string>ProxyService</string>
+        </property>
+        <property name="placeholderText">
+         <string>与服务端 GRPC_SERVICE 环境变量对应</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <!-- ECH 配置 -->
+   <item>
+    <widget class="QGroupBox" name="echGroup">
+     <property name="title">
+      <string>ECH 配置</string>
+     </property>
+     <layout class="QFormLayout" name="echLayout">
+      <item row="0" column="0">
+       <widget class="QLabel" name="labelEnableECH">
+        <property name="text">
+         <string>启用 ECH</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="QCheckBox" name="checkEnableECH">
+        <property name="text">
+         <string>加密 SNI (Encrypted Client Hello)</string>
+        </property>
+        <property name="checked">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="labelECHDomain">
+        <property name="text">
+         <string>ECH 域名</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="QLineEdit" name="editECHDomain">
+        <property name="text">
+         <string>cloudflare-ech.com</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="0">
+       <widget class="QLabel" name="labelDNS">
+        <property name="text">
+         <string>DoH 服务器</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="1">
+       <widget class="QLineEdit" name="editDNS">
+        <property name="text">
+         <string>dns.alidns.com/dns-query</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="0">
+       <widget class="QLabel" name="labelPQC">
+        <property name="text">
+         <string>后量子加密</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="1">
+       <widget class="QCheckBox" name="checkEnablePQC">
+        <property name="text">
+         <string>启用 X25519MLKEM768 (需要 Go 1.24+)</string>
+        </property>
+        <property name="checked">
+         <bool>false</bool>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <!-- 高级配置 -->
+   <item>
+    <widget class="QGroupBox" name="advancedGroup">
+     <property name="title">
+      <string>高级配置</string>
+     </property>
+     <layout class="QFormLayout" name="advancedLayout">
+      <item row="0" column="0">
+       <widget class="QLabel" name="labelFlow">
+        <property name="text">
+         <string>Vision 流控</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="QCheckBox" name="checkEnableFlow">
+        <property name="text">
+         <string>启用流量混淆和零拷贝优化</string>
+        </property>
+        <property name="checked">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <!-- XHTTP 配置 -->
+   <item>
+    <widget class="QGroupBox" name="xhttpGroup">
+     <property name="title">
+      <string>XHTTP 配置</string>
+     </property>
+     <layout class="QFormLayout" name="xhttpLayout">
+      <item row="0" column="0">
+       <widget class="QLabel" name="labelXHTTPMode">
+        <property name="text">
+         <string>XHTTP 模式</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="QComboBox" name="comboXHTTPMode">
+        <item>
+         <property name="text">
+          <string>auto</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>stream-one (双向流)</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>stream-down (分离上下行)</string>
+         </property>
+        </item>
+       </widget>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="labelXHTTPPath">
+        <property name="text">
+         <string>XHTTP 路径</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="QLineEdit" name="editXHTTPPath">
+        <property name="text">
+         <string>/xhttp</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <!-- 弹性空间 -->
+   <item>
+    <spacer name="verticalSpacer">
+     <property name="orientation">
+      <enum>Qt::Vertical</enum>
+     </property>
+     <property name="sizeHint" stdset="0">
+      <size>
+       <width>20</width>
+       <height>20</height>
+      </size>
+     </property>
+    </spacer>
+   </item>
+   <!-- 按钮 -->
+   <item>
+    <widget class="QDialogButtonBox" name="buttonBox">
+     <property name="orientation">
+      <enum>Qt::Horizontal</enum>
+     </property>
+     <property name="standardButtons">
+      <set>QDialogButtonBox::Cancel|QDialogButtonBox::Ok</set>
+     </property>
+    </widget>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections>
+  <connection>
+   <sender>buttonBox</sender>
+   <signal>accepted()</signal>
+   <receiver>EditNodeDialog</receiver>
+   <slot>accept()</slot>
+  </connection>
+  <connection>
+   <sender>buttonBox</sender>
+   <signal>rejected()</signal>
+   <receiver>EditNodeDialog</receiver>
+   <slot>reject()</slot>
+  </connection>
+ </connections>
+</ui>
