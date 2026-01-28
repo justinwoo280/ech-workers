@@ -67,8 +67,12 @@ func main() {
 		trans = websocket.NewWithProtocol(cfg.ServerAddr, cfg.ServerIP, cfg.Token, cfg.Password, !cfg.Fallback, cfg.EnableFlow, useTrojan, parsed.Path, echMgr)
 		log.Printf("[传输] Using %s", trans.Name())
 	case constant.TransportGRPC:
-		trans = grpc.NewWithProtocol(cfg.ServerAddr, cfg.ServerIP, cfg.Token, cfg.Password, !cfg.Fallback, cfg.EnableFlow, useTrojan, "", echMgr)
-		log.Printf("[传输] Using %s", trans.Name())
+		parsed, err := transport.ParseAddress(cfg.ServerAddr)
+		if err != nil {
+			log.Fatalf("[错误] Invalid server address: %v", err)
+		}
+		trans = grpc.NewWithProtocol(cfg.ServerAddr, cfg.ServerIP, cfg.Token, cfg.Password, !cfg.Fallback, cfg.EnableFlow, useTrojan, parsed.Path, echMgr)
+		log.Printf("[传输] Using %s, service: %s", trans.Name(), parsed.Path)
 	case constant.TransportXHTTP:
 		parsed, err := transport.ParseAddress(cfg.ServerAddr)
 		if err != nil {
