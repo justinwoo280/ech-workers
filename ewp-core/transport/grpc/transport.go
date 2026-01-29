@@ -39,6 +39,7 @@ type Transport struct {
 	uuid                [16]byte
 	useECH              bool
 	enableFlow          bool
+	enablePQC           bool
 	useTrojan           bool    // Use Trojan protocol
 	serviceName         string
 	authority           string
@@ -51,10 +52,10 @@ type Transport struct {
 }
 
 func New(serverAddr, serverIP, uuidStr string, useECH, enableFlow bool, serviceName string, echManager *commontls.ECHManager) *Transport {
-	return NewWithProtocol(serverAddr, serverIP, uuidStr, "", useECH, enableFlow, false, serviceName, echManager)
+	return NewWithProtocol(serverAddr, serverIP, uuidStr, "", useECH, enableFlow, false, false, serviceName, echManager)
 }
 
-func NewWithProtocol(serverAddr, serverIP, uuidStr, password string, useECH, enableFlow, useTrojan bool, serviceName string, echManager *commontls.ECHManager) *Transport {
+func NewWithProtocol(serverAddr, serverIP, uuidStr, password string, useECH, enableFlow, enablePQC, useTrojan bool, serviceName string, echManager *commontls.ECHManager) *Transport {
 	var uuid [16]byte
 	if !useTrojan {
 		var err error
@@ -77,6 +78,7 @@ func NewWithProtocol(serverAddr, serverIP, uuidStr, password string, useECH, ena
 		uuid:                uuid,
 		useECH:              useECH,
 		enableFlow:          enableFlow,
+		enablePQC:           enablePQC,
 		useTrojan:           useTrojan,
 		serviceName:         serviceName,
 		authority:           "",
@@ -194,7 +196,7 @@ func (t *Transport) getOrCreateConn(host, addr string) (*grpc.ClientConn, error)
 	tlsConfig, err := commontls.NewClient(commontls.ClientOptions{
 		ServerName: host,
 		EnableECH:  t.useECH,
-		EnablePQC:  false,
+		EnablePQC:  t.enablePQC,
 		ECHManager: t.echManager,
 	})
 	if err != nil {

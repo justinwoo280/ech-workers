@@ -22,6 +22,7 @@ type Transport struct {
 	uuid        [16]byte
 	useECH      bool
 	enableFlow  bool
+	enablePQC   bool
 	useTrojan   bool    // Use Trojan protocol instead of EWP
 	path        string
 	host        string
@@ -31,11 +32,11 @@ type Transport struct {
 
 // New creates a new WebSocket transport
 func New(serverAddr, serverIP, token string, useECH, enableFlow bool, path string, echMgr *commontls.ECHManager) *Transport {
-	return NewWithProtocol(serverAddr, serverIP, token, "", useECH, enableFlow, false, path, echMgr)
+	return NewWithProtocol(serverAddr, serverIP, token, "", useECH, enableFlow, false, false, path, echMgr)
 }
 
 // NewWithProtocol creates a new WebSocket transport with protocol selection
-func NewWithProtocol(serverAddr, serverIP, token, password string, useECH, enableFlow, useTrojan bool, path string, echMgr *commontls.ECHManager) *Transport {
+func NewWithProtocol(serverAddr, serverIP, token, password string, useECH, enableFlow, enablePQC, useTrojan bool, path string, echMgr *commontls.ECHManager) *Transport {
 	var uuid [16]byte
 	if !useTrojan {
 		var err error
@@ -57,6 +58,7 @@ func NewWithProtocol(serverAddr, serverIP, token, password string, useECH, enabl
 		uuid:       uuid,
 		useECH:     useECH,
 		enableFlow: enableFlow,
+		enablePQC:  enablePQC,
 		useTrojan:  useTrojan,
 		path:       path,
 		headers:    make(map[string]string),
@@ -95,7 +97,7 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 	tlsConfig, err := commontls.NewClient(commontls.ClientOptions{
 		ServerName: parsed.Host,
 		EnableECH:  t.useECH,
-		EnablePQC:  false,
+		EnablePQC:  t.enablePQC,
 		ECHManager: t.echManager,
 	})
 	if err != nil {
