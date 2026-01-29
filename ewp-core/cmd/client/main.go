@@ -64,21 +64,21 @@ func main() {
 		if err != nil {
 			log.Fatalf("[错误] Invalid server address: %v", err)
 		}
-		trans = websocket.NewWithProtocol(cfg.ServerAddr, cfg.ServerIP, cfg.Token, cfg.Password, !cfg.Fallback, cfg.EnableFlow, useTrojan, parsed.Path, echMgr)
+		trans = websocket.NewWithProtocol(cfg.ServerAddr, cfg.ServerIP, cfg.Token, cfg.Password, !cfg.Fallback, cfg.EnableFlow, cfg.EnablePQC, useTrojan, parsed.Path, echMgr)
 		log.Printf("[传输] Using %s", trans.Name())
 	case constant.TransportGRPC:
 		parsed, err := transport.ParseAddress(cfg.ServerAddr)
 		if err != nil {
 			log.Fatalf("[错误] Invalid server address: %v", err)
 		}
-		trans = grpc.NewWithProtocol(cfg.ServerAddr, cfg.ServerIP, cfg.Token, cfg.Password, !cfg.Fallback, cfg.EnableFlow, useTrojan, parsed.Path, echMgr)
+		trans = grpc.NewWithProtocol(cfg.ServerAddr, cfg.ServerIP, cfg.Token, cfg.Password, !cfg.Fallback, cfg.EnableFlow, cfg.EnablePQC, useTrojan, parsed.Path, echMgr)
 		log.Printf("[传输] Using %s, service: %s", trans.Name(), parsed.Path)
 	case constant.TransportXHTTP:
 		parsed, err := transport.ParseAddress(cfg.ServerAddr)
 		if err != nil {
 			log.Fatalf("[错误] Invalid server address: %v", err)
 		}
-		trans = xhttp.NewWithProtocol(cfg.ServerAddr, cfg.ServerIP, cfg.Token, cfg.Password, !cfg.Fallback, cfg.EnableFlow, useTrojan, parsed.Path, echMgr)
+		trans = xhttp.NewWithProtocol(cfg.ServerAddr, cfg.ServerIP, cfg.Token, cfg.Password, !cfg.Fallback, cfg.EnableFlow, cfg.EnablePQC, useTrojan, parsed.Path, echMgr)
 		log.Printf("[传输] Using %s", trans.Name())
 	default:
 		log.Fatalf("[错误] Unknown transport mode: %s", cfg.ProtoMode)

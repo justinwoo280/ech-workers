@@ -24,6 +24,7 @@ type Transport struct {
 	uuidStr    string
 	useECH     bool
 	enableFlow bool
+	enablePQC  bool
 	useTrojan  bool    // Use Trojan protocol
 	path       string
 	paddingMin int
@@ -33,10 +34,10 @@ type Transport struct {
 }
 
 func New(serverAddr, serverIP, token string, useECH, enableFlow bool, path string, echManager *commontls.ECHManager) *Transport {
-	return NewWithProtocol(serverAddr, serverIP, token, "", useECH, enableFlow, false, path, echManager)
+	return NewWithProtocol(serverAddr, serverIP, token, "", useECH, enableFlow, false, false, path, echManager)
 }
 
-func NewWithProtocol(serverAddr, serverIP, token, password string, useECH, enableFlow, useTrojan bool, path string, echManager *commontls.ECHManager) *Transport {
+func NewWithProtocol(serverAddr, serverIP, token, password string, useECH, enableFlow, enablePQC, useTrojan bool, path string, echManager *commontls.ECHManager) *Transport {
 	var uuid [16]byte
 	if !useTrojan {
 		var err error
@@ -59,6 +60,7 @@ func NewWithProtocol(serverAddr, serverIP, token, password string, useECH, enabl
 		uuidStr:    token,
 		useECH:     useECH,
 		enableFlow: enableFlow,
+		enablePQC:  enablePQC,
 		useTrojan:  useTrojan,
 		path:       path,
 		paddingMin: 100,
@@ -112,7 +114,7 @@ func (t *Transport) createHTTPClient(host, port string) (*http.Client, error) {
 	tlsConfig, err := commontls.NewClient(commontls.ClientOptions{
 		ServerName: parsed.Host,
 		EnableECH:  t.useECH,
-		EnablePQC:  false,
+		EnablePQC:  t.enablePQC,
 		ECHManager: t.echManager,
 	})
 	if err != nil {
