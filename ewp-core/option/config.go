@@ -23,6 +23,7 @@ type Config struct {
 	NumConns    int
 	EnableFlow  bool
 	EnablePQC   bool
+	EnableMux   bool    // Trojan 多路复用
 
 	// TLS/ECH settings
 	DNSServer string
@@ -54,6 +55,7 @@ func DefaultConfig() *Config {
 		XHTTPMode:  constant.DefaultXHTTPMode,
 		EnableFlow: true,
 		EnablePQC:  false,
+		EnableMux:  false,
 		Fallback:   false,
 		TunMode:    false,
 		TunIP:      constant.DefaultTunIP,
@@ -106,6 +108,7 @@ func ParseFlags() (*Config, error) {
 	flag.StringVar(&cfg.XHTTPMode, "xhttp-mode", cfg.XHTTPMode, "XHTTP 模式: auto (自动选择)、stream-one (双向流) 或 stream-down (分离上下行)")
 	flag.BoolVar(&cfg.EnableFlow, "flow", cfg.EnableFlow, "启用 Vision 流控协议（默认启用，提供流量混淆和零拷贝优化）")
 	flag.BoolVar(&cfg.EnablePQC, "pqc", cfg.EnablePQC, "启用后量子密钥交换 X25519MLKEM768（需要 Go 1.24+，默认使用经典 X25519）")
+	flag.BoolVar(&cfg.EnableMux, "mux", cfg.EnableMux, "启用 Trojan 多路复用（仅 Trojan 协议，单连接承载多个请求）")
 	flag.StringVar(&cfg.ControlAddr, "control", "", "本地控制接口监听地址（仅用于 GUI 控制退出），例如 127.0.0.1:0")
 	flag.StringVar(&cfg.LogFilePath, "logfile", "", "将日志追加写入到文件（用于 GUI 提权启动时仍能显示日志）")
 	flag.BoolVar(&cfg.Verbose, "verbose", cfg.Verbose, "详细日志模式（记录每个连接详情，高并发时会产生大量日志）")

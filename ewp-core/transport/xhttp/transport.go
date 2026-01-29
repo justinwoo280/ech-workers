@@ -7,6 +7,7 @@ import (
 	"net"
 	"time"
 
+	commonnet "ewp-core/common/net"
 	commontls "ewp-core/common/tls"
 	"ewp-core/log"
 	"ewp-core/transport"
@@ -135,7 +136,8 @@ func (t *Transport) createHTTPClient(host, port string) (*http.Client, error) {
 
 	h2Transport := &http2.Transport{
 		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
-			rawConn, err := net.DialTimeout("tcp", target, 10*time.Second)
+			// Use TCP Fast Open for reduced latency
+			rawConn, err := commonnet.DialTFOContext(ctx, "tcp", target, 10*time.Second)
 			if err != nil {
 				return nil, err
 			}

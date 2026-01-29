@@ -5,6 +5,7 @@ import (
 	"net"
 	"time"
 
+	commonnet "ewp-core/common/net"
 	"ewp-core/dns"
 	httpproxy "ewp-core/protocol/http"
 	"ewp-core/protocol/socks5"
@@ -27,13 +28,13 @@ func NewServer(listenAddr string, trans transport.Transport, dnsServer string) *
 }
 
 func (s *Server) Run() error {
-	listener, err := net.Listen("tcp", s.listenAddr)
+	listener, err := commonnet.ListenTFO("tcp", s.listenAddr)
 	if err != nil {
 		return err
 	}
 	defer listener.Close()
 
-	log.Printf("[Proxy] Server started: %s (SOCKS5 + HTTP)", s.listenAddr)
+	log.Printf("[Proxy] Server started: %s (SOCKS5 + HTTP) with TCP Fast Open", s.listenAddr)
 
 	for {
 		conn, err := listener.Accept()

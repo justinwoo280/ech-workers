@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	commonnet "ewp-core/common/net"
 	commontls "ewp-core/common/tls"
 	"ewp-core/log"
 	"ewp-core/transport"
@@ -109,20 +110,22 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 		return nil, err
 	}
 
-	// Configure dialer
+	// Configure dialer with TCP Fast Open support
 	dialer := websocket.Dialer{
 		TLSClientConfig:  stdConfig,
 		HandshakeTimeout: 10 * time.Second,
-	}
-
-	if t.serverIP != "" {
-		dialer.NetDial = func(network, address string) (net.Conn, error) {
-			_, p, err := net.SplitHostPort(address)
-			if err != nil {
-				return nil, err
+		NetDial: func(network, address string) (net.Conn, error) {
+			// Use custom server IP if provided
+			if t.serverIP != "" {
+				_, p, err := net.SplitHostPort(address)
+				if err != nil {
+					return nil, err
+				}
+				address = net.JoinHostPort(t.serverIP, p)
 			}
-			return net.DialTimeout(network, net.JoinHostPort(t.serverIP, p), 10*time.Second)
-		}
+			// Use TCP Fast Open for reduced latency
+			return commonnet.DialTFO(network, address, 10*time.Second)
+		},
 	}
 
 	// Set headers

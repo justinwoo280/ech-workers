@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	commonnet "ewp-core/common/net"
 	"ewp-core/internal/server"
 	pb "ewp-core/proto"
 	"ewp-core/protocol/ewp"
@@ -160,13 +161,18 @@ func main() {
 		mux.HandleFunc(wsPath, wsHandler)
 		mux.HandleFunc("/", disguiseHandler)
 
+		lis, err := commonnet.ListenTFO("tcp", ":"+port)
+		if err != nil {
+			log.Fatalf("❌ WebSocket listen failed: %v", err)
+		}
+		log.Printf("✅ WebSocket listener created with TCP Fast Open support")
+
 		server := &http.Server{
-			Addr:    ":" + port,
 			Handler: mux,
 		}
 
 		log.Printf("🚀 WebSocket server listening on :%s (ws_path=%s)", port, wsPath)
-		log.Fatal(server.ListenAndServe())
+		log.Fatal(server.Serve(lis))
 	}
 }
 
@@ -348,10 +354,11 @@ func (s *proxyServer) Tunnel(stream pb.ProxyService_TunnelServer) error {
 }
 
 func startGRPCServer() {
-	lis, err := net.Listen("tcp", ":"+port)
+	lis, err := commonnet.ListenTFO("tcp", ":"+port)
 	if err != nil {
 		log.Fatalf("❌ gRPC listen failed: %v", err)
 	}
+	log.Printf("✅ gRPC listener created with TCP Fast Open support")
 
 	kasp := keepalive.ServerParameters{
 		Time:    60 * time.Second,

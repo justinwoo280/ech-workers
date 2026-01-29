@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	commonnet "ewp-core/common/net"
 	commontls "ewp-core/common/tls"
 	"ewp-core/log"
 	"ewp-core/transport"
@@ -182,6 +183,11 @@ func (t *Transport) getOrCreateConn(host, addr string) (*grpc.ClientConn, error)
 	}
 
 	var opts []grpc.DialOption
+
+	// Use TCP Fast Open for reduced latency
+	opts = append(opts, grpc.WithContextDialer(func(ctx context.Context, address string) (net.Conn, error) {
+		return commonnet.DialTFOContext(ctx, "tcp", address, 10*time.Second)
+	}))
 
 	opts = append(opts, grpc.WithConnectParams(grpc.ConnectParams{
 		Backoff: backoff.Config{
