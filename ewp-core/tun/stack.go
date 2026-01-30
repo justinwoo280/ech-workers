@@ -78,3 +78,10 @@ func (s *Stack) Endpoint() *Endpoint {
 func (s *Stack) Stack() *stack.Stack {
 	return s.stack
 }
+
+func (s *Stack) Close() {
+	if s.stack != nil {
+		s.stack.Close()
+	}
+	log.Printf("[TUN] Network stack closed")
+}

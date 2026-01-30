@@ -1,6 +1,7 @@
 ﻿package xhttp
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -14,18 +15,18 @@ import (
 )
 
 type StreamOneConn struct {
-	httpClient *http.Client
-	host       string
-	port       string
-	path       string
-	uuid       [16]byte
-	uuidStr    string
-	password   string
-	enableFlow bool
-	useTrojan  bool
-	paddingMin int
-	paddingMax int
+	httpClient    *http.Client
+	host          string
+	port          string
+	path          string
+	uuid          [16]byte
+	uuidStr       string
+	password      string
+	enableFlow    bool
+	useTrojan     bool
+	transport     *Transport  // 引用 Transport 以获取新功能
 
+	// 连接管理
 	pipeReader        *io.PipeReader
 	pipeWriter        *io.PipeWriter
 	respBody          io.ReadCloser
@@ -33,9 +34,14 @@ type StreamOneConn struct {
 	mu                sync.Mutex
 	flowState         *ewp.FlowState
 	writeOnceUserUUID []byte
+
+	// Xray-core 风格的异步处理
+	waitReader        *WaitReadCloser
+	lastRequestTime   time.Time
+	requestCount      int64
 }
 
-func NewStreamOneConn(httpClient *http.Client, host, port, path string, uuid [16]byte, uuidStr, password string, enableFlow, useTrojan bool, paddingMin, paddingMax int) *StreamOneConn {
+func NewStreamOneConn(httpClient *http.Client, host, port, path string, uuid [16]byte, uuidStr, password string, enableFlow, useTrojan bool, transport *Transport) *StreamOneConn {
 	return &StreamOneConn{
 		httpClient: httpClient,
 		host:       host,
@@ -46,8 +52,8 @@ func NewStreamOneConn(httpClient *http.Client, host, port, path string, uuid [16
 		password:   password,
 		enableFlow: enableFlow,
 		useTrojan:  useTrojan,
-		paddingMin: paddingMin,
-		paddingMax: paddingMax,
+		transport:  transport,
+		waitReader: NewWaitReadCloser(),
 	}
 }
 
@@ -64,19 +70,30 @@ func (c *StreamOneConn) connectTrojan(target string, initialData []byte) error {
 
 	c.pipeReader, c.pipeWriter = io.Pipe()
 
-	paddingLen := c.paddingMin
-	if c.paddingMax > c.paddingMin {
-		paddingLen += int(time.Now().UnixNano() % int64(c.paddingMax-c.paddingMin))
+	// 使用 Transport 的随机化配置
+	requestInterval := c.transport.requestInterval.RandDuration()
+	if requestInterval > 0 && !c.lastRequestTime.IsZero() {
+		elapsed := time.Since(c.lastRequestTime)
+		if elapsed < requestInterval {
+			time.Sleep(requestInterval - elapsed)
+		}
 	}
-	padding := generatePadding(paddingLen)
 
-	reqURL := fmt.Sprintf("https://%s:%s%s?x_padding=%s", c.host, c.port, c.path, padding)
+	// 构造 URL - ECH 环境下不在路径中添加 padding
+	reqURL := fmt.Sprintf("https://%s:%s%s", c.host, c.port, c.path)
 
-	req, err := http.NewRequest("POST", reqURL, c.pipeReader)
+	// 使用新的请求创建方法（带 httptrace 和 WithoutCancel）
+	ctx := context.Background()
+	req, err := c.transport.createRequestWithContext(ctx, "POST", reqURL, c.pipeReader)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
 
+	// 使用统一的头部管理
+	headers := c.transport.GetRequestHeader(reqURL)
+	for k, v := range headers {
+		req.Header[k] = v
+	}
 	req.Header.Set("X-Auth-Token", c.uuidStr)
 	req.Header.Set("Content-Type", "application/octet-stream")
 
@@ -103,43 +120,59 @@ func (c *StreamOneConn) connectTrojan(target string, initialData []byte) error {
 		handshakeData = append(handshakeData, initialData...)
 	}
 
-	connEstablished := make(chan struct{})
+	// 使用 WaitReadCloser 进行异步响应处理
 	respChan := make(chan *http.Response, 1)
 	errChan := make(chan error, 1)
 
+	// 异步发送请求
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				errChan <- fmt.Errorf("request panic: %v", r)
+			}
+		}()
+		
 		resp, err := c.httpClient.Do(req)
-		close(connEstablished)
 		if err != nil {
+			c.waitReader.Fail(err)
 			errChan <- err
 			return
 		}
+		
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			c.waitReader.Fail(fmt.Errorf("http error: %d %s, body: %s", resp.StatusCode, resp.Status, body))
+			errChan <- fmt.Errorf("http error: %d", resp.StatusCode)
+			return
+		}
+		
+		// 设置响应体到 WaitReadCloser
+		c.waitReader.SetReadCloser(resp.Body)
 		respChan <- resp
 	}()
 
+	// 发送握手数据
 	if _, err := c.pipeWriter.Write(handshakeData); err != nil {
 		return fmt.Errorf("send Trojan handshake: %w", err)
 	}
 
-	<-connEstablished
+	// 更新请求统计
+	c.lastRequestTime = time.Now()
+	c.requestCount++
 
+	// 等待响应
 	select {
-	case resp := <-respChan:
-		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			return fmt.Errorf("http error: %d %s, body: %s", resp.StatusCode, resp.Status, body)
-		}
-		c.respBody = resp.Body
+	case <-respChan:
+		c.respBody = c.waitReader
+		c.connected = true
+		log.V("[XHTTP] Trojan connected, target: %s", target)
+		return nil
 	case err := <-errChan:
-		return fmt.Errorf("http request failed: %w", err)
-	case <-time.After(5 * time.Second):
-		return errors.New("connect timeout")
+		return fmt.Errorf("request failed: %w", err)
+	case <-time.After(c.transport.connectionTimeout.RandDuration()):
+		return fmt.Errorf("connection timeout")
 	}
-
-	c.connected = true
-	log.V("[XHTTP] stream-one Trojan handshake success, target: %s", target)
-	return nil
 }
 
 func (c *StreamOneConn) connectEWP(target string, initialData []byte) error {
@@ -148,19 +181,30 @@ func (c *StreamOneConn) connectEWP(target string, initialData []byte) error {
 
 	c.pipeReader, c.pipeWriter = io.Pipe()
 
-	paddingLen := c.paddingMin
-	if c.paddingMax > c.paddingMin {
-		paddingLen += int(time.Now().UnixNano() % int64(c.paddingMax-c.paddingMin))
+	// 使用 Transport 的随机化配置
+	requestInterval := c.transport.requestInterval.RandDuration()
+	if requestInterval > 0 && !c.lastRequestTime.IsZero() {
+		elapsed := time.Since(c.lastRequestTime)
+		if elapsed < requestInterval {
+			time.Sleep(requestInterval - elapsed)
+		}
 	}
-	padding := generatePadding(paddingLen)
 
-	reqURL := fmt.Sprintf("https://%s:%s%s?x_padding=%s", c.host, c.port, c.path, padding)
+	// 构造 URL - ECH 环境下不在路径中添加 padding
+	reqURL := fmt.Sprintf("https://%s:%s%s", c.host, c.port, c.path)
 
-	req, err := http.NewRequest("POST", reqURL, c.pipeReader)
+	// 使用新的请求创建方法
+	ctx := context.Background()
+	req, err := c.transport.createRequestWithContext(ctx, "POST", reqURL, c.pipeReader)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
 
+	// 使用统一的头部管理
+	headers := c.transport.GetRequestHeader(reqURL)
+	for k, v := range headers {
+		req.Header[k] = v
+	}
 	req.Header.Set("X-Auth-Token", c.uuidStr)
 	req.Header.Set("Content-Type", "application/octet-stream")
 
@@ -181,38 +225,61 @@ func (c *StreamOneConn) connectEWP(target string, initialData []byte) error {
 		copy(c.writeOnceUserUUID, c.uuid[:])
 	}
 
-	connEstablished := make(chan struct{})
+	if len(initialData) > 0 {
+		handshakeData = append(handshakeData, initialData...)
+	}
+
+	// 使用 WaitReadCloser 进行异步响应处理
 	respChan := make(chan *http.Response, 1)
 	errChan := make(chan error, 1)
 
+	// 异步发送请求
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				errChan <- fmt.Errorf("request panic: %v", r)
+			}
+		}()
+		
 		resp, err := c.httpClient.Do(req)
-		close(connEstablished)
 		if err != nil {
+			c.waitReader.Fail(err)
 			errChan <- err
 			return
 		}
+		
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			c.waitReader.Fail(fmt.Errorf("http error: %d %s, body: %s", resp.StatusCode, resp.Status, body))
+			errChan <- fmt.Errorf("http error: %d", resp.StatusCode)
+			return
+		}
+		
+		// 设置响应体到 WaitReadCloser
+		c.waitReader.SetReadCloser(resp.Body)
 		respChan <- resp
 	}()
 
+	// 发送握手数据
 	if _, err := c.pipeWriter.Write(handshakeData); err != nil {
 		return fmt.Errorf("send EWP handshake: %w", err)
 	}
 
-	<-connEstablished
+	// 更新请求统计
+	c.lastRequestTime = time.Now()
+	c.requestCount++
 
+	// 等待响应
 	select {
-	case resp := <-respChan:
-		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			return fmt.Errorf("http error: %d %s, body: %s", resp.StatusCode, resp.Status, body)
-		}
-		c.respBody = resp.Body
+	case <-respChan:
+		c.respBody = c.waitReader
+		c.connected = true
+		log.V("[XHTTP] EWP connected, target: %s", target)
 	case err := <-errChan:
-		return fmt.Errorf("http request failed: %w", err)
-	case <-time.After(5 * time.Second):
-		return errors.New("connect timeout")
+		return fmt.Errorf("request failed: %w", err)
+	case <-time.After(c.transport.connectionTimeout.RandDuration()):
+		return fmt.Errorf("connection timeout")
 	}
 
 	handshakeResp := make([]byte, 64)

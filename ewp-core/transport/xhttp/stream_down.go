@@ -2,11 +2,12 @@
 
 import (
 	"bytes"
-	"crypto/rand"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,8 +26,7 @@ type StreamDownConn struct {
 	sessionID         string
 	enableFlow        bool
 	useTrojan         bool
-	paddingMin        int
-	paddingMax        int
+	transport         *Transport  // 引用 Transport 以获取新功能
 	uploadSeq         uint64
 	respBody          io.ReadCloser
 	uploadMu          sync.Mutex
@@ -36,11 +36,8 @@ type StreamDownConn struct {
 	writeOnceUserUUID []byte
 }
 
-func NewStreamDownConn(httpClient *http.Client, host, port, path string, uuid [16]byte, uuidStr, password string, enableFlow, useTrojan bool, paddingMin, paddingMax int) *StreamDownConn {
-	randomBytes := make([]byte, 8)
-	rand.Read(randomBytes)
-	sessionID := fmt.Sprintf("%x%x", uuid[:4], randomBytes)
-
+func NewStreamDownConn(httpClient *http.Client, host, port, path string, uuid [16]byte, uuidStr, password string, enableFlow, useTrojan bool, transport *Transport) *StreamDownConn {
+	sessionID := generateSessionID()
 	return &StreamDownConn{
 		httpClient: httpClient,
 		host:       host,
@@ -52,9 +49,7 @@ func NewStreamDownConn(httpClient *http.Client, host, port, path string, uuid [1
 		sessionID:  sessionID,
 		enableFlow: enableFlow,
 		useTrojan:  useTrojan,
-		paddingMin: paddingMin,
-		paddingMax: paddingMax,
-		uploadSeq:  0,
+		transport:  transport,
 	}
 }
 
@@ -79,18 +74,31 @@ func (c *StreamDownConn) Connect(target string, initialData []byte) error {
 		copy(c.writeOnceUserUUID, c.uuid[:])
 	}
 
-	paddingLen := c.paddingMin
-	if c.paddingMax > c.paddingMin {
-		paddingLen += int(time.Now().UnixNano() % int64(c.paddingMax-c.paddingMin))
+	// 使用 Transport 的随机化配置 - ECH 环境下不在路径中添加 padding
+	var padding string
+	if c.transport.enablePadding && !c.transport.paddingInReferer {
+		paddingLen := c.transport.paddingBytes.Rand()
+		if paddingLen > 0 {
+			padding = strings.Repeat("X", int(paddingLen))
+		}
 	}
-	padding := generatePadding(paddingLen)
 
-	handshakeURL := fmt.Sprintf("https://%s:%s%s/%s/0?x_padding=%s", c.host, c.port, c.path, c.sessionID, padding)
-	handshakeReq, err := http.NewRequest("POST", handshakeURL, bytes.NewReader(handshakeData))
+	handshakeURL := fmt.Sprintf("https://%s:%s%s/%s/0", c.host, c.port, c.path, c.sessionID)
+	if padding != "" {
+		handshakeURL += "?x_padding=" + padding
+	}
+	// 使用新的请求创建方法
+	ctx := context.Background()
+	handshakeReq, err := c.transport.createRequestWithContext(ctx, "POST", handshakeURL, bytes.NewReader(handshakeData))
 	if err != nil {
 		return fmt.Errorf("create handshake request: %w", err)
 	}
 
+	// 使用统一的头部管理
+	headers := c.transport.GetRequestHeader(handshakeURL)
+	for k, v := range headers {
+		handshakeReq.Header[k] = v
+	}
 	handshakeReq.Header.Set("X-Auth-Token", c.uuidStr)
 	handshakeReq.ContentLength = int64(len(handshakeData))
 
@@ -121,13 +129,22 @@ func (c *StreamDownConn) Connect(target string, initialData []byte) error {
 
 	c.uploadSeq = 1
 
-	padding = generatePadding(paddingLen)
-	getURL := fmt.Sprintf("https://%s:%s%s/%s?x_padding=%s", c.host, c.port, c.path, c.sessionID, padding)
-	getReq, err := http.NewRequest("GET", getURL, nil)
+	// 构造下载 URL - ECH 环境下不在路径中添加 padding
+	getURL := fmt.Sprintf("https://%s:%s%s/%s", c.host, c.port, c.path, c.sessionID)
+	if padding != "" {
+		getURL += "?x_padding=" + padding
+	}
+
+	getReq, err := c.transport.createRequestWithContext(ctx, "GET", getURL, nil)
 	if err != nil {
 		return fmt.Errorf("create GET request: %w", err)
 	}
 
+	// 使用统一的头部管理
+	headers = c.transport.GetRequestHeader(getURL)
+	for k, v := range headers {
+		getReq.Header[k] = v
+	}
 	getReq.Header.Set("X-Auth-Token", c.uuidStr)
 
 	getResp, err := c.httpClient.Do(getReq)
@@ -183,21 +200,33 @@ func (c *StreamDownConn) Write(data []byte) error {
 		writeData = data
 	}
 
-	paddingLen := c.paddingMin
-	if c.paddingMax > c.paddingMin {
-		paddingLen += int(time.Now().UnixNano() % int64(c.paddingMax-c.paddingMin))
+	// 使用 Transport 的随机化配置
+	var newPadding string
+	if c.transport.enablePadding && !c.transport.paddingInReferer {
+		paddingLen := c.transport.paddingBytes.Rand()
+		if paddingLen > 0 {
+			newPadding = strings.Repeat("X", int(paddingLen))
+		}
 	}
-	padding := generatePadding(paddingLen)
 
 	seq := c.uploadSeq
 	c.uploadSeq++
 
-	reqURL := fmt.Sprintf("https://%s:%s%s/%s/%d?x_padding=%s", c.host, c.port, c.path, c.sessionID, seq, padding)
-	req, err := http.NewRequest("POST", reqURL, bytes.NewReader(writeData))
+	reqURL := fmt.Sprintf("https://%s:%s%s/%s/%d", c.host, c.port, c.path, c.sessionID, seq)
+	if newPadding != "" {
+		reqURL += "?x_padding=" + newPadding
+	}
+
+	req, err := c.transport.createRequestWithContext(context.Background(), "POST", reqURL, bytes.NewReader(writeData))
 	if err != nil {
 		return err
 	}
 
+	// 使用统一的头部管理
+	headers := c.transport.GetRequestHeader(reqURL)
+	for k, v := range headers {
+		req.Header[k] = v
+	}
 	req.Header.Set("X-Auth-Token", c.uuidStr)
 	req.ContentLength = int64(len(writeData))
 
@@ -220,6 +249,11 @@ func (c *StreamDownConn) Close() error {
 		return c.respBody.Close()
 	}
 	return nil
+}
+
+// generateSessionID 生成会话 ID
+func generateSessionID() string {
+	return fmt.Sprintf("%x", time.Now().UnixNano())
 }
 
 func (c *StreamDownConn) StartPing(interval time.Duration) chan struct{} {

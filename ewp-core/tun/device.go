@@ -1,4 +1,6 @@
-﻿package tun
+﻿//go:build windows
+
+package tun
 
 import (
 	"context"

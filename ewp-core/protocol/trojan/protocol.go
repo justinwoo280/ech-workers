@@ -131,6 +131,10 @@ func DecodeAddress(r io.Reader) (*Address, error) {
 }
 
 func ParseAddress(target string) (*Address, error) {
+	// 规范化 IPv6 地址格式
+	// 将 "2001:db8::1:443" 转换为 "[2001:db8::1]:443"
+	target = normalizeIPv6Address(target)
+
 	host, portStr, err := net.SplitHostPort(target)
 	if err != nil {
 		return nil, fmt.Errorf("invalid address: %w", err)
@@ -158,6 +162,48 @@ func ParseAddress(target string) (*Address, error) {
 	}
 
 	return addr, nil
+}
+
+// normalizeIPv6Address 规范化 IPv6 地址格式
+// 将 "2001:db8::1:443" 转换为 "[2001:db8::1]:443"
+func normalizeIPv6Address(addr string) string {
+	// 已经是标准格式 [ipv6]:port
+	if len(addr) > 0 && addr[0] == '[' {
+		return addr
+	}
+
+	// 统计冒号数量，IPv6 地址至少有 2 个冒号
+	colonCount := 0
+	lastColonIdx := -1
+	for i, c := range addr {
+		if c == ':' {
+			colonCount++
+			lastColonIdx = i
+		}
+	}
+
+	// 如果冒号数量 >= 2，可能是 IPv6 地址
+	// 检查最后一个冒号后面是否是纯数字（端口号）
+	if colonCount >= 2 && lastColonIdx > 0 && lastColonIdx < len(addr)-1 {
+		portPart := addr[lastColonIdx+1:]
+		isPort := true
+		for _, c := range portPart {
+			if c < '0' || c > '9' {
+				isPort = false
+				break
+			}
+		}
+
+		if isPort {
+			// 验证前面部分是否是有效的 IPv6 地址
+			hostPart := addr[:lastColonIdx]
+			if ip := net.ParseIP(hostPart); ip != nil && ip.To4() == nil {
+				return "[" + hostPart + "]:" + portPart
+			}
+		}
+	}
+
+	return addr
 }
 
 func GenerateKey(password string) [KeyLength]byte {
