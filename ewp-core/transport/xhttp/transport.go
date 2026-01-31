@@ -46,6 +46,9 @@ type Transport struct {
 	enablePadding    bool  // 是否启用 padding（ECH 环境下建议关闭路径 padding）
 	paddingInReferer bool  // 仅在 Referer 中添加 padding
 
+	// Browser Dialer 配置
+	useBrowserDialer bool  // 是否使用 Browser Dialer
+
 	// Xmux 连接池管理
 	xmuxConfig XmuxConfig
 	xmuxManager *XmuxManager
@@ -141,6 +144,12 @@ func (t *Transport) SetXmuxConfig(config XmuxConfig) *Transport {
 		t.xmuxManager.Close()
 		t.xmuxManager = nil
 	}
+	return t
+}
+
+// SetBrowserDialer 设置是否使用 Browser Dialer
+func (t *Transport) SetBrowserDialer(enable bool) *Transport {
+	t.useBrowserDialer = enable
 	return t
 }
 
