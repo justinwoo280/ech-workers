@@ -24,3 +24,6 @@ require (
 	golang.org/x/tools v0.41.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251022142026-3a174f9686a8 // indirect
 )
+
+// 排除旧版本的 genproto（防止依赖冲突）
+exclude google.golang.org/genproto v0.0.0-20230110181048-76db0878b65f
