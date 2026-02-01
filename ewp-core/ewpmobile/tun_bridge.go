@@ -195,7 +195,7 @@ func (tb *TUNBridge) monitor() {
 			}
 			
 			// 这里可以添加健康检查逻辑
-			log.V("[TUN-Bridge] Health check: running=%v", tb.running)
+			log.Printf("[TUN-Bridge] Health check: running=%v", tb.running)
 		}
 	}
 }
@@ -345,7 +345,7 @@ func tunUpdateConfig(handle C.ulong, configJSON *C.char) C.int {
 	defer bridgeMu.RUnlock()
 	
 	id := uint64(handle)
-	bridge, exists := tunBridges[id]
+	_, exists := tunBridges[id]
 	if !exists {
 		return 0
 	}

@@ -290,9 +290,8 @@ func (vm *VPNManager) Stop() error {
 		vm.stack = nil
 	}
 	
-	// 关闭传输层
+	// 清空传输层引用
 	if vm.transport != nil {
-		vm.transport.Close()
 		vm.transport = nil
 	}
 	
@@ -334,14 +333,7 @@ func (vm *VPNManager) GetStats() string {
 		"tun_mtu":       vm.tunMTU,
 	}
 	
-	// 添加传输层统计
-	if vm.transport != nil {
-		if xhttpTransport, ok := vm.transport.(*xhttp.Transport); ok {
-			if xmuxStats := xhttpTransport.GetXmuxStats(); xmuxStats != nil {
-				stats["xmux"] = xmuxStats
-			}
-		}
-	}
+	// 传输层统计（暂未实现）
 	
 	jsonData, _ := json.Marshal(stats)
 	return string(jsonData)
