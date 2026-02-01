@@ -268,17 +268,20 @@ func tunStopBridge(handle C.ulong) {
 }
 
 //export tunIsRunning
-func tunIsRunning(handle C.ulong) C.bool {
+func tunIsRunning(handle C.ulong) C.int {
 	bridgeMu.RLock()
 	defer bridgeMu.RUnlock()
 	
 	id := uint64(handle)
 	bridge, exists := tunBridges[id]
 	if !exists {
-		return false
+		return 0
 	}
 	
-	return C.bool(bridge.IsRunning())
+	if bridge.IsRunning() {
+		return 1
+	}
+	return 0
 }
 
 //export tunGetStats
@@ -319,29 +322,32 @@ func tunGetStats(handle C.ulong) *C.char {
 }
 
 //export tunTestConnection
-func tunTestConnection(handle C.ulong, target *C.char, port C.int) C.bool {
+func tunTestConnection(handle C.ulong, target *C.char, port C.int) C.int {
 	bridgeMu.RLock()
 	defer bridgeMu.RUnlock()
 	
 	id := uint64(handle)
 	bridge, exists := tunBridges[id]
 	if !exists {
-		return false
+		return 0
 	}
 	
 	targetStr := C.GoString(target)
-	return C.bool(bridge.TestConnection(targetStr, int(port)))
+	if bridge.TestConnection(targetStr, int(port)) {
+		return 1
+	}
+	return 0
 }
 
 //export tunUpdateConfig
-func tunUpdateConfig(handle C.ulong, configJSON *C.char) C.bool {
+func tunUpdateConfig(handle C.ulong, configJSON *C.char) C.int {
 	bridgeMu.RLock()
 	defer bridgeMu.RUnlock()
 	
 	id := uint64(handle)
 	bridge, exists := tunBridges[id]
 	if !exists {
-		return false
+		return 0
 	}
 	
 	// 这里可以解析 JSON 配置
@@ -349,7 +355,7 @@ func tunUpdateConfig(handle C.ulong, configJSON *C.char) C.bool {
 	configStr := C.GoString(configJSON)
 	log.Printf("[TUN-Bridge] Config update: %s", configStr)
 	
-	return true
+	return 1
 }
 
 // Cleanup 清理所有桥接器
