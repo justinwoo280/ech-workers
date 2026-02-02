@@ -8,7 +8,7 @@ import (
 )
 
 type TrojanProtocolHandler struct {
-	validKeys map[[32]byte]struct{}
+	validKeys map[[trojan.KeyLength]byte]string
 }
 
 func NewTrojanProtocolHandler() *TrojanProtocolHandler {
@@ -53,11 +53,4 @@ func (r *byteReader) Read(p []byte) (n int, err error) {
 	n = copy(p, r.data[r.pos:])
 	r.pos += n
 	return n, nil
-}
-
-func maskPassword(p string) string {
-	if len(p) <= 4 {
-		return "****"
-	}
-	return p[:2] + "****" + p[len(p)-2:]
 }

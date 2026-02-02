@@ -49,6 +49,10 @@ type Transport struct {
 	// Browser Dialer 配置
 	useBrowserDialer bool  // 是否使用 Browser Dialer
 
+	// SSE 伪装配置
+	useSSEHeaders bool  // 伪装成 Server-Sent Events 流
+	noSSEHeader   bool  // 禁用 SSE Content-Type（某些 CDN 场景）
+
 	// Xmux 连接池管理
 	xmuxConfig XmuxConfig
 	xmuxManager *XmuxManager
@@ -111,6 +115,10 @@ func NewWithProtocol(serverAddr, serverIP, token, password string, useECH, enabl
 		customHeaders:    make(map[string]string),
 		enablePadding:    true,
 		paddingInReferer: paddingInReferer,
+		
+		// SSE 伪装配置（默认启用）
+		useSSEHeaders:    true,  // 伪装成 SSE 流，对抗 CDN/Nginx 缓冲
+		noSSEHeader:      false, // 某些 CDN 可能需要禁用 Content-Type
 
 		// Xmux 连接池配置
 		xmuxConfig: xmuxConfig,
@@ -144,6 +152,18 @@ func (t *Transport) SetXmuxConfig(config XmuxConfig) *Transport {
 		t.xmuxManager.Close()
 		t.xmuxManager = nil
 	}
+	return t
+}
+
+// SetSSEHeaders 设置是否使用 SSE 伪装头
+func (t *Transport) SetSSEHeaders(enabled bool) *Transport {
+	t.useSSEHeaders = enabled
+	return t
+}
+
+// SetNoSSEHeader 设置是否禁用 SSE Content-Type（某些 CDN 场景）
+func (t *Transport) SetNoSSEHeader(disabled bool) *Transport {
+	t.noSSEHeader = disabled
 	return t
 }
 
@@ -204,7 +224,14 @@ func (t *Transport) GetRequestHeader(rawURL string) http.Header {
 
 	// 添加其他标准头部
 	header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-	header.Set("Accept", "*/*")
+	
+	// SSE 伪装：Accept text/event-stream 让中间件认为这是 SSE 长连接
+	if t.useSSEHeaders {
+		header.Set("Accept", "text/event-stream")
+	} else {
+		header.Set("Accept", "*/*")
+	}
+	
 	header.Set("Accept-Language", "en-US,en;q=0.9")
 	header.Set("Cache-Control", "no-cache")
 	header.Set("Pragma", "no-cache")
@@ -264,6 +291,7 @@ func (t *Transport) createHTTPClient(host, port string) (*http.Client, error) {
 		target = net.JoinHostPort(t.serverIP, port)
 	}
 
+	// HTTP/2 Transport 配置 - 参考 Xray-core ChromeH2KeepAlivePeriod
 	h2Transport := &http2.Transport{
 		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
 			// 使用 TCP Fast Open 减少延迟
@@ -273,9 +301,9 @@ func (t *Transport) createHTTPClient(host, port string) (*http.Client, error) {
 			}
 			return tls.Client(rawConn, stdConfig), nil
 		},
-		IdleConnTimeout:            90 * time.Second,
-		ReadIdleTimeout:            30 * time.Second,
-		StrictMaxConcurrentStreams: true,
+		IdleConnTimeout:            90 * time.Second,  // 连接空闲超时
+		ReadIdleTimeout:            15 * time.Second,  // 读空闲超时（参考 Chrome）→ 触发 HTTP/2 PING
+		StrictMaxConcurrentStreams: true,             // 严格限制并发流数
 	}
 
 	return &http.Client{

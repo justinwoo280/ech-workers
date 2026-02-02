@@ -1,0 +1,51 @@
+# Built application files
+*.apk
+*.aar
+*.ap_
+*.aab
+
+# Files for the ART/Dalvik VM
+*.dex
+
+# Java class files
+*.class
+
+# Generated files
+bin/
+gen/
+out/
+build/
+
+# Gradle files
+.gradle/
+gradle/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Local configuration file (sdk path, etc)
+local.properties
+
+# IntelliJ
+*.iml
+.idea/
+misc.xml
+deploymentTargetDropDown.xml
+render.experimental.xml
+
+# Android Studio
+.navigation/
+captures/
+.externalNativeBuild
+.cxx
+
+# NDK
+obj/
+
+# Android Profiling
+*.hprof
+
+# AAR from ewp-core
+app/libs/ewp-core.aar
+
+# OS
+.DS_Store
+Thumbs.db

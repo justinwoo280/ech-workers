@@ -22,7 +22,6 @@ import (
 	commonnet "ewp-core/common/net"
 	"ewp-core/internal/server"
 	pb "ewp-core/proto"
-	"ewp-core/protocol/ewp"
 	"ewp-core/protocol/trojan"
 	grpctransport "ewp-core/transport/grpc"
 	wstransport "ewp-core/transport/websocket"
@@ -44,6 +43,7 @@ var (
 	paddingMin    = getEnvInt("PADDING_MIN", 100)
 	paddingMax    = getEnvInt("PADDING_MAX", 1000)
 	fallbackAddr  = getEnv("FALLBACK", "")  // Trojan 回退地址，如 127.0.0.1:80 或 https://example.com
+	sseHeaders    = getEnv("SSE_HEADERS", "true") != "false"  // SSE 伪装头（默认启用）
 	grpcMode      = false
 	xhttpMode     = false
 	enableFlow    = false
@@ -218,13 +218,7 @@ func (s *proxyServer) Tunnel(stream pb.ProxyService_TunnelServer) error {
 
 	content := firstMsg.GetContent()
 
-	var protocol server.ProtocolHandler
-	if trojanMode {
-		protocol = server.NewTrojanProtocolHandler()
-	} else {
-		protocol = server.NewEWPProtocolHandler(enableFlow)
-	}
-
+	protocol := newProtocolHandler()
 	transport := grpctransport.NewServerAdapter(stream)
 
 	opts := server.TunnelOptions{
@@ -345,20 +339,19 @@ func handleWebSocket(conn *websocket.Conn, clientAddr string) {
 		return
 	}
 
-	var protocol server.ProtocolHandler
 	if trojanMode {
 		if len(firstMsg) < trojan.KeyLength+2+1+1+2+2 {
 			log.Printf("❌ Trojan message too short: %d bytes", len(firstMsg))
 			return
 		}
-		protocol = server.NewTrojanProtocolHandler()
 	} else {
 		if len(firstMsg) < 15 {
 			log.Printf("❌ EWP message too short: %d bytes", len(firstMsg))
 			return
 		}
-		protocol = server.NewEWPProtocolHandler(enableFlow)
 	}
+	
+	protocol := newProtocolHandler()
 
 	transport := wstransport.NewServerAdapter(conn)
 
@@ -431,8 +424,7 @@ func xhttpHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if paddingLen < paddingMin || paddingLen > paddingMax {
-		log.Printf("❌ Invalid padding length: %d (expected %d-%d)", paddingLen, paddingMin, paddingMax)
-		http.Error(w, "Bad Request", http.StatusBadRequest)
+		httpError(w, http.StatusBadRequest, "Bad Request", "❌ Invalid padding length: %d (expected %d-%d)", paddingLen, paddingMin, paddingMax)
 		return
 	}
 
@@ -465,9 +457,55 @@ func xhttpHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func setXHTTPResponseHeaders(w http.ResponseWriter) {
+// setStreamResponseHeaders 统一设置流式响应头并返回 Flusher
+// contentType: 内容类型，空字符串则使用 SSE 伪装
+func setStreamResponseHeaders(w http.ResponseWriter, contentType string) http.Flusher {
+	// 禁止 CDN/Nginx 缓存和缓冲（参考 Xray-core）
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Accel-Buffering", "no")
+	
+	// 设置 Content-Type
+	if contentType != "" {
+		w.Header().Set("Content-Type", contentType)
+	} else if sseHeaders {
+		// SSE 伪装：让中间件认为这是 Server-Sent Events 长连接
+		w.Header().Set("Content-Type", "text/event-stream")
+	}
+	
+	w.WriteHeader(http.StatusOK)
+	
+	// 返回 Flusher（如果支持）
+	if flusher, ok := w.(http.Flusher); ok {
+		return flusher
+	}
+	return nil
+}
+
+// setXHTTPResponseHeaders 保持向后兼容
+func setXHTTPResponseHeaders(w http.ResponseWriter) {
+	setStreamResponseHeaders(w, "")
+}
+
+// newProtocolHandler 统一创建协议处理器
+func newProtocolHandler() server.ProtocolHandler {
+	if trojanMode {
+		return server.NewTrojanProtocolHandler()
+	}
+	return server.NewEWPProtocolHandler(enableFlow)
+}
+
+// httpError 统一记录错误日志并返回 HTTP 错误响应
+func httpError(w http.ResponseWriter, statusCode int, message string, logFormat string, args ...interface{}) {
+	log.Printf(logFormat, args...)
+	http.Error(w, message, statusCode)
+}
+
+// maskPassword 隐藏密码的敏感部分
+func maskPassword(p string) string {
+	if len(p) <= 4 {
+		return "****"
+	}
+	return p[:2] + "****" + p[len(p)-2:]
 }
 
 func getClientIP(r *http.Request) string {
@@ -570,22 +608,18 @@ func xhttpStreamOneHandler(w http.ResponseWriter, r *http.Request) {
 	clientIP := getClientIP(r)
 
 	var handshakeData []byte
-	var protocol server.ProtocolHandler
 
 	if trojanMode {
 		header := make([]byte, trojan.KeyLength+2+1+1+2+2)
 		if _, err := io.ReadFull(r.Body, header); err != nil {
-			log.Printf("❌ XHTTP stream-one: Failed to read Trojan header: %v", err)
-			http.Error(w, "Bad Request", http.StatusBadRequest)
+			httpError(w, http.StatusBadRequest, "Bad Request", "❌ XHTTP stream-one: Failed to read Trojan header: %v", err)
 			return
 		}
 		handshakeData = header
-		protocol = server.NewTrojanProtocolHandler()
 	} else {
 		header := make([]byte, 15)
 		if _, err := io.ReadFull(r.Body, header); err != nil {
-			log.Printf("❌ XHTTP stream-one: Failed to read EWP header: %v", err)
-			http.Error(w, "Bad Request", http.StatusBadRequest)
+			httpError(w, http.StatusBadRequest, "Bad Request", "❌ XHTTP stream-one: Failed to read EWP header: %v", err)
 			return
 		}
 
@@ -594,34 +628,27 @@ func xhttpStreamOneHandler(w http.ResponseWriter, r *http.Request) {
 		handshakeData = make([]byte, totalLen)
 		copy(handshakeData[:15], header)
 		if _, err := io.ReadFull(r.Body, handshakeData[15:]); err != nil {
-			log.Printf("❌ XHTTP stream-one: Failed to read EWP handshake: %v", err)
-			http.Error(w, "Bad Request", http.StatusBadRequest)
+			httpError(w, http.StatusBadRequest, "Bad Request", "❌ XHTTP stream-one: Failed to read EWP handshake: %v", err)
 			return
 		}
-		protocol = server.NewEWPProtocolHandler(enableFlow)
 	}
 
+	protocol := newProtocolHandler()
 	result, err := protocol.Handshake(handshakeData, clientIP)
 	if err != nil {
-		log.Printf("❌ XHTTP stream-one: Handshake failed: %v", err)
-		http.Error(w, "Bad Request", http.StatusBadRequest)
+		httpError(w, http.StatusBadRequest, "Bad Request", "❌ XHTTP stream-one: Handshake failed: %v", err)
 		if len(result.Response) > 0 {
 			w.Write(result.Response)
 		}
 		return
 	}
 
-	log.Info("[XHTTP] stream-one: %s (user: %s) -> %s", clientIP, result.UserID, result.Target)
+	log.Printf("✅ [XHTTP] stream-one: %s (user: %s) -> %s", clientIP, result.UserID, result.Target)
 
 	if result.IsUDP {
 		log.Printf("📦 stream-one UDP mode")
-		w.Header().Set("X-Accel-Buffering", "no")
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Content-Type", "application/octet-stream")
-		w.WriteHeader(http.StatusOK)
-		
-		flusher, ok := w.(http.Flusher)
-		if !ok {
+		flusher := setStreamResponseHeaders(w, "application/octet-stream")
+		if flusher == nil {
 			return
 		}
 		
@@ -639,8 +666,7 @@ func xhttpStreamOneHandler(w http.ResponseWriter, r *http.Request) {
 
 	remote, err := net.Dial("tcp", result.Target)
 	if err != nil {
-		log.Printf("❌ XHTTP stream-one: Dial failed: %v", err)
-		http.Error(w, "Connection failed", http.StatusBadGateway)
+		httpError(w, http.StatusBadGateway, "Connection failed", "❌ XHTTP stream-one: Dial failed: %v", err)
 		return
 	}
 	defer remote.Close()
@@ -652,13 +678,8 @@ func xhttpStreamOneHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.WriteHeader(http.StatusOK)
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
+	flusher := setStreamResponseHeaders(w, "application/octet-stream")
+	if flusher == nil {
 		return
 	}
 
@@ -684,8 +705,7 @@ func xhttpHandshakeHandler(w http.ResponseWriter, r *http.Request, sessionID str
 	// 读取 EWP 握手请求
 	handshakeData, err := io.ReadAll(r.Body)
 	if err != nil {
-		log.Printf("❌ XHTTP handshake: Failed to read body: %v", err)
-		http.Error(w, "Bad Request", http.StatusBadRequest)
+		httpError(w, http.StatusBadRequest, "Bad Request", "❌ XHTTP handshake: Failed to read body: %v", err)
 		return
 	}
 
@@ -785,12 +805,7 @@ func xhttpDownloadHandler(w http.ResponseWriter, r *http.Request, sessionID stri
 
 	log.Printf("📥 stream-down GET: %s", sessionID)
 
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.WriteHeader(http.StatusOK)
-
-	flusher, _ := w.(http.Flusher)
+	flusher := setStreamResponseHeaders(w, "application/octet-stream")
 	buf := largeBufferPool.Get().([]byte)
 	defer largeBufferPool.Put(buf)
 
