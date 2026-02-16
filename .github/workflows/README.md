@@ -12,16 +12,15 @@ This directory contains automated build and release workflows for the EWP-Worker
 - Manual dispatch via GitHub Actions UI
 
 **What it builds:**
-- **EWP-Core Client**: Cross-platform proxy client (Windows, Linux, macOS - amd64/arm64)
-- **EWP-Core Server**: Proxy server (Linux, Windows, macOS)
-- **EWP-GUI**: Graphical user interface (Windows, Linux, macOS)
+- **EWP-Core Client**: Cross-platform proxy client (Windows, Linux - amd64/arm64)
+- **EWP-Core Server**: Proxy server (Linux, Windows)
+- **EWP-GUI**: Graphical user interface (Windows, Linux) - **包含内核**
 
 **Artifacts:**
 - `ewp-core-client-binaries`: All client executables
 - `ewp-core-server-binaries`: All server executables
-- `ewp-gui-windows-binaries`: Windows GUI executable
-- `ewp-gui-linux-binaries`: Linux GUI executable
-- `ewp-gui-macos-binaries`: macOS GUI application
+- `ewp-gui-windows-binaries`: Windows GUI package (包含 ewp-core.exe)
+- `ewp-gui-linux-binaries`: Linux GUI package (包含 ewp-core)
 
 ---
 
@@ -61,8 +60,6 @@ This directory contains automated build and release workflows for the EWP-Worker
 | Windows | arm64 | `ewp-core-client-windows-arm64.exe` |
 | Linux | amd64 | `ewp-core-client-linux-amd64` |
 | Linux | arm64 | `ewp-core-client-linux-arm64` |
-| macOS | amd64 | `ewp-core-client-darwin-amd64` |
-| macOS | arm64 | `ewp-core-client-darwin-arm64` |
 
 ### EWP-Core Server
 
@@ -71,15 +68,13 @@ This directory contains automated build and release workflows for the EWP-Worker
 | Linux | amd64 | `ewp-core-server-linux-amd64` |
 | Linux | arm64 | `ewp-core-server-linux-arm64` |
 | Windows | amd64 | `ewp-core-server-windows-amd64.exe` |
-| macOS | arm64 | `ewp-core-server-darwin-arm64` |
 
-### EWP-GUI
+### EWP-GUI (包含内核)
 
-| Platform | Architecture | Binary Name |
-|----------|-------------|-------------|
-| Windows | amd64 | `ewp-gui-windows-amd64.exe` |
-| Linux | amd64 | `ewp-gui-linux-amd64` |
-| macOS | Universal | `ewp-gui-darwin-universal` |
+| Platform | Architecture | Package Name | 包含文件 |
+|----------|-------------|-------------|---------|
+| Windows | amd64 | `ewp-gui-windows-amd64/` | `EWP-GUI.exe`, `ewp-core.exe` |
+| Linux | amd64 | `ewp-gui-linux-amd64/` | `EWP-GUI`, `ewp-core` |
 
 ---
 
@@ -174,9 +169,43 @@ make -j$(nproc)
 
 ---
 
+## Platform Support
+
+**Currently Supported:**
+- ✅ Windows (amd64, arm64)
+- ✅ Linux (amd64, arm64)
+
+**Not Yet Supported:**
+- ⚠️ macOS (compatibility work in progress)
+- ⚠️ Android (not included in CI/CD)
+
+## Package Structure
+
+### GUI Package (开箱即用)
+
+**Windows:**
+```
+ewp-gui-windows-amd64/
+├── EWP-GUI.exe          # 图形界面
+└── ewp-core.exe         # 内核程序
+```
+
+**Linux:**
+```
+ewp-gui-linux-amd64/
+├── EWP-GUI              # 图形界面
+└── ewp-core             # 内核程序
+```
+
+### Release Archives
+
+- **Build Workflow**: 上传目录结构
+- **Release Workflow**: 打包为 `.tar.gz` 压缩包
+
 ## Notes
 
-- **Android builds** are not included (as requested)
+- **GUI 已包含内核**: 用户下载 GUI 即可使用，无需单独下载 client
 - GUI builds use Qt6 and require appropriate toolchains
 - All binaries are stripped (`-s -w`) to reduce size
 - Release workflow embeds version via `-X main.Version`
+- Cross-compilation is handled by Go's GOOS/GOARCH flags

@@ -66,10 +66,6 @@ jobs:
           # Linux
           GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X main.Version=${{ github.event.inputs.version }}" -o ../../ewp-core-client-${{ github.event.inputs.version }}-linux-amd64 .
           GOOS=linux GOARCH=arm64 go build -ldflags="-s -w -X main.Version=${{ github.event.inputs.version }}" -o ../../ewp-core-client-${{ github.event.inputs.version }}-linux-arm64 .
-          
-          # macOS
-          GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w -X main.Version=${{ github.event.inputs.version }}" -o ../../ewp-core-client-${{ github.event.inputs.version }}-darwin-amd64 .
-          GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w -X main.Version=${{ github.event.inputs.version }}" -o ../../ewp-core-client-${{ github.event.inputs.version }}-darwin-arm64 .
       
       - name: Upload Client Artifacts
         uses: actions/upload-artifact@v4
@@ -105,9 +101,6 @@ jobs:
           
           # Windows (测试用)
           GOOS=windows GOARCH=amd64 go build -ldflags="-s -w -X main.Version=${{ github.event.inputs.version }}" -o ../../ewp-core-server-${{ github.event.inputs.version }}-windows-amd64.exe .
-          
-          # macOS
-          GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w -X main.Version=${{ github.event.inputs.version }}" -o ../../ewp-core-server-${{ github.event.inputs.version }}-darwin-arm64 .
       
       - name: Upload Server Artifacts
         uses: actions/upload-artifact@v4
@@ -117,13 +110,19 @@ jobs:
 
   build-gui-windows:
     name: Build EWP-GUI (Windows)
-    needs: build-all
+    needs: build-core-client
     runs-on: windows-latest
     
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.version }}
+      
+      - name: Download Core Client Binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: ewp-core-client-release
+          path: ./core-binaries
       
       - name: Install Qt6
         uses: jurplel/install-qt-action@v3
@@ -144,23 +143,41 @@ jobs:
           cd build
           cmake .. -DCMAKE_BUILD_TYPE=Release -G "NMake Makefiles"
           nmake
-          move EWP-GUI.exe ..\..\ewp-gui-${{ github.event.inputs.version }}-windows-amd64.exe
+      
+      - name: Package GUI with Core - Windows x64
+        run: |
+          mkdir ewp-gui-${{ github.event.inputs.version }}-windows-amd64
+          move ewp-gui\build\EWP-GUI.exe ewp-gui-${{ github.event.inputs.version }}-windows-amd64\
+          copy core-binaries\ewp-core-client-${{ github.event.inputs.version }}-windows-amd64.exe ewp-gui-${{ github.event.inputs.version }}-windows-amd64\ewp-core.exe
+          echo Creating release package...
+      
+      - name: Create Archive
+        run: |
+          cd ewp-gui-${{ github.event.inputs.version }}-windows-amd64
+          tar -czf ../ewp-gui-${{ github.event.inputs.version }}-windows-amd64.tar.gz *
+          cd ..
       
       - name: Upload GUI Windows Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ewp-gui-windows-release
-          path: ewp-gui-*.exe
+          path: ewp-gui-${{ github.event.inputs.version }}-windows-amd64.tar.gz
 
   build-gui-linux:
     name: Build EWP-GUI (Linux)
-    needs: build-all
+    needs: build-core-client
     runs-on: ubuntu-latest
     
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.version }}
+      
+      - name: Download Core Client Binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: ewp-core-client-release
+          path: ./core-binaries
       
       - name: Install Qt6
         uses: jurplel/install-qt-action@v3
@@ -177,50 +194,29 @@ jobs:
           cd build
           cmake .. -DCMAKE_BUILD_TYPE=Release
           make -j$(nproc)
-          mv EWP-GUI ../../ewp-gui-${{ github.event.inputs.version }}-linux-amd64
+      
+      - name: Package GUI with Core - Linux x64
+        run: |
+          mkdir -p ewp-gui-${{ github.event.inputs.version }}-linux-amd64
+          mv ewp-gui/build/EWP-GUI ewp-gui-${{ github.event.inputs.version }}-linux-amd64/
+          cp core-binaries/ewp-core-client-${{ github.event.inputs.version }}-linux-amd64 ewp-gui-${{ github.event.inputs.version }}-linux-amd64/ewp-core
+          chmod +x ewp-gui-${{ github.event.inputs.version }}-linux-amd64/EWP-GUI
+          chmod +x ewp-gui-${{ github.event.inputs.version }}-linux-amd64/ewp-core
+          echo "Creating release package..."
+      
+      - name: Create Archive
+        run: |
+          tar -czf ewp-gui-${{ github.event.inputs.version }}-linux-amd64.tar.gz ewp-gui-${{ github.event.inputs.version }}-linux-amd64/
       
       - name: Upload GUI Linux Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ewp-gui-linux-release
-          path: ewp-gui-*-linux-*
-
-  build-gui-macos:
-    name: Build EWP-GUI (macOS)
-    needs: build-all
-    runs-on: macos-latest
-    
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.version }}
-      
-      - name: Install Qt6
-        uses: jurplel/install-qt-action@v3
-        with:
-          version: '6.6.*'
-          host: 'mac'
-          target: 'desktop'
-          cache: true
-      
-      - name: Build GUI - macOS Universal Binary
-        run: |
-          cd ewp-gui
-          mkdir build
-          cd build
-          cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
-          make -j$(sysctl -n hw.ncpu)
-          mv EWP-GUI.app ../../ewp-gui-${{ github.event.inputs.version }}-darwin-universal.app || mv EWP-GUI ../../ewp-gui-${{ github.event.inputs.version }}-darwin-universal
-      
-      - name: Upload GUI macOS Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: ewp-gui-macos-release
-          path: ewp-gui-*-darwin-*
-
+          path: ewp-gui-${{ github.event.inputs.version }}-linux-amd64.tar.gz
+  
   create-release:
     name: Create GitHub Release
-    needs: [build-core-client, build-core-server, build-gui-windows, build-gui-linux, build-gui-macos]
+    needs: [build-core-client, build-core-server, build-gui-windows, build-gui-linux]
     runs-on: ubuntu-latest
     
     steps:
@@ -266,15 +262,15 @@ jobs:
           **Client:**
           - Windows: \`ewp-core-client-${{ github.event.inputs.version }}-windows-amd64.exe\`
           - Linux: \`ewp-core-client-${{ github.event.inputs.version }}-linux-amd64\`
-          - macOS: \`ewp-core-client-${{ github.event.inputs.version }}-darwin-arm64\` (Apple Silicon)
           
           **Server:**
           - Linux: \`ewp-core-server-${{ github.event.inputs.version }}-linux-amd64\`
           
-          **GUI:**
-          - Windows: \`ewp-gui-${{ github.event.inputs.version }}-windows-amd64.exe\`
-          - Linux: \`ewp-gui-${{ github.event.inputs.version }}-linux-amd64\`
-          - macOS: \`ewp-gui-${{ github.event.inputs.version }}-darwin-universal\`
+          **GUI (包含内核):**
+          - Windows: \`ewp-gui-${{ github.event.inputs.version }}-windows-amd64.tar.gz\`
+          - Linux: \`ewp-gui-${{ github.event.inputs.version }}-linux-amd64.tar.gz\`
+          
+          > GUI 包已包含 \`ewp-core\` 可执行文件，解压即可使用
           
           ## Checksums
           

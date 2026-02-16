@@ -43,16 +43,6 @@ jobs:
           cd cmd/client
           GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o ../../ewp-core-client-linux-arm64 .
       
-      - name: Build Client - macOS amd64
-        run: |
-          cd cmd/client
-          GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o ../../ewp-core-client-darwin-amd64 .
-      
-      - name: Build Client - macOS arm64
-        run: |
-          cd cmd/client
-          GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o ../../ewp-core-client-darwin-arm64 .
-      
       - name: Upload Client Artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -89,11 +79,6 @@ jobs:
           cd cmd/server
           GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o ../../ewp-core-server-windows-amd64.exe .
       
-      - name: Build Server - macOS arm64
-        run: |
-          cd cmd/server
-          GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o ../../ewp-core-server-darwin-arm64 .
-      
       - name: Upload Server Artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -102,10 +87,17 @@ jobs:
 
   build-gui-windows:
     name: Build EWP-GUI (Windows)
+    needs: build-core-client
     runs-on: windows-latest
     
     steps:
       - uses: actions/checkout@v4
+      
+      - name: Download Core Client Binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: ewp-core-client-binaries
+          path: ./core-binaries
       
       - name: Install Qt6
         uses: jurplel/install-qt-action@v3
@@ -126,20 +118,33 @@ jobs:
           cd build-x64
           cmake .. -DCMAKE_BUILD_TYPE=Release -G "NMake Makefiles"
           nmake
-          move EWP-GUI.exe ..\..\ewp-gui-windows-amd64.exe
+      
+      - name: Package GUI with Core - Windows x64
+        run: |
+          mkdir ewp-gui-windows-amd64
+          move ewp-gui\build-x64\EWP-GUI.exe ewp-gui-windows-amd64\
+          copy core-binaries\ewp-core-client-windows-amd64.exe ewp-gui-windows-amd64\ewp-core.exe
+          echo Creating package...
       
       - name: Upload GUI Windows Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ewp-gui-windows-binaries
-          path: ewp-gui-windows-*.exe
+          path: ewp-gui-windows-amd64/
 
   build-gui-linux:
     name: Build EWP-GUI (Linux)
+    needs: build-core-client
     runs-on: ubuntu-latest
     
     steps:
       - uses: actions/checkout@v4
+      
+      - name: Download Core Client Binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: ewp-core-client-binaries
+          path: ./core-binaries
       
       - name: Install Qt6
         uses: jurplel/install-qt-action@v3
@@ -156,56 +161,25 @@ jobs:
           cd build
           cmake .. -DCMAKE_BUILD_TYPE=Release
           make -j$(nproc)
-          mv EWP-GUI ../../ewp-gui-linux-amd64
+      
+      - name: Package GUI with Core - Linux x64
+        run: |
+          mkdir -p ewp-gui-linux-amd64
+          mv ewp-gui/build/EWP-GUI ewp-gui-linux-amd64/
+          cp core-binaries/ewp-core-client-linux-amd64 ewp-gui-linux-amd64/ewp-core
+          chmod +x ewp-gui-linux-amd64/EWP-GUI
+          chmod +x ewp-gui-linux-amd64/ewp-core
+          echo "Creating package..."
       
       - name: Upload GUI Linux Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ewp-gui-linux-binaries
-          path: ewp-gui-linux-*
-
-  build-gui-macos:
-    name: Build EWP-GUI (macOS)
-    runs-on: macos-latest
-    
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Install Qt6
-        uses: jurplel/install-qt-action@v3
-        with:
-          version: '6.6.*'
-          host: 'mac'
-          target: 'desktop'
-          cache: true
-      
-      - name: Build GUI - macOS arm64
-        run: |
-          cd ewp-gui
-          mkdir build
-          cd build
-          cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64
-          make -j$(sysctl -n hw.ncpu)
-          mv EWP-GUI.app ../../ewp-gui-darwin-arm64.app || mv EWP-GUI ../../ewp-gui-darwin-arm64
-      
-      - name: Build GUI - macOS x64
-        run: |
-          cd ewp-gui
-          mkdir build-x64
-          cd build-x64
-          cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=x86_64
-          make -j$(sysctl -n hw.ncpu)
-          mv EWP-GUI.app ../../ewp-gui-darwin-amd64.app || mv EWP-GUI ../../ewp-gui-darwin-amd64
-      
-      - name: Upload GUI macOS Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: ewp-gui-macos-binaries
-          path: ewp-gui-darwin-*
-
+          path: ewp-gui-linux-amd64/
+  
   summary:
     name: Build Summary
-    needs: [build-core-client, build-core-server, build-gui-windows, build-gui-linux, build-gui-macos]
+    needs: [build-core-client, build-core-server, build-gui-windows, build-gui-linux]
     runs-on: ubuntu-latest
     if: always()
     
@@ -217,4 +191,3 @@ jobs:
           echo "Core Server: ${{ needs.build-core-server.result }}"
           echo "GUI Windows: ${{ needs.build-gui-windows.result }}"
           echo "GUI Linux: ${{ needs.build-gui-linux.result }}"
-          echo "GUI macOS: ${{ needs.build-gui-macos.result }}"
