@@ -69,12 +69,12 @@ This directory contains automated build and release workflows for the EWP-Worker
 | Linux | arm64 | `ewp-core-server-linux-arm64` |
 | Windows | amd64 | `ewp-core-server-windows-amd64.exe` |
 
-### EWP-GUI (包含内核)
+### EWP-GUI (包含内核 + Qt 依赖)
 
-| Platform | Architecture | Package Name | 包含文件 |
+| Platform | Architecture | Package Name | 包含内容 |
 |----------|-------------|-------------|---------|
-| Windows | amd64 | `ewp-gui-windows-amd64/` | `EWP-GUI.exe`, `ewp-core.exe` |
-| Linux | amd64 | `ewp-gui-linux-amd64/` | `EWP-GUI`, `ewp-core` |
+| Windows | amd64 | `ewp-gui-windows-amd64/` | `EWP-GUI.exe`, `ewp-core.exe`, `wintun.dll`, Qt6 DLLs, plugins |
+| Linux | amd64 | `ewp-gui-linux-amd64/` | `EWP-GUI`, `EWP-GUI.sh`, `ewp-core`, Qt6 libs, plugins |
 
 ---
 
@@ -187,14 +187,20 @@ make -j$(nproc)
 ```
 ewp-gui-windows-amd64/
 ├── EWP-GUI.exe          # 图形界面
-└── ewp-core.exe         # 内核程序
+├── ewp-core.exe         # 内核程序
+├── wintun.dll           # TUN 驱动
+├── Qt6*.dll             # Qt6 动态库
+└── platforms/           # Qt 插件
 ```
 
 **Linux:**
 ```
 ewp-gui-linux-amd64/
 ├── EWP-GUI              # 图形界面
-└── ewp-core             # 内核程序
+├── EWP-GUI.sh           # 启动脚本
+├── ewp-core             # 内核程序
+├── lib/                 # Qt6 动态库
+└── plugins/             # Qt 插件
 ```
 
 ### Release Archives

@@ -144,11 +144,17 @@ jobs:
           cmake .. -DCMAKE_BUILD_TYPE=Release -G "NMake Makefiles"
           nmake
       
+      - name: Deploy Qt Dependencies
+        run: |
+          cd ewp-gui\build
+          windeployqt --release --no-translations --no-system-d3d-compiler --no-opengl-sw EWP-GUI.exe
+      
       - name: Package GUI with Core - Windows x64
         run: |
           mkdir ewp-gui-${{ github.event.inputs.version }}-windows-amd64
-          move ewp-gui\build\EWP-GUI.exe ewp-gui-${{ github.event.inputs.version }}-windows-amd64\
+          xcopy /E /I ewp-gui\build ewp-gui-${{ github.event.inputs.version }}-windows-amd64
           copy core-binaries\ewp-core-client-${{ github.event.inputs.version }}-windows-amd64.exe ewp-gui-${{ github.event.inputs.version }}-windows-amd64\ewp-core.exe
+          copy ewp-core\wintun.dll ewp-gui-${{ github.event.inputs.version }}-windows-amd64\
           echo Creating release package...
       
       - name: Create Archive
@@ -197,10 +203,32 @@ jobs:
       
       - name: Package GUI with Core - Linux x64
         run: |
-          mkdir -p ewp-gui-${{ github.event.inputs.version }}-linux-amd64
-          mv ewp-gui/build/EWP-GUI ewp-gui-${{ github.event.inputs.version }}-linux-amd64/
+          mkdir -p ewp-gui-${{ github.event.inputs.version }}-linux-amd64/lib
+          
+          # Copy executable
+          cp ewp-gui/build/EWP-GUI ewp-gui-${{ github.event.inputs.version }}-linux-amd64/
+          
+          # Copy core
           cp core-binaries/ewp-core-client-${{ github.event.inputs.version }}-linux-amd64 ewp-gui-${{ github.event.inputs.version }}-linux-amd64/ewp-core
+          
+          # Copy Qt libraries
+          ldd ewp-gui/build/EWP-GUI | grep Qt | awk '{print $3}' | xargs -I {} cp {} ewp-gui-${{ github.event.inputs.version }}-linux-amd64/lib/
+          
+          # Copy Qt plugins
+          mkdir -p ewp-gui-${{ github.event.inputs.version }}-linux-amd64/plugins/platforms
+          cp -r $Qt6_DIR/plugins/platforms/libqxcb.so ewp-gui-${{ github.event.inputs.version }}-linux-amd64/plugins/platforms/ || true
+          
+          # Create launcher script
+          cat > ewp-gui-${{ github.event.inputs.version }}-linux-amd64/EWP-GUI.sh << 'EOF'
+          #!/bin/bash
+          DIR="$(cd "$(dirname "$0")" && pwd)"
+          export LD_LIBRARY_PATH="$DIR/lib:$LD_LIBRARY_PATH"
+          export QT_PLUGIN_PATH="$DIR/plugins"
+          exec "$DIR/EWP-GUI" "$@"
+          EOF
+          
           chmod +x ewp-gui-${{ github.event.inputs.version }}-linux-amd64/EWP-GUI
+          chmod +x ewp-gui-${{ github.event.inputs.version }}-linux-amd64/EWP-GUI.sh
           chmod +x ewp-gui-${{ github.event.inputs.version }}-linux-amd64/ewp-core
           echo "Creating release package..."
       
