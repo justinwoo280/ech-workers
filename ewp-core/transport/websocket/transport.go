@@ -1,10 +1,12 @@
-﻿package websocket
+package websocket
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	commonnet "ewp-core/common/net"
@@ -188,7 +190,20 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 	// Connect
 	wsConn, _, err := dialer.Dial(wsURL, headers)
 	if err != nil {
-		return nil, err
+		// Check for ECH rejection and retry with updated config
+		if t.useECH && t.echManager != nil {
+			if echErr := t.handleECHRejection(err); echErr == nil {
+				log.Printf("[WebSocket] ECH rejected, retrying with updated config...")
+				// Retry connection with updated ECH config
+				wsConn, _, err = dialer.Dial(wsURL, headers)
+				if err != nil {
+					return nil, fmt.Errorf("retry after ECH update failed: %w", err)
+				}
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	log.V("[WebSocket] Connected to %s", wsURL)
@@ -202,8 +217,58 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 	}
 	return NewSimpleConn(wsConn, t.token), nil
 }
-  
-// isIPAddress checks if a string is an IP address  
-func isIPAddress(s string) bool {  
-	return net.ParseIP(s) != nil  
-} 
+
+func (t *Transport) SetHost(host string) *Transport {
+	t.host = host
+	return t
+}
+
+func (t *Transport) SetHeaders(headers map[string]string) *Transport {
+	t.headers = headers
+	return t
+}
+
+// isIPAddress checks if a string is an IP address
+func isIPAddress(s string) bool {
+	return net.ParseIP(s) != nil
+}
+
+// handleECHRejection checks if error is ECH rejection and updates config
+func (t *Transport) handleECHRejection(err error) error {
+	if err == nil {
+		return errors.New("nil error")
+	}
+
+	var echRejErr interface{ RetryConfigList() []byte }
+	errMsg := err.Error()
+	if !strings.Contains(errMsg, "server rejected ECH") && !strings.Contains(errMsg, "ECH") {
+		return errors.New("not ECH rejection")
+	}
+
+	cause := err
+	for cause != nil {
+		if rejErr, ok := cause.(interface{ RetryConfigList() []byte }); ok {
+			echRejErr = rejErr
+			break
+		}
+		unwrapped := errors.Unwrap(cause)
+		if unwrapped == nil {
+			break
+		}
+		cause = unwrapped
+	}
+
+	if echRejErr == nil {
+		log.Printf("[WebSocket] ECH rejection detected but no retry config available")
+		return errors.New("no retry config")
+	}
+
+	retryList := echRejErr.RetryConfigList()
+	if len(retryList) == 0 {
+		log.Printf("[WebSocket] Server rejected ECH without retry config (secure signal)")
+		return errors.New("empty retry config")
+	}
+
+	log.Printf("[WebSocket] Updating ECH config from server retry (%d bytes)", len(retryList))
+	return t.echManager.UpdateFromRetry(retryList)
+}

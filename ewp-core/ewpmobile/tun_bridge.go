@@ -8,24 +8,49 @@ import "C"
 import (
 	"context"
 	"fmt"
-	"log"
+	"net/netip"
 	"sync"
 	"time"
 
+	"ewp-core/log"
 	"ewp-core/tun"
 	"ewp-core/transport"
+
+	singtun "github.com/sagernet/sing-tun"
+	"github.com/sagernet/sing/common/logger"
 )
+
+// bridgeLogger implements logger.Logger for sing-tun
+type bridgeLogger struct{}
+
+func (l *bridgeLogger) Trace(args ...interface{})                             { log.V(fmt.Sprint(args...)) }
+func (l *bridgeLogger) Debug(args ...interface{})                             { log.V(fmt.Sprint(args...)) }
+func (l *bridgeLogger) Info(args ...interface{})                              { log.Printf(fmt.Sprint(args...)) }
+func (l *bridgeLogger) Warn(args ...interface{})                              { log.Printf(fmt.Sprint(args...)) }
+func (l *bridgeLogger) Error(args ...interface{})                             { log.Printf(fmt.Sprint(args...)) }
+func (l *bridgeLogger) Fatal(args ...interface{})                             { log.Printf(fmt.Sprint(args...)) }
+func (l *bridgeLogger) Panic(args ...interface{})                             { log.Printf(fmt.Sprint(args...)) }
+func (l *bridgeLogger) TraceContext(ctx context.Context, args ...interface{}) { log.V(fmt.Sprint(args...)) }
+func (l *bridgeLogger) DebugContext(ctx context.Context, args ...interface{}) { log.V(fmt.Sprint(args...)) }
+func (l *bridgeLogger) InfoContext(ctx context.Context, args ...interface{})  { log.Printf(fmt.Sprint(args...)) }
+func (l *bridgeLogger) WarnContext(ctx context.Context, args ...interface{})  { log.Printf(fmt.Sprint(args...)) }
+func (l *bridgeLogger) ErrorContext(ctx context.Context, args ...interface{}) { log.Printf(fmt.Sprint(args...)) }
+func (l *bridgeLogger) FatalContext(ctx context.Context, args ...interface{}) { log.Printf(fmt.Sprint(args...)) }
+func (l *bridgeLogger) PanicContext(ctx context.Context, args ...interface{}) { log.Printf(fmt.Sprint(args...)) }
+
+var _ logger.Logger = (*bridgeLogger)(nil)
 
 // TUNBridge TUN 桥接器，用于 Android
 type TUNBridge struct {
-	mu        sync.RWMutex
-	running   bool
-	fd        int
-	mtu       int
-	device    *tun.Device
-	stack     *tun.Stack
-	cancel    context.CancelFunc
-	ctx       context.Context
+	mu         sync.RWMutex
+	running    bool
+	fd         int
+	mtu        int
+	tunDevice  singtun.Tun
+	tunStack   singtun.Stack
+	tunHandler *tun.Handler
+	cancel     context.CancelFunc
+	ctx        context.Context
 	
 	// 传输层
 	transport transport.Transport
@@ -69,32 +94,64 @@ func (tb *TUNBridge) Start() error {
 	
 	log.Printf("[TUN-Bridge] Starting with FD %d, MTU %d", tb.fd, tb.mtu)
 	
-	// 创建 TUN 设备（从 FD）
-	var err error
-	tb.device, err = tun.NewDeviceFromFD(tb.fd, tb.mtu)
+	// 创建处理器
+	if tb.transport != nil {
+		tb.tunHandler = tun.NewHandler(tb.ctx, tb.transport)
+	} else {
+		log.Printf("[TUN-Bridge] Warning: No transport set, creating placeholder handler")
+	}
+	
+	// 配置 TUN 选项
+	inet4Addr, err := netip.ParsePrefix("10.0.0.2/24")
+	if err != nil {
+		return fmt.Errorf("parse IP address failed: %w", err)
+	}
+	
+	dnsAddr, err := netip.ParseAddr("8.8.8.8")
+	if err != nil {
+		return fmt.Errorf("parse DNS address failed: %w", err)
+	}
+	
+	tunOptions := singtun.Options{
+		Name:            "ewp-bridge",
+		Inet4Address:    []netip.Prefix{inet4Addr},
+		MTU:             uint32(tb.mtu),
+		AutoRoute:       false, // Android VPNService handles routing
+		DNSServers:      []netip.Addr{dnsAddr},
+		FileDescriptor:  tb.fd,
+		Logger:          &bridgeLogger{},
+	}
+	
+	// 创建 TUN 设备
+	tb.tunDevice, err = singtun.New(tunOptions)
 	if err != nil {
 		return fmt.Errorf("create TUN device failed: %w", err)
 	}
 	
-	// 创建网络栈
-	tb.stack, err = tun.NewStack(tb.mtu, "10.0.0.1")
-	if err != nil {
-		tb.device.Close()
-		return fmt.Errorf("create network stack failed: %w", err)
+	// 创建网络栈（如果有处理器）
+	if tb.tunHandler != nil {
+		stackOptions := singtun.StackOptions{
+			Context:    tb.ctx,
+			Tun:        tb.tunDevice,
+			TunOptions: tunOptions,
+			Handler:    tb.tunHandler,
+			Logger:     &bridgeLogger{},
+			UDPTimeout: 5 * time.Minute,
+		}
+		
+		tb.tunStack, err = singtun.NewStack("system", stackOptions)
+		if err != nil {
+			tb.tunDevice.Close()
+			return fmt.Errorf("create network stack failed: %w", err)
+		}
+		
+		// 启动网络栈
+		if err := tb.tunStack.Start(); err != nil {
+			tb.tunStack.Close()
+			tb.tunDevice.Close()
+			return fmt.Errorf("start network stack failed: %w", err)
+		}
 	}
-	
-	// 附加端点
-	tb.device.AttachEndpoint(tb.stack.Endpoint())
-	
-	// 配置设备（在 Android 上，VPNService 已经配置了网络）
-	err = tb.device.Configure("10.0.0.2", "10.0.0.1", "255.255.255.0", "8.8.8.8")
-	if err != nil {
-		log.Printf("[TUN-Bridge] Configure warning: %v", err)
-		// 继续执行，因为 Android VPNService 可能已经配置了
-	}
-	
-	// 启动设备
-	tb.device.Start()
 	
 	tb.running = true
 	tb.startTime = time.Now()
@@ -117,18 +174,19 @@ func (tb *TUNBridge) Stop() {
 	
 	log.Printf("[TUN-Bridge] Stopping")
 	
-	tb.cancel()
 	tb.running = false
 	
-	if tb.device != nil {
-		tb.device.Close()
-		tb.device = nil
+	if tb.tunStack != nil {
+		tb.tunStack.Close()
+		tb.tunStack = nil
 	}
 	
-	if tb.stack != nil {
-		tb.stack.Close()
-		tb.stack = nil
+	if tb.tunDevice != nil {
+		tb.tunDevice.Close()
+		tb.tunDevice = nil
 	}
+	
+	tb.cancel()
 	
 	log.Printf("[TUN-Bridge] Stopped")
 }

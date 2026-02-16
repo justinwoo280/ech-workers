@@ -2,6 +2,7 @@
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -209,7 +210,20 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 
 	conn, err := t.getOrCreateConn(parsed.Host, addr)
 	if err != nil {
-		return nil, err
+		// Check for ECH rejection and retry with updated config
+		if t.useECH && t.echManager != nil {
+			if echErr := t.handleECHRejection(err); echErr == nil {
+				log.Printf("[gRPC] ECH rejected, retrying with updated config...")
+				// Retry connection with updated ECH config
+				conn, err = t.getOrCreateConn(parsed.Host, addr)
+				if err != nil {
+					return nil, fmt.Errorf("retry after ECH update failed: %w", err)
+				}
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	streamPath := "/" + t.serviceName + "/Tunnel"
@@ -327,4 +341,53 @@ func (t *Transport) getOrCreateConn(host, addr string) (*grpc.ClientConn, error)
 // isIPAddress checks if a string is a valid IP address
 func isIPAddress(s string) bool {
 	return net.ParseIP(s) != nil
+}
+
+// handleECHRejection checks if error is ECH rejection and updates config
+func (t *Transport) handleECHRejection(err error) error {
+	if err == nil {
+		return errors.New("nil error")
+	}
+
+	// Try to extract ECH rejection error
+	// Go's tls.ECHRejectionError is returned wrapped in connection errors
+	var echRejErr interface{ RetryConfigList() []byte }
+	
+	// Check if error message contains ECH rejection
+	errMsg := err.Error()
+	if !strings.Contains(errMsg, "server rejected ECH") && 
+	   !strings.Contains(errMsg, "ECH") {
+		return errors.New("not ECH rejection")
+	}
+
+	// Try to unwrap and find ECHRejectionError
+	cause := err
+	for cause != nil {
+		// Check if this error has RetryConfigList method
+		if rejErr, ok := cause.(interface{ RetryConfigList() []byte }); ok {
+			echRejErr = rejErr
+			break
+		}
+		
+		// Try to unwrap
+		unwrapped := errors.Unwrap(cause)
+		if unwrapped == nil {
+			break
+		}
+		cause = unwrapped
+	}
+
+	if echRejErr == nil {
+		log.Printf("[gRPC] ECH rejection detected but no retry config available")
+		return errors.New("no retry config")
+	}
+
+	retryList := echRejErr.RetryConfigList()
+	if len(retryList) == 0 {
+		log.Printf("[gRPC] Server rejected ECH without retry config (secure signal)")
+		return errors.New("empty retry config")
+	}
+
+	log.Printf("[gRPC] Updating ECH config from server retry (%d bytes)", len(retryList))
+	return t.echManager.UpdateFromRetry(retryList)
 }

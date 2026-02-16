@@ -112,6 +112,22 @@ func (m *ECHManager) Get() ([]byte, error) {
 	return m.echList, nil
 }
 
+// UpdateFromRetry updates ECH configuration from server's retry config
+// This is called when server returns ECHRejectionError with RetryConfigList
+func (m *ECHManager) UpdateFromRetry(retryConfigList []byte) error {
+	if len(retryConfigList) == 0 {
+		return errors.New("empty retry config list")
+	}
+
+	m.mu.Lock()
+	m.echList = retryConfigList
+	m.lastFetch = time.Now()
+	m.mu.Unlock()
+
+	echlog.Printf("[ECH] Updated configuration from server retry, length: %d bytes", len(retryConfigList))
+	return nil
+}
+
 // isExpired checks if the cache has expired (caller must hold at least RLock)
 func (m *ECHManager) isExpired() bool {
 	if m.lastFetch.IsZero() {

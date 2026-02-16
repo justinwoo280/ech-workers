@@ -3,23 +3,50 @@
 package ewpmobile
 
 import (
+	"context"
 	"fmt"
-	"log"
+	"net/netip"
 	"sync"
+	"time"
 
+	"ewp-core/log"
 	"ewp-core/tun"
 	"ewp-core/transport"
+
+	singtun "github.com/sagernet/sing-tun"
+	"github.com/sagernet/sing/common/logger"
 )
+
+// tunLogger implements logger.Logger for sing-tun
+type simpleTunLogger struct{}
+
+func (l *simpleTunLogger) Trace(args ...interface{})                             { log.V(fmt.Sprint(args...)) }
+func (l *simpleTunLogger) Debug(args ...interface{})                             { log.V(fmt.Sprint(args...)) }
+func (l *simpleTunLogger) Info(args ...interface{})                              { log.Printf(fmt.Sprint(args...)) }
+func (l *simpleTunLogger) Warn(args ...interface{})                              { log.Printf(fmt.Sprint(args...)) }
+func (l *simpleTunLogger) Error(args ...interface{})                             { log.Printf(fmt.Sprint(args...)) }
+func (l *simpleTunLogger) Fatal(args ...interface{})                             { log.Printf(fmt.Sprint(args...)) }
+func (l *simpleTunLogger) Panic(args ...interface{})                             { log.Printf(fmt.Sprint(args...)) }
+func (l *simpleTunLogger) TraceContext(ctx context.Context, args ...interface{}) { log.V(fmt.Sprint(args...)) }
+func (l *simpleTunLogger) DebugContext(ctx context.Context, args ...interface{}) { log.V(fmt.Sprint(args...)) }
+func (l *simpleTunLogger) InfoContext(ctx context.Context, args ...interface{})  { log.Printf(fmt.Sprint(args...)) }
+func (l *simpleTunLogger) WarnContext(ctx context.Context, args ...interface{})  { log.Printf(fmt.Sprint(args...)) }
+func (l *simpleTunLogger) ErrorContext(ctx context.Context, args ...interface{}) { log.Printf(fmt.Sprint(args...)) }
+func (l *simpleTunLogger) FatalContext(ctx context.Context, args ...interface{}) { log.Printf(fmt.Sprint(args...)) }
+func (l *simpleTunLogger) PanicContext(ctx context.Context, args ...interface{}) { log.Printf(fmt.Sprint(args...)) }
+
+var _ logger.Logger = (*simpleTunLogger)(nil)
 
 // SimpleTUN 简化的 TUN 管理器，专为 Android Kotlin VPNService 设计
 // 不使用 C 导出，而是提供 Go 原生接口供 GoMobile 绑定
 type SimpleTUN struct {
-	mu        sync.RWMutex
-	device    *tun.Device
-	stack     *tun.Stack
-	tcpHandler *tun.TCPHandler
-	udpHandler *tun.UDPHandler
-	running   bool
+	mu         sync.RWMutex
+	tunDevice  singtun.Tun
+	tunStack   singtun.Stack
+	tunHandler *tun.Handler
+	running    bool
+	ctx        context.Context
+	cancel     context.CancelFunc
 	
 	fd        int
 	mtu       int
@@ -68,46 +95,74 @@ func (st *SimpleTUN) Start(ip, gateway, mask, dns string) error {
 		return fmt.Errorf("TUN already running")
 	}
 	
+	if st.transport == nil {
+		return fmt.Errorf("transport not set")
+	}
+	
 	log.Printf("[SimpleTUN] Starting with FD=%d, MTU=%d", st.fd, st.mtu)
 	
-	// 1. 创建设备
-	device, err := tun.NewDeviceFromFD(st.fd, st.mtu)
+	// 1. 创建上下文
+	ctx, cancel := context.WithCancel(context.Background())
+	st.ctx = ctx
+	st.cancel = cancel
+	
+	// 2. 创建处理器
+	st.tunHandler = tun.NewHandler(ctx, st.transport)
+	
+	// 3. 解析地址
+	inet4Addr, err := netip.ParsePrefix(ip + "/24")
 	if err != nil {
-		return fmt.Errorf("create device failed: %w", err)
+		cancel()
+		return fmt.Errorf("parse IP address failed: %w", err)
 	}
-	st.device = device
 	
-	// 2. 创建网络栈
-	stack, err := tun.NewStack(st.mtu, gateway)
+	dnsAddr, err := netip.ParseAddr(dns)
 	if err != nil {
-		device.Close()
-		return fmt.Errorf("create stack failed: %w", err)
-	}
-	st.stack = stack
-	
-	// 3. 附加端点
-	device.AttachEndpoint(stack.Endpoint())
-	
-	// 4. 配置网络（Android 上由 VPNService 处理）
-	if err := device.Configure(ip, gateway, mask, dns); err != nil {
-		log.Printf("[SimpleTUN] Configure warning: %v", err)
+		cancel()
+		return fmt.Errorf("parse DNS address failed: %w", err)
 	}
 	
-	// 5. 启动设备
-	device.Start()
+	// 4. 配置 TUN 选项
+	tunOptions := singtun.Options{
+		Name:            "ewp-simple",
+		Inet4Address:    []netip.Prefix{inet4Addr},
+		MTU:             uint32(st.mtu),
+		AutoRoute:       false, // Android VPNService handles routing
+		DNSServers:      []netip.Addr{dnsAddr},
+		FileDescriptor:  st.fd,
+		Logger:          &simpleTunLogger{},
+	}
 	
-	// 6. 创建处理器（如果有传输层）
-	if st.transport != nil {
-		st.tcpHandler = tun.NewTCPHandler(stack.Stack(), st.transport)
-		st.udpHandler = tun.NewUDPHandler(stack.Stack(), st.transport, dns)
-		
-		go func() {
-			if err := st.tcpHandler.Start(); err != nil {
-				log.Printf("[SimpleTUN] TCP handler error: %v", err)
-			}
-		}()
-		
-		st.udpHandler.Start()
+	// 5. 创建 TUN 设备
+	st.tunDevice, err = singtun.New(tunOptions)
+	if err != nil {
+		cancel()
+		return fmt.Errorf("create TUN device failed: %w", err)
+	}
+	
+	// 6. 创建网络栈
+	stackOptions := singtun.StackOptions{
+		Context:    ctx,
+		Tun:        st.tunDevice,
+		TunOptions: tunOptions,
+		Handler:    st.tunHandler,
+		Logger:     &simpleTunLogger{},
+		UDPTimeout: 5 * time.Minute,
+	}
+	
+	st.tunStack, err = singtun.NewStack("system", stackOptions)
+	if err != nil {
+		st.tunDevice.Close()
+		cancel()
+		return fmt.Errorf("create network stack failed: %w", err)
+	}
+	
+	// 7. 启动网络栈
+	if err := st.tunStack.Start(); err != nil {
+		st.tunStack.Close()
+		st.tunDevice.Close()
+		cancel()
+		return fmt.Errorf("start network stack failed: %w", err)
 	}
 	
 	st.running = true
@@ -127,22 +182,21 @@ func (st *SimpleTUN) Stop() error {
 	
 	log.Printf("[SimpleTUN] Stopping...")
 	
-	// 停止处理器
-	if st.udpHandler != nil {
-		st.udpHandler.Close()
-		st.udpHandler = nil
+	// 停止网络栈
+	if st.tunStack != nil {
+		st.tunStack.Close()
+		st.tunStack = nil
 	}
 	
 	// 关闭设备
-	if st.device != nil {
-		st.device.Close()
-		st.device = nil
+	if st.tunDevice != nil {
+		st.tunDevice.Close()
+		st.tunDevice = nil
 	}
 	
-	// 清理网络栈
-	if st.stack != nil {
-		st.stack.Close()
-		st.stack = nil
+	// 取消上下文
+	if st.cancel != nil {
+		st.cancel()
 	}
 	
 	st.running = false

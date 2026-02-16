@@ -3,6 +3,7 @@ package h3grpc
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -372,4 +373,53 @@ func (t *Transport) Stats() map[string]interface{} {
 // isIPAddress checks if a string is a valid IP address
 func isIPAddress(s string) bool {
 	return net.ParseIP(s) != nil
+}
+
+// handleECHRejection checks if error is ECH rejection and updates config
+func (t *Transport) handleECHRejection(err error) error {
+	if err == nil {
+		return errors.New("nil error")
+	}
+
+	// Try to extract ECH rejection error
+	// Go's tls.ECHRejectionError is returned wrapped in connection errors
+	var echRejErr interface{ RetryConfigList() []byte }
+	
+	// Check if error message contains ECH rejection
+	errMsg := err.Error()
+	if !strings.Contains(errMsg, "server rejected ECH") && 
+	   !strings.Contains(errMsg, "ECH") {
+		return errors.New("not ECH rejection")
+	}
+
+	// Try to unwrap and find ECHRejectionError
+	cause := err
+	for cause != nil {
+		// Check if this error has RetryConfigList method
+		if rejErr, ok := cause.(interface{ RetryConfigList() []byte }); ok {
+			echRejErr = rejErr
+			break
+		}
+		
+		// Try to unwrap
+		unwrapped := errors.Unwrap(cause)
+		if unwrapped == nil {
+			break
+		}
+		cause = unwrapped
+	}
+
+	if echRejErr == nil {
+		log.Printf("[H3] ECH rejection detected but no retry config available")
+		return errors.New("no retry config")
+	}
+
+	retryList := echRejErr.RetryConfigList()
+	if len(retryList) == 0 {
+		log.Printf("[H3] Server rejected ECH without retry config (secure signal)")
+		return errors.New("empty retry config")
+	}
+
+	log.Printf("[H3] Updating ECH config from server retry (%d bytes)", len(retryList))
+	return t.echManager.UpdateFromRetry(retryList)
 }

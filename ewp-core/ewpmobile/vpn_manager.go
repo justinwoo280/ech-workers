@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -14,7 +15,30 @@ import (
 	"ewp-core/transport/websocket"
 	"ewp-core/transport/xhttp"
 	"ewp-core/tun"
+
+	singtun "github.com/sagernet/sing-tun"
+	"github.com/sagernet/sing/common/logger"
 )
+
+// tunLogger implements logger.Logger for sing-tun
+type tunLogger struct{}
+
+func (l *tunLogger) Trace(args ...interface{})                             { log.V(fmt.Sprint(args...)) }
+func (l *tunLogger) Debug(args ...interface{})                             { log.V(fmt.Sprint(args...)) }
+func (l *tunLogger) Info(args ...interface{})                              { log.Printf(fmt.Sprint(args...)) }
+func (l *tunLogger) Warn(args ...interface{})                              { log.Printf(fmt.Sprint(args...)) }
+func (l *tunLogger) Error(args ...interface{})                             { log.Printf(fmt.Sprint(args...)) }
+func (l *tunLogger) Fatal(args ...interface{})                             { log.Printf(fmt.Sprint(args...)) }
+func (l *tunLogger) Panic(args ...interface{})                             { log.Printf(fmt.Sprint(args...)) }
+func (l *tunLogger) TraceContext(ctx context.Context, args ...interface{}) { log.V(fmt.Sprint(args...)) }
+func (l *tunLogger) DebugContext(ctx context.Context, args ...interface{}) { log.V(fmt.Sprint(args...)) }
+func (l *tunLogger) InfoContext(ctx context.Context, args ...interface{})  { log.Printf(fmt.Sprint(args...)) }
+func (l *tunLogger) WarnContext(ctx context.Context, args ...interface{})  { log.Printf(fmt.Sprint(args...)) }
+func (l *tunLogger) ErrorContext(ctx context.Context, args ...interface{}) { log.Printf(fmt.Sprint(args...)) }
+func (l *tunLogger) FatalContext(ctx context.Context, args ...interface{}) { log.Printf(fmt.Sprint(args...)) }
+func (l *tunLogger) PanicContext(ctx context.Context, args ...interface{}) { log.Printf(fmt.Sprint(args...)) }
+
+var _ logger.Logger = (*tunLogger)(nil)
 
 // VPNManager 统一的 VPN 管理器，集成连接和 TUN 功能
 type VPNManager struct {
@@ -29,10 +53,9 @@ type VPNManager struct {
 	// TUN 相关
 	tunFD        int
 	tunMTU       int
-	device       *tun.Device
-	stack        *tun.Stack
-	tcpHandler   *tun.TCPHandler
-	udpHandler   *tun.UDPHandler
+	tunDevice    singtun.Tun
+	tunStack     singtun.Stack
+	tunHandler   *tun.Handler
 	
 	// 配置
 	config       *VPNConfig
@@ -192,62 +215,80 @@ func (vm *VPNManager) Start(tunFD int, config *VPNConfig) error {
 	testConn.Close()
 	log.Printf("[VPNManager] Connection test successful")
 	
-	// 4. 创建 TUN 设备
-	log.Printf("[VPNManager] Creating TUN device from FD=%d, MTU=%d", tunFD, vm.tunMTU)
-	vm.device, err = tun.NewDeviceFromFD(tunFD, vm.tunMTU)
-	if err != nil {
-		cancel()
-		return fmt.Errorf("create TUN device failed: %w", err)
-	}
+	// 4. 创建 TUN 处理器
+	log.Printf("[VPNManager] Creating TUN handler...")
+	vm.tunHandler = tun.NewHandler(ctx, vm.transport)
 	
-	// 5. 创建网络栈
-	gateway := config.TunGateway
-	if gateway == "" {
-		gateway = "10.0.0.1"
-	}
-	log.Printf("[VPNManager] Creating network stack with gateway=%s", gateway)
-	vm.stack, err = tun.NewStack(vm.tunMTU, gateway)
-	if err != nil {
-		vm.device.Close()
-		cancel()
-		return fmt.Errorf("create network stack failed: %w", err)
-	}
-	
-	// 6. 附加端点
-	vm.device.AttachEndpoint(vm.stack.Endpoint())
-	
-	// 7. 配置网络（Android 上由 VPNService 处理）
+	// 5. 配置 TUN 选项
 	ip := config.TunIP
 	if ip == "" {
 		ip = "10.0.0.2"
 	}
-	mask := config.TunMask
-	if mask == "" {
-		mask = "255.255.255.0"
+	gateway := config.TunGateway
+	if gateway == "" {
+		gateway = "10.0.0.1"
 	}
 	dns := config.TunDNS
 	if dns == "" {
 		dns = "8.8.8.8"
 	}
-	if err := vm.device.Configure(ip, gateway, mask, dns); err != nil {
-		log.Printf("[VPNManager] Configure warning: %v", err)
+	
+	inet4Addr, err := netip.ParsePrefix(ip + "/24")
+	if err != nil {
+		cancel()
+		return fmt.Errorf("parse IP address failed: %w", err)
 	}
 	
-	// 8. 启动设备
-	vm.device.Start()
+	dnsAddr, err := netip.ParseAddr(dns)
+	if err != nil {
+		cancel()
+		return fmt.Errorf("parse DNS address failed: %w", err)
+	}
 	
-	// 9. 创建 TCP/UDP 处理器
-	log.Printf("[VPNManager] Starting TCP/UDP handlers...")
-	vm.tcpHandler = tun.NewTCPHandler(vm.stack.Stack(), vm.transport)
-	vm.udpHandler = tun.NewUDPHandler(vm.stack.Stack(), vm.transport, dns)
+	tunOptions := singtun.Options{
+		Name:            "ewp-vpn",
+		Inet4Address:    []netip.Prefix{inet4Addr},
+		MTU:             uint32(vm.tunMTU),
+		AutoRoute:       false, // Android VPNService handles routing
+		DNSServers:      []netip.Addr{dnsAddr},
+		FileDescriptor:  tunFD,
+		Logger:          &tunLogger{},
+	}
 	
-	go func() {
-		if err := vm.tcpHandler.Start(); err != nil {
-			log.Printf("[VPNManager] TCP handler error: %v", err)
-		}
-	}()
+	// 6. 创建 TUN 设备
+	log.Printf("[VPNManager] Creating TUN device from FD=%d, MTU=%d", tunFD, vm.tunMTU)
+	vm.tunDevice, err = singtun.New(tunOptions)
+	if err != nil {
+		cancel()
+		return fmt.Errorf("create TUN device failed: %w", err)
+	}
 	
-	vm.udpHandler.Start()
+	// 7. 创建网络栈
+	log.Printf("[VPNManager] Creating network stack (system)...")
+	stackOptions := singtun.StackOptions{
+		Context:    ctx,
+		Tun:        vm.tunDevice,
+		TunOptions: tunOptions,
+		Handler:    vm.tunHandler,
+		Logger:     &tunLogger{},
+		UDPTimeout: 5 * time.Minute,
+	}
+	
+	vm.tunStack, err = singtun.NewStack("system", stackOptions)
+	if err != nil {
+		vm.tunDevice.Close()
+		cancel()
+		return fmt.Errorf("create network stack failed: %w", err)
+	}
+	
+	// 8. 启动网络栈
+	log.Printf("[VPNManager] Starting network stack...")
+	if err := vm.tunStack.Start(); err != nil {
+		vm.tunStack.Close()
+		vm.tunDevice.Close()
+		cancel()
+		return fmt.Errorf("start network stack failed: %w", err)
+	}
 	
 	vm.running = true
 	vm.startTime = time.Now()
@@ -267,33 +308,21 @@ func (vm *VPNManager) Stop() error {
 	
 	log.Printf("[VPNManager] Stopping VPN...")
 	
+	// 停止网络栈
+	if vm.tunStack != nil {
+		vm.tunStack.Close()
+		vm.tunStack = nil
+	}
+	
+	// 关闭 TUN 设备
+	if vm.tunDevice != nil {
+		vm.tunDevice.Close()
+		vm.tunDevice = nil
+	}
+	
 	// 取消上下文
 	if vm.cancel != nil {
 		vm.cancel()
-	}
-	
-	// 停止 UDP 处理器
-	if vm.udpHandler != nil {
-		vm.udpHandler.Close()
-		vm.udpHandler = nil
-	}
-	
-	// 停止 TCP 处理器
-	if vm.tcpHandler != nil {
-		// TCP handler 会自动停止
-		vm.tcpHandler = nil
-	}
-	
-	// 关闭设备
-	if vm.device != nil {
-		vm.device.Close()
-		vm.device = nil
-	}
-	
-	// 关闭网络栈
-	if vm.stack != nil {
-		vm.stack.Close()
-		vm.stack = nil
 	}
 	
 	// 清空传输层引用
