@@ -10,6 +10,11 @@ QJsonObject ConfigGenerator::generateClientConfig(const EWPNode &node, const Set
     
     config["log"] = generateLog();
     
+    QJsonObject dns = generateDNS(settings);
+    if (!dns.isEmpty()) {
+        config["dns"] = dns;
+    }
+    
     QJsonArray inbounds;
     inbounds.append(generateInbound(settings, tunMode));
     config["inbounds"] = inbounds;
@@ -66,13 +71,12 @@ QJsonObject ConfigGenerator::generateInbound(const SettingsDialog::AppSettings &
         inbound["strict_route"] = settings.tunStrictRoute;
         inbound["stack"] = settings.tunStack;
         
-        // Parse tunnel DNS servers from settings
-        QJsonArray tunnelDNS;
-        QStringList dnsServers = settings.tunnelDNS.split(",", Qt::SkipEmptyParts);
-        for (const QString &server : dnsServers) {
-            tunnelDNS.append(server.trimmed());
+        // TUN mode DNS (currently only supports IP addresses)
+        if (!settings.tunnelDNS.isEmpty()) {
+            QJsonArray tunnelDNS;
+            tunnelDNS.append(settings.tunnelDNS.trimmed());
+            inbound["tunnel_dns"] = tunnelDNS;
         }
-        inbound["tunnel_dns"] = tunnelDNS;
     } else {
         inbound["type"] = "mixed";
         inbound["tag"] = "mixed-in";
@@ -230,4 +234,25 @@ QJsonObject ConfigGenerator::generateRoute()
     route["auto_detect_interface"] = true;
     route["rules"] = QJsonArray();
     return route;
+}
+
+QJsonObject ConfigGenerator::generateDNS(const SettingsDialog::AppSettings &settings)
+{
+    QJsonObject dns;
+    
+    if (settings.bootstrapDNS.isEmpty()) {
+        return dns;
+    }
+    
+    QJsonArray servers;
+    QJsonObject bootstrapServer;
+    bootstrapServer["tag"] = "bootstrap";
+    bootstrapServer["address"] = settings.bootstrapDNS;
+    bootstrapServer["type"] = "bootstrap";
+    servers.append(bootstrapServer);
+    
+    dns["servers"] = servers;
+    dns["bootstrap"] = settings.bootstrapDNS;
+    
+    return dns;
 }

@@ -22,4 +22,5 @@ private:
     static QJsonObject generateFlow(const EWPNode &node);
     static QJsonObject generateRoute();
     static QJsonObject generateLog();
+    static QJsonObject generateDNS(const SettingsDialog::AppSettings &settings);
 };

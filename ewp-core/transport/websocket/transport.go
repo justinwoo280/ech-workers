@@ -43,6 +43,10 @@ func New(serverAddr, serverIP, token string, useECH, enableFlow bool, path strin
 
 // NewWithProtocol creates a new WebSocket transport with protocol selection
 func NewWithProtocol(serverAddr, serverIP, token, password string, useECH, enableFlow, enablePQC, useTrojan bool, path string, echMgr *commontls.ECHManager) (*Transport, error) {
+	return NewWithProtocolAndBootstrap(serverAddr, serverIP, token, password, useECH, enableFlow, enablePQC, useTrojan, path, echMgr, "")
+}
+
+func NewWithProtocolAndBootstrap(serverAddr, serverIP, token, password string, useECH, enableFlow, enablePQC, useTrojan bool, path string, echMgr *commontls.ECHManager, bootstrapDNS string) (*Transport, error) {
 	var uuid [16]byte
 	if !useTrojan {
 		var err error
@@ -57,7 +61,7 @@ func NewWithProtocol(serverAddr, serverIP, token, password string, useECH, enabl
 	}
 
 	// Initialize bootstrap resolver (DoH over H2)
-	bootstrapResolver := dns.NewBootstrapResolver("")
+	bootstrapResolver := dns.NewBootstrapResolver(bootstrapDNS)
 
 	return &Transport{
 		serverAddr:        serverAddr,

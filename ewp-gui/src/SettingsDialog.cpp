@@ -78,7 +78,7 @@ SettingsDialog::AppSettings SettingsDialog::loadFromRegistry()
     appSettings.minimizeToTray = settings.value("app/minimizeToTray", true).toBool();
     
     appSettings.bootstrapDNS = settings.value("dns/bootstrap", "doq:dns.alidns.com:853, doh:https://dns.alidns.com/dns-query, doh:https://1.1.1.1/dns-query").toString();
-    appSettings.tunnelDNS = settings.value("dns/tunnel", "doq:dns.google:853, doh:https://dns.google/dns-query, dot:dns.google:853").toString();
+    appSettings.tunnelDNS = settings.value("dns/tunnel", "8.8.8.8").toString();
     
     appSettings.tunIP = settings.value("tun/ip", "10.0.85.2/24").toString();
     appSettings.tunMTU = settings.value("tun/mtu", 1380).toInt();
@@ -115,7 +115,7 @@ SettingsDialog::AppSettings SettingsDialog::defaultSettings()
     settings.minimizeToTray = true;
     
     settings.bootstrapDNS = "doq:dns.alidns.com:853, doh:https://dns.alidns.com/dns-query, doh:https://1.1.1.1/dns-query";
-    settings.tunnelDNS = "doq:dns.google:853, doh:https://dns.google/dns-query, dot:dns.google:853";
+    settings.tunnelDNS = "8.8.8.8";
     
     settings.tunIP = "10.0.85.2/24";
     settings.tunMTU = 1380;

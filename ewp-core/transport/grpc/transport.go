@@ -61,6 +61,10 @@ func New(serverAddr, serverIP, uuidStr string, useECH, enableFlow bool, serviceN
 }
 
 func NewWithProtocol(serverAddr, serverIP, uuidStr, password string, useECH, enableFlow, enablePQC, useTrojan bool, serviceName string, echManager *commontls.ECHManager) (*Transport, error) {
+	return NewWithProtocolAndBootstrap(serverAddr, serverIP, uuidStr, password, useECH, enableFlow, enablePQC, useTrojan, serviceName, echManager, "")
+}
+
+func NewWithProtocolAndBootstrap(serverAddr, serverIP, uuidStr, password string, useECH, enableFlow, enablePQC, useTrojan bool, serviceName string, echManager *commontls.ECHManager, bootstrapDNS string) (*Transport, error) {
 	var uuid [16]byte
 	if !useTrojan {
 		var err error
@@ -76,7 +80,7 @@ func NewWithProtocol(serverAddr, serverIP, uuidStr, password string, useECH, ena
 	serviceName = strings.TrimPrefix(serviceName, "/")
 
 	// Initialize bootstrap resolver (DoH over H2)
-	bootstrapResolver := dns.NewBootstrapResolver("")
+	bootstrapResolver := dns.NewBootstrapResolver(bootstrapDNS)
 
 	return &Transport{
 		serverAddr:          serverAddr,

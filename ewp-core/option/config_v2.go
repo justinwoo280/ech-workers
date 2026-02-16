@@ -12,11 +12,11 @@ import (
 
 // RootConfig is the top-level configuration structure
 type RootConfig struct {
-	Log       LogConfig       `json:"log"`
-	DNS       *DNSConfig      `json:"dns,omitempty"`
-	Inbounds  []InboundConfig `json:"inbounds"`
+	Log       LogConfig        `json:"log"`
+	DNS       *DNSConfig       `json:"dns,omitempty"`
+	Inbounds  []InboundConfig  `json:"inbounds"`
 	Outbounds []OutboundConfig `json:"outbounds"`
-	Route     *RouteConfig    `json:"route,omitempty"`
+	Route     *RouteConfig     `json:"route,omitempty"`
 }
 
 // LogConfig configures logging behavior
@@ -28,8 +28,9 @@ type LogConfig struct {
 
 // DNSConfig configures DNS resolution
 type DNSConfig struct {
-	Servers []DNSServerConfig `json:"servers"`
-	Final   string            `json:"final"` // default server tag
+	Servers   []DNSServerConfig `json:"servers"`
+	Final     string            `json:"final"`     // default server tag
+	Bootstrap string            `json:"bootstrap"` // bootstrap DNS servers for resolving server address
 }
 
 // DNSServerConfig defines a DNS server

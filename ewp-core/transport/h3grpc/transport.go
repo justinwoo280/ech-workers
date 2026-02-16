@@ -61,6 +61,10 @@ func New(serverAddr, serverIP, uuidStr string, useECH, enableFlow bool, serviceN
 
 // NewWithProtocol creates a new HTTP/3 transport with full options
 func NewWithProtocol(serverAddr, serverIP, uuidStr, password string, useECH, enableFlow, enablePQC, useTrojan bool, serviceName string, echManager *commontls.ECHManager) (*Transport, error) {
+	return NewWithProtocolAndBootstrap(serverAddr, serverIP, uuidStr, password, useECH, enableFlow, enablePQC, useTrojan, serviceName, echManager, "")
+}
+
+func NewWithProtocolAndBootstrap(serverAddr, serverIP, uuidStr, password string, useECH, enableFlow, enablePQC, useTrojan bool, serviceName string, echManager *commontls.ECHManager, bootstrapDNS string) (*Transport, error) {
 	var uuid [16]byte
 	if !useTrojan {
 		var err error
@@ -97,7 +101,7 @@ func NewWithProtocol(serverAddr, serverIP, uuidStr, password string, useECH, ena
 	}
 
 	// Initialize bootstrap resolver (DoH over H2)
-	bootstrapResolver := dns.NewBootstrapResolver("")
+	bootstrapResolver := dns.NewBootstrapResolver(bootstrapDNS)
 	t.bootstrapResolver = bootstrapResolver
 
 	// Initialize HTTP/3 client

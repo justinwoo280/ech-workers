@@ -6,14 +6,14 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>550</width>
-    <height>600</height>
+    <width>600</width>
+    <height>650</height>
    </rect>
   </property>
   <property name="minimumSize">
    <size>
-    <width>500</width>
-    <height>550</height>
+    <width>550</width>
+    <height>600</height>
    </size>
   </property>
   <property name="windowTitle">
@@ -34,11 +34,28 @@
        </widget>
       </item>
       <item row="0" column="1">
-       <widget class="QLineEdit" name="editListenAddr">
-        <property name="text">
-         <string>127.0.0.1:30000</string>
-        </property>
-       </widget>
+       <layout class="QVBoxLayout">
+        <item>
+         <widget class="QLineEdit" name="editListenAddr">
+          <property name="text">
+           <string>127.0.0.1:30000</string>
+          </property>
+          <property name="placeholderText">
+           <string>SOCKS5/HTTP代理监听地址和端口</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QLabel" name="labelListenAddrHint">
+          <property name="text">
+           <string>格式: IP:端口 (如: 127.0.0.1:30000 或 0.0.0.0:1080)</string>
+          </property>
+          <property name="styleSheet">
+           <string>color: gray; font-size: 10px;</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
       </item>
       <item row="1" column="0">
        <widget class="QLabel" name="labelAutoStart">
@@ -119,14 +136,28 @@
        </widget>
       </item>
       <item row="1" column="1">
-       <widget class="QLineEdit" name="editTunnelDNS">
-        <property name="text">
-         <string>doq:dns.google:853, doh:https://dns.google/dns-query, dot:dns.google:853</string>
-        </property>
-        <property name="placeholderText">
-         <string>TUN模式下使用，逗号分隔</string>
-        </property>
-       </widget>
+       <layout class="QVBoxLayout">
+        <item>
+         <widget class="QLineEdit" name="editTunnelDNS">
+          <property name="text">
+           <string>8.8.8.8</string>
+          </property>
+          <property name="placeholderText">
+           <string>TUN模式DNS服务器IP地址</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QLabel" name="labelTunnelDNSHint">
+          <property name="text">
+           <string>⚠️ TUN模式当前仅支持IP地址（流量自动通过代理隧道）</string>
+          </property>
+          <property name="styleSheet">
+           <string>color: #ff8c00; font-size: 10px;</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
       </item>
      </layout>
     </widget>
