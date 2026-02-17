@@ -1,7 +1,6 @@
 package websocket
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -11,7 +10,6 @@ import (
 
 	commonnet "ewp-core/common/net"
 	commontls "ewp-core/common/tls"
-	"ewp-core/dns"
 	"ewp-core/log"
 	"ewp-core/transport"
 
@@ -33,7 +31,6 @@ type Transport struct {
 	host              string
 	headers           map[string]string
 	echManager        *commontls.ECHManager
-	bootstrapResolver *dns.BootstrapResolver
 }
 
 // New creates a new WebSocket transport
@@ -43,10 +40,6 @@ func New(serverAddr, serverIP, token string, useECH, enableFlow bool, path strin
 
 // NewWithProtocol creates a new WebSocket transport with protocol selection
 func NewWithProtocol(serverAddr, serverIP, token, password string, useECH, enableFlow, enablePQC, useTrojan bool, path string, echMgr *commontls.ECHManager) (*Transport, error) {
-	return NewWithProtocolAndBootstrap(serverAddr, serverIP, token, password, useECH, enableFlow, enablePQC, useTrojan, path, echMgr, "")
-}
-
-func NewWithProtocolAndBootstrap(serverAddr, serverIP, token, password string, useECH, enableFlow, enablePQC, useTrojan bool, path string, echMgr *commontls.ECHManager, bootstrapDNS string) (*Transport, error) {
 	var uuid [16]byte
 	if !useTrojan {
 		var err error
@@ -59,9 +52,6 @@ func NewWithProtocolAndBootstrap(serverAddr, serverIP, token, password string, u
 	if path == "" {
 		path = "/"
 	}
-
-	// Initialize bootstrap resolver (DoH over H2)
-	bootstrapResolver := dns.NewBootstrapResolver(bootstrapDNS)
 
 	return &Transport{
 		serverAddr:        serverAddr,
@@ -76,7 +66,6 @@ func NewWithProtocolAndBootstrap(serverAddr, serverIP, token, password string, u
 		path:              path,
 		headers:           make(map[string]string),
 		echManager:        echMgr,
-		bootstrapResolver: bootstrapResolver,
 	}, nil
 }
 
@@ -126,40 +115,28 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 	// Resolve serverIP if it's a domain name
 	resolvedIP := t.serverIP
 	if resolvedIP != "" && !isIPAddress(resolvedIP) {
-		log.Printf("[WebSocket] Configured serverIP is a domain (%s), resolving...", resolvedIP)
-		
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		
-		ips, err := t.bootstrapResolver.LookupIP(ctx, resolvedIP)
+		ips, err := net.LookupIP(resolvedIP)
 		if err != nil {
-			log.Printf("[WebSocket] Bootstrap DNS resolution failed for serverIP %s: %v", resolvedIP, err)
-			return nil, fmt.Errorf("bootstrap DNS resolution failed for serverIP: %w", err)
+			log.Printf("[WebSocket] System DNS resolution failed for serverIP %s: %v", resolvedIP, err)
+			return nil, fmt.Errorf("DNS resolution failed for serverIP: %w", err)
 		}
 		if len(ips) > 0 {
 			resolvedIP = ips[0].String()
-			log.Printf("[WebSocket] Bootstrap resolved serverIP %s -> %s", t.serverIP, resolvedIP)
+			log.V("[WebSocket] Resolved serverIP %s -> %s", t.serverIP, resolvedIP)
 		} else {
-			log.Printf("[WebSocket] No IPs returned for serverIP %s", t.serverIP)
 			return nil, fmt.Errorf("no IPs returned for serverIP %s", t.serverIP)
 		}
 	}
 
-	// If no serverIP, resolve serverAddr
+	// If no serverIP, resolve serverAddr using system DNS
 	if resolvedIP == "" && !isIPAddress(parsed.Host) {
-		log.Printf("[WebSocket] Resolving server address: %s", parsed.Host)
-		
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		
-		ips, err := t.bootstrapResolver.LookupIP(ctx, parsed.Host)
+		ips, err := net.LookupIP(parsed.Host)
 		if err != nil {
-			log.Printf("[WebSocket] Bootstrap DNS resolution failed for %s: %v", parsed.Host, err)
-			return nil, fmt.Errorf("bootstrap DNS resolution failed: %w", err)
+			log.Printf("[WebSocket] System DNS resolution failed for %s: %v", parsed.Host, err)
+			return nil, fmt.Errorf("DNS resolution failed: %w", err)
 		}
 		if len(ips) > 0 {
 			resolvedIP = ips[0].String()
-			log.Printf("[WebSocket] Bootstrap resolved %s -> %s", parsed.Host, resolvedIP)
 		}
 	}
 

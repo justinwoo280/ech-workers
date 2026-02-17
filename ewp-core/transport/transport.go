@@ -11,8 +11,10 @@ import (
 
 // TunnelConn represents a tunnel connection (abstraction interface)
 type TunnelConn interface {
-	// Connect sends connection request and waits for response
+	// Connect sends TCP connection request and waits for response
 	Connect(target string, initialData []byte) error
+	// ConnectUDP sends UDP connection request (for UDP over TCP tunnel)
+	ConnectUDP(target string, initialData []byte) error
 	// Read reads data from tunnel to provided buffer (zero-copy optimization)
 	Read(buf []byte) (int, error)
 	// Write writes data to tunnel

@@ -108,7 +108,13 @@ func (h *Handler) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 	}()
 
 	target := destination.String()
-	log.V("[TUN UDP] New packet connection: %s -> %s", source, target)
+	
+	// Detect WebRTC STUN/TURN requests
+	if destination.Port == 3478 || destination.Port == 19302 {
+		log.Printf("[TUN WebRTC] STUN request intercepted: %s -> %s (tunneled)", source, target)
+	} else {
+		log.V("[TUN UDP] New packet connection: %s -> %s", source, target)
+	}
 
 	tunnelConn, err := h.transport.Dial()
 	if err != nil {
@@ -121,8 +127,8 @@ func (h *Handler) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 	stopPing := tunnelConn.StartPing(10 * time.Second)
 	defer close(stopPing)
 
-	if err := tunnelConn.Connect(target, nil); err != nil {
-		log.Printf("[TUN UDP] CONNECT failed: %v", err)
+	if err := tunnelConn.ConnectUDP(target, nil); err != nil {
+		log.Printf("[TUN UDP] ConnectUDP failed: %v", err)
 		conn.Close()
 		return
 	}
@@ -146,7 +152,7 @@ func (h *Handler) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 			packet := buffer.Bytes()
 			udpTarget := addr.String()
 			
-			if err := tunnelConn.Connect(udpTarget, packet); err != nil {
+			if err := tunnelConn.ConnectUDP(udpTarget, packet); err != nil {
 				log.V("[TUN UDP] Packet send failed: %v", err)
 				continue
 			}

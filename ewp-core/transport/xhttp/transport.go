@@ -13,7 +13,6 @@ import (
 
 	commonnet "ewp-core/common/net"
 	commontls "ewp-core/common/tls"
-	"ewp-core/dns"
 	"ewp-core/log"
 	"ewp-core/transport"
 
@@ -34,7 +33,6 @@ type Transport struct {
 	path              string
 	mode              string
 	echManager        *commontls.ECHManager
-	bootstrapResolver *dns.BootstrapResolver
 
 	// Xray-core 风格的随机化配置
 	paddingBytes     RangeConfig  // Referer padding 大小
@@ -65,10 +63,6 @@ func New(serverAddr, serverIP, token string, useECH, enableFlow bool, path strin
 }
 
 func NewWithProtocol(serverAddr, serverIP, token, password string, useECH, enableFlow, enablePQC, useTrojan bool, path string, echManager *commontls.ECHManager) (*Transport, error) {
-	return NewWithProtocolAndBootstrap(serverAddr, serverIP, token, password, useECH, enableFlow, enablePQC, useTrojan, path, echManager, "")
-}
-
-func NewWithProtocolAndBootstrap(serverAddr, serverIP, token, password string, useECH, enableFlow, enablePQC, useTrojan bool, path string, echManager *commontls.ECHManager, bootstrapDNS string) (*Transport, error) {
 	var uuid [16]byte
 	if !useTrojan {
 		var err error
@@ -95,9 +89,6 @@ func NewWithProtocolAndBootstrap(serverAddr, serverIP, token, password string, u
 		HKeepAlivePeriod: 30, // Keep-Alive 30 秒
 	}
 
-	// Initialize bootstrap resolver (DoH over H2)
-	bootstrapResolver := dns.NewBootstrapResolver(bootstrapDNS)
-
 	return &Transport{
 		serverAddr:        serverAddr,
 		serverIP:          serverIP,
@@ -112,7 +103,6 @@ func NewWithProtocolAndBootstrap(serverAddr, serverIP, token, password string, u
 		path:              path,
 		mode:              "stream-one",
 		echManager:        echManager,
-		bootstrapResolver: bootstrapResolver,
 
 		// 随机化配置 - 基于 Xray-core
 		paddingBytes:     RangeConfig{From: 50, To: 200},   // Referer padding
@@ -296,43 +286,31 @@ func (t *Transport) createHTTPClient(host, port string) (*http.Client, error) {
 
 	stdConfig.NextProtos = []string{"h2"}
 
-	// Resolve serverIP if it's a domain name
+	// Resolve serverIP if it's a domain name using system DNS
 	resolvedIP := t.serverIP
 	if resolvedIP != "" && !isIPAddress(resolvedIP) {
-		log.Printf("[XHTTP] Configured serverIP is a domain (%s), resolving...", resolvedIP)
-		
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		
-		ips, err := t.bootstrapResolver.LookupIP(ctx, resolvedIP)
+		ips, err := net.LookupIP(resolvedIP)
 		if err != nil {
-			log.Printf("[XHTTP] Bootstrap DNS resolution failed for serverIP %s: %v", resolvedIP, err)
-			return nil, fmt.Errorf("bootstrap DNS resolution failed for serverIP: %w", err)
+			log.Printf("[XHTTP] System DNS resolution failed for serverIP %s: %v", resolvedIP, err)
+			return nil, fmt.Errorf("DNS resolution failed for serverIP: %w", err)
 		}
 		if len(ips) > 0 {
 			resolvedIP = ips[0].String()
-			log.Printf("[XHTTP] Bootstrap resolved serverIP %s -> %s", t.serverIP, resolvedIP)
+			log.V("[XHTTP] Resolved serverIP %s -> %s", t.serverIP, resolvedIP)
 		} else {
-			log.Printf("[XHTTP] No IPs returned for serverIP %s", t.serverIP)
 			return nil, fmt.Errorf("no IPs returned for serverIP %s", t.serverIP)
 		}
 	}
 
-	// If no serverIP, resolve serverAddr
+	// If no serverIP, resolve serverAddr using system DNS
 	if resolvedIP == "" && !isIPAddress(host) {
-		log.Printf("[XHTTP] Resolving server address: %s", host)
-		
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		
-		ips, err := t.bootstrapResolver.LookupIP(ctx, host)
+		ips, err := net.LookupIP(host)
 		if err != nil {
-			log.Printf("[XHTTP] Bootstrap DNS resolution failed for %s: %v", host, err)
-			return nil, fmt.Errorf("bootstrap DNS resolution failed: %w", err)
+			log.Printf("[XHTTP] System DNS resolution failed for %s: %v", host, err)
+			return nil, fmt.Errorf("DNS resolution failed: %w", err)
 		}
 		if len(ips) > 0 {
 			resolvedIP = ips[0].String()
-			log.Printf("[XHTTP] Bootstrap resolved %s -> %s", host, resolvedIP)
 		}
 	}
 

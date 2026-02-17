@@ -28,8 +28,8 @@ SettingsDialog::AppSettings SettingsDialog::getSettings() const
     settings.autoStart = ui->checkAutoStart->isChecked();
     settings.minimizeToTray = ui->checkMinimizeToTray->isChecked();
     
-    settings.bootstrapDNS = ui->editBootstrapDNS->text();
     settings.tunnelDNS = ui->editTunnelDNS->text();
+    settings.tunnelDNSv6 = ui->editTunnelDNSv6->text();
     
     settings.tunIP = ui->editTunIP->text();
     settings.tunMTU = ui->spinTunMTU->value();
@@ -46,8 +46,8 @@ void SettingsDialog::setSettings(const AppSettings &settings)
     ui->checkAutoStart->setChecked(settings.autoStart);
     ui->checkMinimizeToTray->setChecked(settings.minimizeToTray);
     
-    ui->editBootstrapDNS->setText(settings.bootstrapDNS);
     ui->editTunnelDNS->setText(settings.tunnelDNS);
+    ui->editTunnelDNSv6->setText(settings.tunnelDNSv6);
     
     ui->editTunIP->setText(settings.tunIP);
     ui->spinTunMTU->setValue(settings.tunMTU);
@@ -77,8 +77,8 @@ SettingsDialog::AppSettings SettingsDialog::loadFromRegistry()
     appSettings.autoStart = settings.value("app/autoStart", false).toBool();
     appSettings.minimizeToTray = settings.value("app/minimizeToTray", true).toBool();
     
-    appSettings.bootstrapDNS = settings.value("dns/bootstrap", "doq:dns.alidns.com:853, doh:https://dns.alidns.com/dns-query, doh:https://1.1.1.1/dns-query").toString();
-    appSettings.tunnelDNS = settings.value("dns/tunnel", "8.8.8.8").toString();
+    appSettings.tunnelDNS = settings.value("tun/dns", "8.8.8.8").toString();
+    appSettings.tunnelDNSv6 = settings.value("tun/ipv6_dns", "2001:4860:4860::8888").toString();
     
     appSettings.tunIP = settings.value("tun/ip", "10.0.85.2/24").toString();
     appSettings.tunMTU = settings.value("tun/mtu", 1380).toInt();
@@ -97,8 +97,8 @@ void SettingsDialog::saveToRegistry(const AppSettings &settings)
     qSettings.setValue("app/autoStart", settings.autoStart);
     qSettings.setValue("app/minimizeToTray", settings.minimizeToTray);
     
-    qSettings.setValue("dns/bootstrap", settings.bootstrapDNS);
-    qSettings.setValue("dns/tunnel", settings.tunnelDNS);
+    qSettings.setValue("tun/dns", settings.tunnelDNS);
+    qSettings.setValue("tun/ipv6_dns", settings.tunnelDNSv6);
     
     qSettings.setValue("tun/ip", settings.tunIP);
     qSettings.setValue("tun/mtu", settings.tunMTU);
@@ -114,8 +114,8 @@ SettingsDialog::AppSettings SettingsDialog::defaultSettings()
     settings.autoStart = false;
     settings.minimizeToTray = true;
     
-    settings.bootstrapDNS = "doq:dns.alidns.com:853, doh:https://dns.alidns.com/dns-query, doh:https://1.1.1.1/dns-query";
     settings.tunnelDNS = "8.8.8.8";
+    settings.tunnelDNSv6 = "2001:4860:4860::8888";
     
     settings.tunIP = "10.0.85.2/24";
     settings.tunMTU = 1380;

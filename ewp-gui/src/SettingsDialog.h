@@ -20,9 +20,9 @@ public:
         bool autoStart;
         bool minimizeToTray;
         
-        // DNS settings
-        QString bootstrapDNS;
+        // TUN DNS settings
         QString tunnelDNS;
+        QString tunnelDNSv6;
         
         // TUN settings
         QString tunIP;

@@ -70,6 +70,43 @@ func (c *TrojanConn) Connect(target string, initialData []byte) error {
 	return nil
 }
 
+func (c *TrojanConn) ConnectUDP(target string, initialData []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	addr, err := trojan.ParseAddress(target)
+	if err != nil {
+		return err
+	}
+
+	// Build UDP handshake data
+	var handshakeData []byte
+	handshakeData = append(handshakeData, c.key[:]...)
+	handshakeData = append(handshakeData, trojan.CRLF...)
+	handshakeData = append(handshakeData, trojan.CommandUDP)  // ← UDP command
+
+	addrBytes, err := addr.Encode()
+	if err != nil {
+		return err
+	}
+	handshakeData = append(handshakeData, addrBytes...)
+	handshakeData = append(handshakeData, trojan.CRLF...)
+
+	// Append initial data if any
+	if len(initialData) > 0 {
+		handshakeData = append(handshakeData, initialData...)
+	}
+
+	// Send UDP handshake (Trojan has no response)
+	if err := c.conn.WriteMessage(websocket.BinaryMessage, handshakeData); err != nil {
+		return err
+	}
+
+	c.connected = true
+	log.V("[Trojan] UDP handshake sent, target: %s", target)
+	return nil
+}
+
 // Read reads data from WebSocket
 func (c *TrojanConn) Read(buf []byte) (int, error) {
 	_, msg, err := c.conn.ReadMessage()

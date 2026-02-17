@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -168,6 +169,146 @@ func (c *StreamDownConn) Connect(target string, initialData []byte) error {
 
 	c.connected = true
 	log.V("[XHTTP] stream-down EWP handshake success, target: %s, SessionID: %s", target, c.sessionID)
+	return nil
+}
+
+// ConnectUDP sends UDP connection request using EWP native UDP protocol
+func (c *StreamDownConn) ConnectUDP(target string, initialData []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	addr, err := ewp.ParseAddress(target)
+	if err != nil {
+		return fmt.Errorf("parse address: %w", err)
+	}
+
+	// Use CommandUDP for UDP connections
+	ewpReq := ewp.NewHandshakeRequest(c.uuid, ewp.CommandUDP, addr)
+	handshakeData, err := ewpReq.Encode()
+	if err != nil {
+		return fmt.Errorf("encode EWP handshake: %w", err)
+	}
+
+	if c.enableFlow {
+		c.flowState = ewp.NewFlowState(c.uuid[:])
+		c.writeOnceUserUUID = make([]byte, 16)
+		copy(c.writeOnceUserUUID, c.uuid[:])
+	}
+
+	// 使用 Transport 的随机化配置
+	var padding string
+	if c.transport.enablePadding && !c.transport.paddingInReferer {
+		paddingLen := c.transport.paddingBytes.Rand()
+		if paddingLen > 0 {
+			padding = strings.Repeat("X", int(paddingLen))
+		}
+	}
+
+	handshakeURL := fmt.Sprintf("https://%s:%s%s/%s/0", c.host, c.port, c.path, c.sessionID)
+	if padding != "" {
+		handshakeURL += "?x_padding=" + padding
+	}
+
+	ctx := context.Background()
+	handshakeReq, err := c.transport.createRequestWithContext(ctx, "POST", handshakeURL, bytes.NewReader(handshakeData))
+	if err != nil {
+		return fmt.Errorf("create handshake request: %w", err)
+	}
+
+	headers := c.transport.GetRequestHeader(handshakeURL)
+	for k, v := range headers {
+		handshakeReq.Header[k] = v
+	}
+	handshakeReq.Header.Set("X-Auth-Token", c.uuidStr)
+	handshakeReq.ContentLength = int64(len(handshakeData))
+
+	handshakeResp, err := c.httpClient.Do(handshakeReq)
+	if err != nil {
+		return fmt.Errorf("handshake request failed: %w", err)
+	}
+	defer handshakeResp.Body.Close()
+
+	if handshakeResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(handshakeResp.Body)
+		return fmt.Errorf("handshake http error: %d %s, body: %s", handshakeResp.StatusCode, handshakeResp.Status, body)
+	}
+
+	handshakeRespData, err := io.ReadAll(handshakeResp.Body)
+	if err != nil {
+		return fmt.Errorf("read handshake response: %w", err)
+	}
+
+	resp, err := ewp.DecodeHandshakeResponse(handshakeRespData, ewpReq.Version, ewpReq.Nonce, c.uuid)
+	if err != nil {
+		return fmt.Errorf("decode EWP handshake response: %w", err)
+	}
+
+	if resp.Status != ewp.StatusOK {
+		return fmt.Errorf("EWP handshake failed with status: %d", resp.Status)
+	}
+
+	c.uploadSeq = 1
+
+	// 构造下载 URL
+	getURL := fmt.Sprintf("https://%s:%s%s/%s", c.host, c.port, c.path, c.sessionID)
+	if padding != "" {
+		getURL += "?x_padding=" + padding
+	}
+
+	getReq, err := c.transport.createRequestWithContext(ctx, "GET", getURL, nil)
+	if err != nil {
+		return fmt.Errorf("create GET request: %w", err)
+	}
+
+	headers = c.transport.GetRequestHeader(getURL)
+	for k, v := range headers {
+		getReq.Header[k] = v
+	}
+	getReq.Header.Set("X-Auth-Token", c.uuidStr)
+
+	getResp, err := c.httpClient.Do(getReq)
+	if err != nil {
+		return fmt.Errorf("GET request failed: %w", err)
+	}
+
+	if getResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(getResp.Body)
+		getResp.Body.Close()
+		return fmt.Errorf("GET http error: %d %s, body: %s", getResp.StatusCode, getResp.Status, body)
+	}
+
+	c.respBody = getResp.Body
+
+	// Send initial UDP packet if provided (with UDP framing)
+	if len(initialData) > 0 {
+		udpAddr, err := net.ResolveUDPAddr("udp", target)
+		if err != nil {
+			return fmt.Errorf("resolve UDP address: %w", err)
+		}
+
+		// Generate GlobalID for this session
+		pseudoLocalAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}
+		globalID := ewp.GenerateGlobalID(pseudoLocalAddr)
+
+		pkt := &ewp.UDPPacket{
+			GlobalID: globalID,
+			Status:   ewp.UDPStatusNew,
+			Target:   udpAddr,
+			Payload:  initialData,
+		}
+
+		encoded, err := ewp.EncodeUDPPacket(pkt)
+		if err != nil {
+			return fmt.Errorf("encode UDP packet: %w", err)
+		}
+
+		if err := c.Write(encoded); err != nil {
+			return fmt.Errorf("send initial UDP packet: %w", err)
+		}
+	}
+
+	c.connected = true
+	log.V("[XHTTP] stream-down UDP handshake success, target: %s, SessionID: %s", target, c.sessionID)
 	return nil
 }
 

@@ -99,13 +99,6 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 		log.Printf("[协议] Using EWP protocol (UUID: %s)", uuid)
 	}
 
-	// Get bootstrap DNS configuration
-	bootstrapDNS := ""
-	if cfg.DNS != nil && cfg.DNS.Bootstrap != "" {
-		bootstrapDNS = cfg.DNS.Bootstrap
-		log.Printf("[DNS] Using bootstrap DNS: %s", bootstrapDNS)
-	}
-
 	// Initialize ECH manager
 	var echMgr *tls.ECHManager
 	useECH := outbound.TLS != nil && outbound.TLS.ECH != nil && outbound.TLS.ECH.Enabled
@@ -158,10 +151,10 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 		if path == "" {
 			path = "/"
 		}
-		trans, err = websocket.NewWithProtocolAndBootstrap(
+		trans, err = websocket.NewWithProtocol(
 			serverAddr, outbound.ServerIP, uuid, password,
 			useECH, enableFlow, enablePQC, useTrojan,
-			path, echMgr, bootstrapDNS,
+			path, echMgr,
 		)
 		if err != nil {
 			return nil, err
@@ -172,10 +165,10 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 		if serviceName == "" {
 			serviceName = "ProxyService"
 		}
-		grpcTrans, err := grpc.NewWithProtocolAndBootstrap(
+		grpcTrans, err := grpc.NewWithProtocol(
 			serverAddr, outbound.ServerIP, uuid, password,
 			useECH, enableFlow, enablePQC, useTrojan,
-			serviceName, echMgr, bootstrapDNS,
+			serviceName, echMgr,
 		)
 		if err != nil {
 			return nil, err
@@ -195,10 +188,10 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 		if serviceName == "" {
 			serviceName = "ProxyService"
 		}
-		h3Trans, err := h3grpc.NewWithProtocolAndBootstrap(
+		h3Trans, err := h3grpc.NewWithProtocol(
 			serverAddr, outbound.ServerIP, uuid, password,
 			useECH, enableFlow, enablePQC, useTrojan,
-			serviceName, echMgr, bootstrapDNS,
+			serviceName, echMgr,
 		)
 		if err != nil {
 			return nil, err
@@ -218,10 +211,10 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 		if path == "" {
 			path = "/xhttp"
 		}
-		trans, err = xhttp.NewWithProtocolAndBootstrap(
+		trans, err = xhttp.NewWithProtocol(
 			serverAddr, outbound.ServerIP, uuid, password,
 			useECH, enableFlow, enablePQC, useTrojan,
-			path, echMgr, bootstrapDNS,
+			path, echMgr,
 		)
 		if err != nil {
 			return nil, err
@@ -248,22 +241,39 @@ func startTunMode(inbound option.InboundConfig, trans transport.Transport, cfg *
 		tunIP = "10.0.85.2/24"
 	}
 
+	// Parse TUN IPv6 address (dual-stack enabled by default)
+	tunIPv6 := inbound.Inet6Address
+	if tunIPv6 == "" {
+		tunIPv6 = "fd00:5ca1:e::2/64"  // Default IPv6 ULA address
+	}
+
 	mtu := inbound.MTU
 	if mtu == 0 {
 		mtu = 1380
 	}
 
-	// Determine DNS server for TUN mode
-	// Note: TUN mode currently only supports IP addresses (not DoH/DoT/DoQ URLs)
-	// The DNS traffic will be routed through the proxy tunnel automatically
-	dnsServer := "8.8.8.8"  // Default to Google Public DNS
-	log.Printf("[TUN] Using DNS: %s (tunneled through proxy)", dnsServer)
+	// Determine DNS servers for TUN mode (dual-stack)
+	// All DNS traffic will be routed through the proxy tunnel automatically
+	dnsServer := inbound.DNS
+	if dnsServer == "" {
+		dnsServer = "8.8.8.8"  // Default to Google Public DNS (IPv4)
+	}
+	
+	// IPv6 DNS server - must be a real public address (not virtual)
+	dns6Server := inbound.IPv6DNS
+	if dns6Server == "" {
+		dns6Server = "2001:4860:4860::8888"  // Default to Google Public DNS (IPv6)
+	}
+	
+	log.Printf("[TUN] DNS: IPv4=%s, IPv6=%s (all tunneled through proxy)", dnsServer, dns6Server)
 
 	tunCfg := &tun.Config{
 		IP:        tunIP,
 		Gateway:   "10.0.85.1",
 		Mask:      "255.255.255.0",
 		DNS:       dnsServer,
+		IPv6:      tunIPv6,
+		IPv6DNS:   dns6Server,
 		MTU:       mtu,
 		Transport: trans,
 	}
@@ -274,7 +284,6 @@ func startTunMode(inbound option.InboundConfig, trans transport.Transport, cfg *
 	}
 	defer tunDev.Close()
 
-	log.Printf("[TUN] Started (IP: %s, MTU: %d)", tunIP, mtu)
 	log.Fatalf("[错误] TUN mode stopped: %v", tunDev.Start())
 }
 

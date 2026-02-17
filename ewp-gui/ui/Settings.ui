@@ -92,50 +92,19 @@
     </widget>
    </item>
    <item>
-    <widget class="QGroupBox" name="dnsGroup">
+    <widget class="QGroupBox" name="tunDnsGroup">
      <property name="title">
-      <string>DNS 设置</string>
+      <string>TUN 模式 DNS</string>
      </property>
-     <layout class="QFormLayout" name="dnsLayout">
+     <layout class="QFormLayout" name="tunDnsLayout">
       <item row="0" column="0">
-       <widget class="QLabel" name="labelBootstrapDNS">
+       <widget class="QLabel" name="labelTunnelDNS">
         <property name="text">
-         <string>引导 DNS</string>
+         <string>远端 DNS 服务器</string>
         </property>
        </widget>
       </item>
       <item row="0" column="1">
-       <layout class="QVBoxLayout">
-        <item>
-         <widget class="QLineEdit" name="editBootstrapDNS">
-          <property name="text">
-           <string>doq:dns.alidns.com:853, doh:https://dns.alidns.com/dns-query, doh:https://1.1.1.1/dns-query</string>
-          </property>
-          <property name="placeholderText">
-           <string>用于解析代理服务器域名（逗号分隔）</string>
-          </property>
-         </widget>
-        </item>
-        <item>
-         <widget class="QLabel" name="labelBootstrapDNSHint">
-          <property name="text">
-           <string>格式: protocol:address (支持 doq/doh/dot，逗号分隔，自动容灾)</string>
-          </property>
-          <property name="styleSheet">
-           <string>color: gray; font-size: 10px;</string>
-          </property>
-         </widget>
-        </item>
-       </layout>
-      </item>
-      <item row="1" column="0">
-       <widget class="QLabel" name="labelTunnelDNS">
-        <property name="text">
-         <string>隧道 DNS 服务器</string>
-        </property>
-       </widget>
-      </item>
-      <item row="1" column="1">
        <layout class="QVBoxLayout">
         <item>
          <widget class="QLineEdit" name="editTunnelDNS">
@@ -143,17 +112,48 @@
            <string>8.8.8.8</string>
           </property>
           <property name="placeholderText">
-           <string>TUN模式DNS服务器IP地址</string>
+           <string>IPv4 DNS服务器地址</string>
           </property>
          </widget>
         </item>
         <item>
          <widget class="QLabel" name="labelTunnelDNSHint">
           <property name="text">
-           <string>⚠️ TUN模式当前仅支持IP地址（流量自动通过代理隧道）</string>
+           <string>⚠️ 流量自动通过代理隧道传输到远端DNS</string>
           </property>
           <property name="styleSheet">
            <string>color: #ff8c00; font-size: 10px;</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="labelTunnelDNSv6">
+        <property name="text">
+         <string>远端 DNS 服务器 (IPv6)</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <layout class="QVBoxLayout">
+        <item>
+         <widget class="QLineEdit" name="editTunnelDNSv6">
+          <property name="text">
+           <string>2001:4860:4860::8888</string>
+          </property>
+          <property name="placeholderText">
+           <string>IPv6 DNS服务器地址</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QLabel" name="labelTunnelDNSv6Hint">
+          <property name="text">
+           <string>Google DNS IPv6 地址，可留空禁用IPv6 DNS</string>
+          </property>
+          <property name="styleSheet">
+           <string>color: gray; font-size: 10px;</string>
           </property>
          </widget>
         </item>

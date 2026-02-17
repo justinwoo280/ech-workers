@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -230,6 +231,160 @@ func (c *Conn) trojanConnect(target string, initialData []byte) error {
 
 	c.trojanConnected = true
 	log.V("[H3] Trojan connect sent for %s", target)
+	return nil
+}
+
+func (c *Conn) ConnectUDP(target string, initialData []byte) error {
+	if c.useTrojan {
+		return c.trojanConnectUDP(target, initialData)
+	}
+	
+	// Wait for connection to establish (similar to Connect)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	timeout := time.After(10 * time.Second)
+
+	for {
+		select {
+		case <-ticker.C:
+			c.mu.Lock()
+			connected := c.connected
+			c.mu.Unlock()
+			if connected {
+				goto Connected
+			}
+		case <-timeout:
+			return fmt.Errorf("connection timeout")
+		case <-c.closeChan:
+			return fmt.Errorf("connection closed")
+		}
+	}
+
+Connected:
+	return c.ewpConnectUDP(target, initialData)
+}
+
+// trojanConnectUDP sends Trojan protocol UDP connect request
+func (c *Conn) trojanConnectUDP(target string, initialData []byte) error {
+	// Parse target address
+	addr, err := trojan.ParseAddress(target)
+	if err != nil {
+		return fmt.Errorf("parse address: %w", err)
+	}
+
+	// Generate key
+	key := trojan.GenerateKey(c.password)
+
+	// Build Trojan UDP handshake
+	var handshakeData []byte
+	handshakeData = append(handshakeData, key[:]...)
+	handshakeData = append(handshakeData, trojan.CRLF...)
+	handshakeData = append(handshakeData, trojan.CommandUDP)  // ← UDP command
+
+	addrBytes, err := addr.Encode()
+	if err != nil {
+		return fmt.Errorf("encode address: %w", err)
+	}
+	handshakeData = append(handshakeData, addrBytes...)
+	handshakeData = append(handshakeData, trojan.CRLF...)
+
+	// Append initial data (UDP packet)
+	if len(initialData) > 0 {
+		handshakeData = append(handshakeData, initialData...)
+	}
+
+	// Send handshake
+	socketData := &pb.SocketData{Content: handshakeData}
+	data, err := proto.Marshal(socketData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal UDP handshake: %w", err)
+	}
+
+	if err := c.encoder.Encode(data); err != nil {
+		return fmt.Errorf("failed to send UDP handshake: %w", err)
+	}
+
+	c.trojanConnected = true
+	log.V("[H3] Trojan UDP connect sent for %s", target)
+	return nil
+}
+
+// ewpConnectUDP sends EWP protocol UDP connect request
+func (c *Conn) ewpConnectUDP(target string, initialData []byte) error {
+	// Parse target address
+	addr, err := ewp.ParseAddress(target)
+	if err != nil {
+		return fmt.Errorf("invalid target address: %w", err)
+	}
+
+	// Create UDP handshake request with CommandUDP
+	req := ewp.NewHandshakeRequest(c.uuid, ewp.CommandUDP, addr)
+
+	handshakeData, err := req.Encode()
+	if err != nil {
+		return fmt.Errorf("encode handshake: %w", err)
+	}
+
+	// Send handshake request
+	socketData := &pb.SocketData{Content: handshakeData}
+	data, err := proto.Marshal(socketData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal handshake: %w", err)
+	}
+
+	if err := c.encoder.Encode(data); err != nil {
+		return fmt.Errorf("failed to send handshake: %w", err)
+	}
+
+	// Initialize flow state if enabled
+	if c.enableFlow {
+		c.flowState = ewp.NewFlowState(c.uuid[:])
+	}
+
+	// Send initial UDP packet if provided (with UDP framing)
+	if len(initialData) > 0 {
+		udpAddr, err := net.ResolveUDPAddr("udp", target)
+		if err != nil {
+			return fmt.Errorf("resolve UDP address: %w", err)
+		}
+
+		// Generate GlobalID for this session
+		pseudoLocalAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}
+		globalID := ewp.GenerateGlobalID(pseudoLocalAddr)
+
+		pkt := &ewp.UDPPacket{
+			GlobalID: globalID,
+			Status:   ewp.UDPStatusNew,
+			Target:   udpAddr,
+			Payload:  initialData,
+		}
+
+		encoded, err := ewp.EncodeUDPPacket(pkt)
+		if err != nil {
+			return fmt.Errorf("encode UDP packet: %w", err)
+		}
+
+		// Apply flow padding if enabled
+		var writeData []byte
+		if c.flowState != nil {
+			userUUID := c.uuid[:]
+			writeData = c.flowState.PadUplink(encoded, &userUUID)
+		} else {
+			writeData = encoded
+		}
+
+		socketData := &pb.SocketData{Content: writeData}
+		data, err := proto.Marshal(socketData)
+		if err != nil {
+			return fmt.Errorf("failed to marshal UDP packet: %w", err)
+		}
+
+		if err := c.encoder.Encode(data); err != nil {
+			return fmt.Errorf("failed to send UDP packet: %w", err)
+		}
+	}
+
+	log.V("[H3] EWP UDP connect sent for %s", target)
 	return nil
 }
 

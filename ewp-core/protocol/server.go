@@ -35,6 +35,8 @@ func (s *Server) Run() error {
 	defer listener.Close()
 
 	log.Printf("[Proxy] Server started: %s (SOCKS5 + HTTP) with TCP Fast Open", s.listenAddr)
+	log.Printf("[Proxy] ✅ SOCKS5: Full UDP support (WebRTC STUN/TURN tunneled)")
+	log.Printf("[Proxy] ⚠️  HTTP: TCP only (WebRTC may leak, use SOCKS5 or TUN mode)")
 
 	for {
 		conn, err := listener.Accept()
@@ -81,7 +83,13 @@ func (s *Server) handleSOCKS(conn net.Conn, reader *bufio.Reader, clientAddr str
 		dnsHandler := func(dnsQuery []byte) ([]byte, error) {
 			return s.dnsClient.QueryRaw(dnsQuery)
 		}
-		return socks5.HandleUDPAssociate(conn, clientAddr, dnsHandler)
+		
+		// Generic UDP handler for non-DNS traffic (e.g., WebRTC STUN)
+		udpHandler := func(target string, data []byte) ([]byte, error) {
+			return s.tunnelHandler.HandleUDPPacket(target, data, clientAddr)
+		}
+		
+		return socks5.HandleUDPAssociate(conn, clientAddr, dnsHandler, udpHandler)
 	}
 
 	if err := socks5.HandleConnection(conn, reader, onConnect, onUDPAssociate); err != nil {

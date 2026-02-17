@@ -11,7 +11,6 @@ import (
 
 	commonnet "ewp-core/common/net"
 	commontls "ewp-core/common/tls"
-	"ewp-core/dns"
 	"ewp-core/log"
 	"ewp-core/transport"
 
@@ -53,7 +52,6 @@ type Transport struct {
 	userAgent           string
 	contentType         string
 	echManager          *commontls.ECHManager
-	bootstrapResolver   *dns.BootstrapResolver
 }
 
 func New(serverAddr, serverIP, uuidStr string, useECH, enableFlow bool, serviceName string, echManager *commontls.ECHManager) (*Transport, error) {
@@ -61,10 +59,6 @@ func New(serverAddr, serverIP, uuidStr string, useECH, enableFlow bool, serviceN
 }
 
 func NewWithProtocol(serverAddr, serverIP, uuidStr, password string, useECH, enableFlow, enablePQC, useTrojan bool, serviceName string, echManager *commontls.ECHManager) (*Transport, error) {
-	return NewWithProtocolAndBootstrap(serverAddr, serverIP, uuidStr, password, useECH, enableFlow, enablePQC, useTrojan, serviceName, echManager, "")
-}
-
-func NewWithProtocolAndBootstrap(serverAddr, serverIP, uuidStr, password string, useECH, enableFlow, enablePQC, useTrojan bool, serviceName string, echManager *commontls.ECHManager, bootstrapDNS string) (*Transport, error) {
 	var uuid [16]byte
 	if !useTrojan {
 		var err error
@@ -78,9 +72,6 @@ func NewWithProtocolAndBootstrap(serverAddr, serverIP, uuidStr, password string,
 		serviceName = "ProxyService"
 	}
 	serviceName = strings.TrimPrefix(serviceName, "/")
-
-	// Initialize bootstrap resolver (DoH over H2)
-	bootstrapResolver := dns.NewBootstrapResolver(bootstrapDNS)
 
 	return &Transport{
 		serverAddr:          serverAddr,
@@ -101,7 +92,6 @@ func NewWithProtocolAndBootstrap(serverAddr, serverIP, uuidStr, password string,
 		userAgent:           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
 		contentType:         "application/octet-stream",
 		echManager:          echManager,
-		bootstrapResolver:   bootstrapResolver,
 	}, nil
 }
 
@@ -160,33 +150,27 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 	addr := net.JoinHostPort(parsed.Host, parsed.Port)
 	resolvedIP := t.serverIP
 	
-	// Resolve serverIP if it's a domain name
+	// Resolve serverIP if it's a domain name using system DNS
 	if resolvedIP != "" && !isIPAddress(resolvedIP) {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		
-		ips, err := t.bootstrapResolver.LookupIP(ctx, resolvedIP)
+		ips, err := net.LookupIP(resolvedIP)
 		if err != nil {
-			log.Printf("[gRPC] Bootstrap DNS resolution failed for serverIP %s: %v", resolvedIP, err)
-			return nil, fmt.Errorf("bootstrap DNS resolution failed for serverIP: %w", err)
+			log.Printf("[gRPC] System DNS resolution failed for serverIP %s: %v", resolvedIP, err)
+			return nil, fmt.Errorf("DNS resolution failed for serverIP: %w", err)
 		}
 		if len(ips) > 0 {
 			resolvedIP = ips[0].String()
-			log.V("[gRPC] Bootstrap resolved serverIP %s -> %s", t.serverIP, resolvedIP)
+			log.V("[gRPC] Resolved serverIP %s -> %s", t.serverIP, resolvedIP)
 		} else {
 			return nil, fmt.Errorf("no IPs returned for serverIP %s", t.serverIP)
 		}
 	}
 	
-	// If no serverIP specified, resolve using bootstrap resolver (DoH over H2)
+	// If no serverIP specified, resolve using system DNS
 	if resolvedIP == "" && !isIPAddress(parsed.Host) {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		
-		ips, err := t.bootstrapResolver.LookupIP(ctx, parsed.Host)
+		ips, err := net.LookupIP(parsed.Host)
 		if err != nil {
-			log.Printf("[gRPC] Bootstrap DNS resolution failed for %s: %v", parsed.Host, err)
-			return nil, fmt.Errorf("bootstrap DNS resolution failed: %w", err)
+			log.Printf("[gRPC] System DNS resolution failed for %s: %v", parsed.Host, err)
+			return nil, fmt.Errorf("DNS resolution failed: %w", err)
 		}
 		if len(ips) > 0 {
 			resolvedIP = ips[0].String()

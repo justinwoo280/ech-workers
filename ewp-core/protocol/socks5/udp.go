@@ -15,7 +15,7 @@ var udpBufferPool = sync.Pool{
 	},
 }
 
-func HandleUDPAssociate(tcpConn net.Conn, clientAddr string, dnsHandler func([]byte) ([]byte, error)) error {
+func HandleUDPAssociate(tcpConn net.Conn, clientAddr string, dnsHandler func([]byte) ([]byte, error), udpHandler func(target string, data []byte) ([]byte, error)) error {
 	udpAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
 	if err != nil {
 		log.Printf("[UDP] %s resolve address failed: %v", clientAddr, err)
@@ -45,7 +45,7 @@ func HandleUDPAssociate(tcpConn net.Conn, clientAddr string, dnsHandler func([]b
 	}
 
 	stopChan := make(chan struct{})
-	go handleUDPRelay(udpConn, clientAddr, stopChan, dnsHandler)
+	go handleUDPRelay(udpConn, clientAddr, stopChan, dnsHandler, udpHandler)
 
 	buf := make([]byte, 1)
 	tcpConn.Read(buf)
@@ -56,7 +56,7 @@ func HandleUDPAssociate(tcpConn net.Conn, clientAddr string, dnsHandler func([]b
 	return nil
 }
 
-func handleUDPRelay(udpConn *net.UDPConn, clientAddr string, stopChan chan struct{}, dnsHandler func([]byte) ([]byte, error)) {
+func handleUDPRelay(udpConn *net.UDPConn, clientAddr string, stopChan chan struct{}, dnsHandler func([]byte) ([]byte, error), udpHandler func(target string, data []byte) ([]byte, error)) {
 	buf := udpBufferPool.Get().([]byte)
 	defer udpBufferPool.Put(buf)
 
@@ -130,6 +130,14 @@ func handleUDPRelay(udpConn *net.UDPConn, clientAddr string, stopChan chan struc
 		if dstPort == 53 && dnsHandler != nil {
 			log.V("[UDP-DNS] %s -> %s (DoH query)", clientAddr, target)
 			go handleDNSQuery(udpConn, addr, udpData, data[:headerLen], dnsHandler)
+		} else if udpHandler != nil {
+			// Handle non-DNS UDP (e.g., WebRTC STUN/TURN)
+			if dstPort == 3478 || dstPort == 19302 {
+				log.Printf("[UDP-STUN] %s -> %s (WebRTC STUN tunneled)", clientAddr, target)
+			} else {
+				log.V("[UDP] %s -> %s (tunneled)", clientAddr, target)
+			}
+			go handleGenericUDP(udpConn, addr, udpData, data[:headerLen], target, udpHandler)
 		} else {
 			log.V("[UDP] %s -> %s (non-DNS UDP not supported)", clientAddr, target)
 		}
@@ -154,4 +162,28 @@ func handleDNSQuery(udpConn *net.UDPConn, clientAddr *net.UDPAddr, dnsQuery []by
 	}
 
 	log.V("[UDP-DNS] DoH query successful, response %d bytes", len(dnsResponse))
+}
+
+func handleGenericUDP(udpConn *net.UDPConn, clientAddr *net.UDPAddr, udpData []byte, socks5Header []byte, target string, udpHandler func(target string, data []byte) ([]byte, error)) {
+	response, err := udpHandler(target, udpData)
+	if err != nil {
+		log.V("[UDP] Generic UDP query failed for %s: %v", target, err)
+		return
+	}
+
+	if len(response) == 0 {
+		return
+	}
+
+	fullResponse := make([]byte, 0, len(socks5Header)+len(response))
+	fullResponse = append(fullResponse, socks5Header...)
+	fullResponse = append(fullResponse, response...)
+
+	_, err = udpConn.WriteToUDP(fullResponse, clientAddr)
+	if err != nil {
+		log.V("[UDP] Send response failed for %s: %v", target, err)
+		return
+	}
+
+	log.V("[UDP] Query successful for %s, response %d bytes", target, len(response))
 }

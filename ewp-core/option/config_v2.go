@@ -26,11 +26,10 @@ type LogConfig struct {
 	Timestamp bool   `json:"timestamp"`  // show timestamp
 }
 
-// DNSConfig configures DNS resolution
+// DNSConfig configures DNS resolution (for tunnel DNS in TUN mode)
 type DNSConfig struct {
-	Servers   []DNSServerConfig `json:"servers"`
-	Final     string            `json:"final"`     // default server tag
-	Bootstrap string            `json:"bootstrap"` // bootstrap DNS servers for resolving server address
+	Servers []DNSServerConfig `json:"servers"`
+	Final   string            `json:"final"` // default server tag
 }
 
 // DNSServerConfig defines a DNS server
@@ -58,6 +57,8 @@ type InboundConfig struct {
 	AutoRoute     bool     `json:"auto_route,omitempty"`
 	StrictRoute   bool     `json:"strict_route,omitempty"`
 	Stack         string   `json:"stack,omitempty"`       // gvisor, system
+	DNS           string   `json:"dns,omitempty"`         // IPv4 DNS server
+	IPv6DNS       string   `json:"ipv6_dns,omitempty"`    // IPv6 DNS server
 	TunnelDNS     []string `json:"tunnel_dns,omitempty"`  // Remote DNS servers for TUN mode (format: "type:address", e.g., "doq:dns.google:853")
 }
 

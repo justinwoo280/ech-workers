@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -98,6 +99,79 @@ func (c *SimpleConn) Connect(target string, initialData []byte) error {
 
 	c.connected = true
 	log.V("[EWP] Handshake successful, target: %s", target)
+	return nil
+}
+
+// ConnectUDP sends UDP connection request using EWP native UDP protocol
+func (c *SimpleConn) ConnectUDP(target string, initialData []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	addr, err := ewp.ParseAddress(target)
+	if err != nil {
+		return fmt.Errorf("parse address: %w", err)
+	}
+
+	// Use CommandUDP for UDP connections
+	req := ewp.NewHandshakeRequest(c.uuid, ewp.CommandUDP, addr)
+	c.version = req.Version
+	c.nonce = req.Nonce
+
+	handshakeData, err := req.Encode()
+	if err != nil {
+		return fmt.Errorf("encode handshake: %w", err)
+	}
+
+	// Send handshake
+	if err := c.conn.WriteMessage(websocket.BinaryMessage, handshakeData); err != nil {
+		return fmt.Errorf("send handshake: %w", err)
+	}
+
+	// Read handshake response
+	_, respData, err := c.conn.ReadMessage()
+	if err != nil {
+		return fmt.Errorf("read handshake response: %w", err)
+	}
+
+	resp, err := ewp.DecodeHandshakeResponse(respData, c.version, c.nonce, c.uuid)
+	if err != nil {
+		return fmt.Errorf("decode handshake response: %w", err)
+	}
+
+	if resp.Status != ewp.StatusOK {
+		return fmt.Errorf("handshake failed with status: %d", resp.Status)
+	}
+
+	// Send initial UDP packet if provided (encoded with UDP framing)
+	if len(initialData) > 0 {
+		udpAddr, err := net.ResolveUDPAddr("udp", target)
+		if err != nil {
+			return fmt.Errorf("resolve UDP address: %w", err)
+		}
+
+		// Generate GlobalID for this session (based on local pseudo-address)
+		pseudoLocalAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}
+		globalID := ewp.GenerateGlobalID(pseudoLocalAddr)
+
+		pkt := &ewp.UDPPacket{
+			GlobalID: globalID,
+			Status:   ewp.UDPStatusNew,
+			Target:   udpAddr,
+			Payload:  initialData,
+		}
+
+		encoded, err := ewp.EncodeUDPPacket(pkt)
+		if err != nil {
+			return fmt.Errorf("encode UDP packet: %w", err)
+		}
+
+		if err := c.conn.WriteMessage(websocket.BinaryMessage, encoded); err != nil {
+			return fmt.Errorf("send initial UDP packet: %w", err)
+		}
+	}
+
+	c.connected = true
+	log.V("[EWP] UDP handshake successful, target: %s", target)
 	return nil
 }
 
