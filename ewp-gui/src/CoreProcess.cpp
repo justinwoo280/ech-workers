@@ -3,6 +3,7 @@
 #include "SettingsDialog.h"
 #include <QCoreApplication>
 #include <QDir>
+#include <QFileInfo>
 #include <QDebug>
 #include <QNetworkRequest>
 #include <QUrl>
@@ -25,18 +26,33 @@ CoreProcess::~CoreProcess()
 QString CoreProcess::findCoreExecutable()
 {
     QString appDir = QCoreApplication::applicationDirPath();
-    QString path = appDir + "/ewp-core-client.exe";
-    
-    if (QFile::exists(path)) {
-        return path;
+
+#ifdef Q_OS_WIN
+    QStringList candidates = {
+        appDir + "/ewp-core.exe",
+        appDir + "/ewp-core-client.exe",
+        appDir + "/../ewp-core.exe",
+        appDir + "/../ewp-core-client.exe",
+    };
+    QString fallback = "ewp-core.exe";
+#else
+    QStringList candidates = {
+        appDir + "/ewp-core",
+        appDir + "/ewp-core-client",
+        appDir + "/../ewp-core",
+        appDir + "/../ewp-core-client",
+    };
+    QString fallback = "ewp-core";
+#endif
+
+    for (const QString &path : candidates) {
+        QFileInfo fi(path);
+        if (fi.exists()) {
+            return fi.absoluteFilePath();
+        }
     }
-    
-    path = appDir + "/../ewp-core-client.exe";
-    if (QFile::exists(path)) {
-        return QDir(path).absolutePath();
-    }
-    
-    return "ewp-core-client.exe";
+
+    return fallback;
 }
 
 bool CoreProcess::start(const EWPNode &node, bool tunMode)
