@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 )
 
 // UDP over TCP 封装协议 (基于 Xray XUDP 简化实现)
@@ -20,9 +21,9 @@ import (
 // └─────────────────────────────────────────────────────────┘
 //
 // Status:
-//   0x01 = New (新连接，包含完整地址)
-//   0x02 = Keep (保持连接，地址可选)
-//   0x03 = End (关闭连接)
+//   0x01 = New  (新连接，AddrLen>0，包含目标地址)
+//   0x02 = Keep (持续数据，AddrLen 可选；服务端回包时携带响应来源地址)
+//   0x03 = End  (关闭连接)
 
 const (
 	UDPStatusNew  byte = 0x01
@@ -39,7 +40,7 @@ const (
 type UDPPacket struct {
 	GlobalID [8]byte      // 会话标识 (源地址哈希)
 	Status   byte         // 状态
-	Target   *net.UDPAddr // 目标地址 (Status=New 时必须)
+	Target   *net.UDPAddr // 地址: New 时为目标地址(必须); Keep 时为响应来源地址(可选)
 	Payload  []byte       // 数据
 }
 
@@ -49,8 +50,8 @@ func EncodeUDPPacket(pkt *UDPPacket) ([]byte, error) {
 	addrLen := 0
 	var addrBytes []byte
 
-	if pkt.Status == UDPStatusNew && pkt.Target != nil {
-		// 编码地址
+	if pkt.Target != nil {
+		// 编码地址 (New 时必须; Keep 时若携带来源地址也一并编码)
 		if ip4 := pkt.Target.IP.To4(); ip4 != nil {
 			addrBytes = make([]byte, 1+4+2) // type + ip4 + port
 			addrBytes[0] = AddressTypeIPv4
@@ -178,6 +179,7 @@ type UDPSession struct {
 	LocalAddr  *net.UDPAddr // 客户端源地址
 	RemoteConn *net.UDPConn // 到目标的连接
 	LastTarget *net.UDPAddr // 最后的目标地址
+	LastActive time.Time    // last packet time for idle cleanup
 	mu         sync.Mutex
 }
 
@@ -201,6 +203,36 @@ type UDPSessionManager struct {
 func NewUDPSessionManager() *UDPSessionManager {
 	return &UDPSessionManager{
 		sessions: make(map[[8]byte]*UDPSession),
+	}
+}
+
+// Touch updates the last-active timestamp on a session.
+func (m *UDPSessionManager) Touch(globalID [8]byte) {
+	m.mu.RLock()
+	session := m.sessions[globalID]
+	m.mu.RUnlock()
+	if session != nil {
+		session.Lock()
+		session.LastActive = time.Now()
+		session.Unlock()
+	}
+}
+
+// CloseIdle removes and closes sessions idle longer than the given duration.
+func (m *UDPSessionManager) CloseIdle(idleTimeout time.Duration) {
+	now := time.Now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for id, session := range m.sessions {
+		session.Lock()
+		idle := !session.LastActive.IsZero() && now.Sub(session.LastActive) > idleTimeout
+		session.Unlock()
+		if idle {
+			if session.RemoteConn != nil {
+				session.RemoteConn.Close()
+			}
+			delete(m.sessions, id)
+		}
 	}
 }
 
@@ -259,6 +291,51 @@ var globalIDBaseKey [32]byte
 func init() {
 	// 启动时生成随机密钥
 	crand.Read(globalIDBaseKey[:])
+}
+
+// NewGlobalID 生成一个新的随机 GlobalID (客户端 UDP 会话使用)
+func NewGlobalID() [8]byte {
+	var id [8]byte
+	crand.Read(id[:])
+	return id
+}
+
+// EncodeUDPKeepPacket 编码 StatusKeep UDP 包 (已建立会话后发送后续数据)
+func EncodeUDPKeepPacket(globalID [8]byte, payload []byte) ([]byte, error) {
+	pkt := &UDPPacket{
+		GlobalID: globalID,
+		Status:   UDPStatusKeep,
+		Payload:  payload,
+	}
+	return EncodeUDPPacket(pkt)
+}
+
+// DecodeUDPPayload 从 EWP UDP 帧字节中提取 payload (客户端收到服务端响应时使用)
+func DecodeUDPPayload(data []byte) ([]byte, error) {
+	pkt, err := DecodeUDPPacket(newBytesReader(data))
+	if err != nil {
+		return nil, err
+	}
+	return pkt.Payload, nil
+}
+
+// bytesReader 将 []byte 包装为 io.Reader (避免 bytes 包依赖循环)
+type bytesReader struct {
+	data []byte
+	pos  int
+}
+
+func newBytesReader(data []byte) *bytesReader {
+	return &bytesReader{data: data}
+}
+
+func (r *bytesReader) Read(p []byte) (int, error) {
+	if r.pos >= len(r.data) {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data[r.pos:])
+	r.pos += n
+	return n, nil
 }
 
 // GenerateGlobalID 生成 GlobalID (基于源地址哈希)

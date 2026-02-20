@@ -1,10 +1,10 @@
 package server
 
 import (
-	"log"
 	"strings"
 
 	"ewp-core/protocol/trojan"
+	ewplog "ewp-core/log"
 )
 
 var (
@@ -23,11 +23,11 @@ func InitTrojanHandler(passwordStr string) error {
 			continue
 		}
 		TrojanService.AddUserByPassword(p)
-		log.Printf("[Trojan] Registered user: %s", maskPassword(p))
+		ewplog.Info("[Trojan] Registered user: %s", maskPassword(p))
 		count++
 	}
 
-	log.Printf("[Trojan] Service initialized with %d users", count)
+	ewplog.Info("[Trojan] Service initialized with %d users", count)
 	return nil
 }
 

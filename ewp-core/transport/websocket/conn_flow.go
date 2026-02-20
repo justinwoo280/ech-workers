@@ -29,6 +29,7 @@ type FlowConn struct {
 	heartbeatPeriod   time.Duration
 	earlyDataLength   int
 	earlyDataSent     bool
+	udpGlobalID       [8]byte
 }
 
 // NewFlowConn creates a new Flow WebSocket connection
@@ -38,6 +39,18 @@ func NewFlowConn(conn *websocket.Conn, uuid [16]byte) *FlowConn {
 		uuid:     uuid,
 		streamID: 1,
 	}
+}
+
+// writeMsg writes data applying flow state padding, without acquiring c.mu.
+// Caller must hold c.mu or ensure exclusive access.
+func (c *FlowConn) writeMsg(data []byte) error {
+	var writeData []byte
+	if c.flowState != nil {
+		writeData = c.flowState.PadUplink(data, &c.writeOnceUserUUID)
+	} else {
+		writeData = data
+	}
+	return c.conn.WriteMessage(websocket.BinaryMessage, writeData)
 }
 
 // Connect sends connection request using EWP Flow protocol
@@ -83,7 +96,7 @@ func (c *FlowConn) Connect(target string, initialData []byte) error {
 	copy(c.writeOnceUserUUID, c.uuid[:])
 
 	if len(initialData) > 0 && !c.earlyDataSent {
-		if err := c.Write(initialData); err != nil {
+		if err := c.writeMsg(initialData); err != nil {
 			return fmt.Errorf("send initial data: %w", err)
 		}
 	}
@@ -136,37 +149,54 @@ func (c *FlowConn) ConnectUDP(target string, initialData []byte) error {
 	c.writeOnceUserUUID = make([]byte, 16)
 	copy(c.writeOnceUserUUID, c.uuid[:])
 
-	// Send initial UDP packet if provided (with Flow padding)
-	if len(initialData) > 0 {
-		udpAddr, err := net.ResolveUDPAddr("udp", target)
-		if err != nil {
-			return fmt.Errorf("resolve UDP address: %w", err)
-		}
+	// Always send UDPStatusNew to establish session on server (with target address)
+	udpAddr, err := net.ResolveUDPAddr("udp", target)
+	if err != nil {
+		return fmt.Errorf("resolve UDP address: %w", err)
+	}
 
-		// Generate GlobalID for this session
-		pseudoLocalAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}
-		globalID := ewp.GenerateGlobalID(pseudoLocalAddr)
+	c.udpGlobalID = ewp.NewGlobalID()
 
-		pkt := &ewp.UDPPacket{
-			GlobalID: globalID,
-			Status:   ewp.UDPStatusNew,
-			Target:   udpAddr,
-			Payload:  initialData,
-		}
+	pkt := &ewp.UDPPacket{
+		GlobalID: c.udpGlobalID,
+		Status:   ewp.UDPStatusNew,
+		Target:   udpAddr,
+		Payload:  initialData,
+	}
 
-		encoded, err := ewp.EncodeUDPPacket(pkt)
-		if err != nil {
-			return fmt.Errorf("encode UDP packet: %w", err)
-		}
+	encoded, err := ewp.EncodeUDPPacket(pkt)
+	if err != nil {
+		return fmt.Errorf("encode UDP packet: %w", err)
+	}
 
-		if err := c.Write(encoded); err != nil {
-			return fmt.Errorf("send initial UDP packet: %w", err)
-		}
+	if err := c.writeMsg(encoded); err != nil {
+		return fmt.Errorf("send UDP new packet: %w", err)
 	}
 
 	c.connected = true
 	log.V("[Flow] UDP handshake successful, target: %s, StreamID: %d", target, c.streamID)
 	return nil
+}
+
+// WriteUDP sends a subsequent UDP packet over the established UDP tunnel (StatusKeep)
+func (c *FlowConn) WriteUDP(target string, data []byte) error {
+	encoded, err := ewp.EncodeUDPKeepPacket(c.udpGlobalID, data)
+	if err != nil {
+		return fmt.Errorf("encode UDP keep packet: %w", err)
+	}
+	return c.Write(encoded)
+}
+
+// ReadUDP reads and decodes an EWP-framed UDP response packet
+func (c *FlowConn) ReadUDP() ([]byte, error) {
+	_, msg, err := c.conn.ReadMessage()
+	if err != nil {
+		return nil, err
+	}
+	if c.flowState != nil {
+		msg = c.flowState.ProcessDownlink(msg)
+	}
+	return ewp.DecodeUDPPayload(msg)
 }
 
 // Read reads data from WebSocket with Flow protocol unpacking

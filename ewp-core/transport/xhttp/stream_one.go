@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -39,6 +40,7 @@ type StreamOneConn struct {
 	waitReader        *WaitReadCloser
 	lastRequestTime   time.Time
 	requestCount      int64
+	udpGlobalID       [8]byte
 }
 
 func NewStreamOneConn(httpClient *http.Client, host, port, path string, uuid [16]byte, uuidStr, password string, enableFlow, useTrojan bool, transport *Transport) *StreamOneConn {
@@ -312,8 +314,162 @@ func (c *StreamOneConn) ConnectUDP(target string, initialData []byte) error {
 	if c.useTrojan {
 		return c.connectTrojanUDP(target, initialData)
 	}
-	// EWP protocol doesn't have native UDP support, use TCP mode
-	return c.Connect(target, initialData)
+	return c.connectEWPUDP(target, initialData)
+}
+
+func (c *StreamOneConn) connectEWPUDP(target string, initialData []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.pipeReader, c.pipeWriter = io.Pipe()
+
+	requestInterval := c.transport.requestInterval.RandDuration()
+	if requestInterval > 0 && !c.lastRequestTime.IsZero() {
+		elapsed := time.Since(c.lastRequestTime)
+		if elapsed < requestInterval {
+			time.Sleep(requestInterval - elapsed)
+		}
+	}
+
+	reqURL := fmt.Sprintf("https://%s:%s%s", c.host, c.port, c.path)
+
+	ctx := context.Background()
+	req, err := c.transport.createRequestWithContext(ctx, "POST", reqURL, c.pipeReader)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+
+	headers := c.transport.GetRequestHeader(reqURL)
+	for k, v := range headers {
+		req.Header[k] = v
+	}
+	req.Header.Set("X-Auth-Token", c.uuidStr)
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	addr, err := ewp.ParseAddress(target)
+	if err != nil {
+		return fmt.Errorf("parse address: %w", err)
+	}
+
+	ewpReq := ewp.NewHandshakeRequest(c.uuid, ewp.CommandUDP, addr)
+	handshakeData, err := ewpReq.Encode()
+	if err != nil {
+		return fmt.Errorf("encode EWP UDP handshake: %w", err)
+	}
+
+	if c.enableFlow {
+		c.flowState = ewp.NewFlowState(c.uuid[:])
+		c.writeOnceUserUUID = make([]byte, 16)
+		copy(c.writeOnceUserUUID, c.uuid[:])
+	}
+
+	respChan := make(chan *http.Response, 1)
+	errChan := make(chan error, 1)
+
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				errChan <- fmt.Errorf("request panic: %v", r)
+			}
+		}()
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			c.waitReader.Fail(err)
+			errChan <- err
+			return
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			c.waitReader.Fail(fmt.Errorf("http error: %d %s, body: %s", resp.StatusCode, resp.Status, body))
+			errChan <- fmt.Errorf("http error: %d", resp.StatusCode)
+			return
+		}
+
+		c.waitReader.SetReadCloser(resp.Body)
+		respChan <- resp
+	}()
+
+	if _, err := c.pipeWriter.Write(handshakeData); err != nil {
+		return fmt.Errorf("send EWP UDP handshake: %w", err)
+	}
+
+	c.lastRequestTime = time.Now()
+	c.requestCount++
+
+	select {
+	case <-respChan:
+		c.respBody = c.waitReader
+	case err := <-errChan:
+		return fmt.Errorf("request failed: %w", err)
+	case <-time.After(c.transport.connectionTimeout.RandDuration()):
+		return fmt.Errorf("connection timeout")
+	}
+
+	handshakeResp := make([]byte, 64)
+	n, err := c.respBody.Read(handshakeResp)
+	if err != nil {
+		return fmt.Errorf("read EWP UDP handshake response: %w", err)
+	}
+
+	resp, err := ewp.DecodeHandshakeResponse(handshakeResp[:n], ewpReq.Version, ewpReq.Nonce, c.uuid)
+	if err != nil {
+		return fmt.Errorf("decode EWP UDP handshake response: %w", err)
+	}
+
+	if resp.Status != ewp.StatusOK {
+		return fmt.Errorf("EWP UDP handshake failed with status: %d", resp.Status)
+	}
+
+	udpAddr, err := net.ResolveUDPAddr("udp", target)
+	if err != nil {
+		return fmt.Errorf("resolve UDP address: %w", err)
+	}
+
+	c.udpGlobalID = ewp.NewGlobalID()
+
+	pkt := &ewp.UDPPacket{
+		GlobalID: c.udpGlobalID,
+		Status:   ewp.UDPStatusNew,
+		Target:   udpAddr,
+		Payload:  initialData,
+	}
+
+	encoded, err := ewp.EncodeUDPPacket(pkt)
+	if err != nil {
+		return fmt.Errorf("encode UDP new packet: %w", err)
+	}
+
+	if _, err := c.pipeWriter.Write(encoded); err != nil {
+		return fmt.Errorf("send UDP new packet: %w", err)
+	}
+
+	c.connected = true
+	log.V("[XHTTP] stream-one EWP UDP handshake success, target: %s", target)
+	return nil
+}
+
+// WriteUDP sends a subsequent UDP packet over the established UDP tunnel (StatusKeep)
+func (c *StreamOneConn) WriteUDP(target string, data []byte) error {
+	encoded, err := ewp.EncodeUDPKeepPacket(c.udpGlobalID, data)
+	if err != nil {
+		return fmt.Errorf("encode UDP keep packet: %w", err)
+	}
+	return c.Write(encoded)
+}
+
+// ReadUDP reads and decodes an EWP-framed UDP response packet from a streaming response
+func (c *StreamOneConn) ReadUDP() ([]byte, error) {
+	if c.respBody == nil {
+		return nil, errors.New("not connected")
+	}
+	pkt, err := ewp.DecodeUDPPacket(c.respBody)
+	if err != nil {
+		return nil, err
+	}
+	return pkt.Payload, nil
 }
 
 func (c *StreamOneConn) connectTrojanUDP(target string, initialData []byte) error {
@@ -368,10 +524,6 @@ func (c *StreamOneConn) connectTrojanUDP(target string, initialData []byte) erro
 	handshakeData = append(handshakeData, addrBytes...)
 	handshakeData = append(handshakeData, trojan.CRLF...)
 
-	if len(initialData) > 0 {
-		handshakeData = append(handshakeData, initialData...)
-	}
-
 	// 使用 WaitReadCloser 进行异步响应处理
 	respChan := make(chan *http.Response, 1)
 	errChan := make(chan error, 1)
@@ -383,14 +535,14 @@ func (c *StreamOneConn) connectTrojanUDP(target string, initialData []byte) erro
 				errChan <- fmt.Errorf("request panic: %v", r)
 			}
 		}()
-		
+
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
 			c.waitReader.Fail(err)
 			errChan <- err
 			return
 		}
-		
+
 		if resp.StatusCode != http.StatusOK {
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
@@ -398,7 +550,7 @@ func (c *StreamOneConn) connectTrojanUDP(target string, initialData []byte) erro
 			errChan <- fmt.Errorf("http error: %d", resp.StatusCode)
 			return
 		}
-		
+
 		// 设置响应体到 WaitReadCloser
 		c.waitReader.SetReadCloser(resp.Body)
 		respChan <- resp
@@ -417,14 +569,39 @@ func (c *StreamOneConn) connectTrojanUDP(target string, initialData []byte) erro
 	select {
 	case <-respChan:
 		c.respBody = c.waitReader
-		c.connected = true
-		log.V("[XHTTP] Trojan UDP connected, target: %s", target)
-		return nil
 	case err := <-errChan:
 		return fmt.Errorf("request failed: %w", err)
 	case <-time.After(c.transport.connectionTimeout.RandDuration()):
 		return fmt.Errorf("connection timeout")
 	}
+
+	// Send EWP UDPStatusNew to establish session on server
+	udpAddr, err := net.ResolveUDPAddr("udp", target)
+	if err != nil {
+		return fmt.Errorf("resolve UDP address: %w", err)
+	}
+
+	c.udpGlobalID = ewp.NewGlobalID()
+
+	pkt := &ewp.UDPPacket{
+		GlobalID: c.udpGlobalID,
+		Status:   ewp.UDPStatusNew,
+		Target:   udpAddr,
+		Payload:  initialData,
+	}
+
+	encoded, err := ewp.EncodeUDPPacket(pkt)
+	if err != nil {
+		return fmt.Errorf("encode UDP new packet: %w", err)
+	}
+
+	if _, err := c.pipeWriter.Write(encoded); err != nil {
+		return fmt.Errorf("send UDP new packet: %w", err)
+	}
+
+	c.connected = true
+	log.V("[XHTTP] Trojan UDP connected, target: %s", target)
+	return nil
 }
 
 func (c *StreamOneConn) Read(buf []byte) (int, error) {

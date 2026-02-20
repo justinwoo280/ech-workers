@@ -29,29 +29,42 @@ func NewNonceCache() *NonceCache {
 
 // Check 检查 Nonce 是否已存在（存在则为重放攻击）
 // 返回 true 表示 Nonce 已存在（重放攻击）
+// Deprecated: 请使用 CheckAndAdd 避免 TOCTOU 竞争。
 func (c *NonceCache) Check(nonce [12]byte) bool {
 	key := hex.EncodeToString(nonce[:])
 	now := time.Now().Unix()
-	
 	c.mu.RLock()
 	expireTime, exists := c.entries[key]
 	c.mu.RUnlock()
-	
-	if exists && expireTime > now {
-		return true // 重放攻击！
-	}
-	
-	return false
+	return exists && expireTime > now
 }
 
 // Add 添加 Nonce 到缓存
+// Deprecated: 请使用 CheckAndAdd 避免 TOCTOU 竞争。
 func (c *NonceCache) Add(nonce [12]byte) {
 	key := hex.EncodeToString(nonce[:])
 	expireTime := time.Now().Unix() + c.ttl
-	
 	c.mu.Lock()
 	c.entries[key] = expireTime
 	c.mu.Unlock()
+}
+
+// CheckAndAdd 原子地检查并添加 Nonce。
+// 返回 true 表示 Nonce 已存在（重放攻击），此时不会更新缓存。
+// 返回 false 表示 Nonce 是新的，已成功插入缓存。
+func (c *NonceCache) CheckAndAdd(nonce [12]byte) bool {
+	key := hex.EncodeToString(nonce[:])
+	now := time.Now().Unix()
+	expireTime := now + c.ttl
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if existing, exists := c.entries[key]; exists && existing > now {
+		return true // 重放攻击！
+	}
+	c.entries[key] = expireTime
+	return false
 }
 
 // cleanup 定期清理过期的 Nonce（每 60 秒）

@@ -26,6 +26,7 @@ type SimpleConn struct {
 	heartbeatPeriod time.Duration
 	earlyDataLength int
 	earlyDataSent   bool
+	udpGlobalID     [8]byte
 }
 
 // NewSimpleConn creates a new simple WebSocket connection
@@ -142,37 +143,53 @@ func (c *SimpleConn) ConnectUDP(target string, initialData []byte) error {
 		return fmt.Errorf("handshake failed with status: %d", resp.Status)
 	}
 
-	// Send initial UDP packet if provided (encoded with UDP framing)
-	if len(initialData) > 0 {
-		udpAddr, err := net.ResolveUDPAddr("udp", target)
-		if err != nil {
-			return fmt.Errorf("resolve UDP address: %w", err)
-		}
+	// Always send UDPStatusNew to establish session on server (with target address)
+	udpAddr, err := net.ResolveUDPAddr("udp", target)
+	if err != nil {
+		return fmt.Errorf("resolve UDP address: %w", err)
+	}
 
-		// Generate GlobalID for this session (based on local pseudo-address)
-		pseudoLocalAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}
-		globalID := ewp.GenerateGlobalID(pseudoLocalAddr)
+	c.udpGlobalID = ewp.NewGlobalID()
 
-		pkt := &ewp.UDPPacket{
-			GlobalID: globalID,
-			Status:   ewp.UDPStatusNew,
-			Target:   udpAddr,
-			Payload:  initialData,
-		}
+	pkt := &ewp.UDPPacket{
+		GlobalID: c.udpGlobalID,
+		Status:   ewp.UDPStatusNew,
+		Target:   udpAddr,
+		Payload:  initialData,
+	}
 
-		encoded, err := ewp.EncodeUDPPacket(pkt)
-		if err != nil {
-			return fmt.Errorf("encode UDP packet: %w", err)
-		}
+	encoded, err := ewp.EncodeUDPPacket(pkt)
+	if err != nil {
+		return fmt.Errorf("encode UDP packet: %w", err)
+	}
 
-		if err := c.conn.WriteMessage(websocket.BinaryMessage, encoded); err != nil {
-			return fmt.Errorf("send initial UDP packet: %w", err)
-		}
+	if err := c.conn.WriteMessage(websocket.BinaryMessage, encoded); err != nil {
+		return fmt.Errorf("send UDP new packet: %w", err)
 	}
 
 	c.connected = true
 	log.V("[EWP] UDP handshake successful, target: %s", target)
 	return nil
+}
+
+// WriteUDP sends a subsequent UDP packet over the established UDP tunnel (StatusKeep)
+func (c *SimpleConn) WriteUDP(target string, data []byte) error {
+	encoded, err := ewp.EncodeUDPKeepPacket(c.udpGlobalID, data)
+	if err != nil {
+		return fmt.Errorf("encode UDP keep packet: %w", err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.conn.WriteMessage(websocket.BinaryMessage, encoded)
+}
+
+// ReadUDP reads and decodes an EWP-framed UDP response packet
+func (c *SimpleConn) ReadUDP() ([]byte, error) {
+	_, msg, err := c.conn.ReadMessage()
+	if err != nil {
+		return nil, err
+	}
+	return ewp.DecodeUDPPayload(msg)
 }
 
 // Read reads data from WebSocket

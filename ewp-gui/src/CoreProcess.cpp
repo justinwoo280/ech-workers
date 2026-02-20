@@ -154,6 +154,7 @@ bool CoreProcess::isRunning() const
 QString CoreProcess::generateConfigFile(const EWPNode &node, bool tunMode)
 {
     SettingsDialog::AppSettings settings = SettingsDialog::loadFromRegistry();
+    listenAddr = settings.listenAddr;
     QJsonObject config = ConfigGenerator::generateClientConfig(node, settings, tunMode);
     
     QString tempDir = QStandardPaths::writableLocation(QStandardPaths::TempLocation);

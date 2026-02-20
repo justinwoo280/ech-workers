@@ -11,6 +11,7 @@ import (
 	"ewp-core/log"
 	"ewp-core/option"
 	"ewp-core/protocol"
+	"ewp-core/protocol/socks5"
 	"ewp-core/transport"
 	"ewp-core/transport/grpc"
 	"ewp-core/transport/h3grpc"
@@ -31,8 +32,8 @@ func main() {
 	// Setup logging
 	setupLogging(cfg)
 
-	log.Printf("[启动] EWP-Core Client")
-	log.Printf("[配置] Inbounds: %d, Outbounds: %d", len(cfg.Inbounds), len(cfg.Outbounds))
+	log.Info("EWP-Core Client")
+	log.Info("Config: Inbounds=%d, Outbounds=%d", len(cfg.Inbounds), len(cfg.Outbounds))
 
 	// Setup signal handler
 	sigChan := make(chan os.Signal, 1)
@@ -40,32 +41,32 @@ func main() {
 
 	go func() {
 		<-sigChan
-		log.Printf("[信号] Received exit signal, shutting down...")
+		log.Info("Received exit signal, shutting down...")
 		os.Exit(0)
 	}()
 
 	// Get the first outbound (primary proxy)
 	if len(cfg.Outbounds) == 0 {
-		log.Fatalf("[错误] No outbound configured")
+		log.Fatalf("No outbound configured")
 	}
 
 	outbound := cfg.Outbounds[0]
-	log.Printf("[出站] Tag: %s, Type: %s, Server: %s:%d", 
+	log.Info("Outbound: tag=%s, type=%s, server=%s:%d",
 		outbound.Tag, outbound.Type, outbound.Server, outbound.ServerPort)
 
 	// Create transport
 	trans, err := createTransport(outbound, cfg)
 	if err != nil {
-		log.Fatalf("[错误] Failed to create transport: %v", err)
+		log.Fatalf("Failed to create transport: %v", err)
 	}
 
 	// Determine inbound type
 	if len(cfg.Inbounds) == 0 {
-		log.Fatalf("[错误] No inbound configured")
+		log.Fatalf("No inbound configured")
 	}
 
 	inbound := cfg.Inbounds[0]
-	log.Printf("[入站] Tag: %s, Type: %s", inbound.Tag, inbound.Type)
+	log.Info("Inbound: tag=%s, type=%s", inbound.Tag, inbound.Type)
 
 	// Start based on inbound type
 	switch inbound.Type {
@@ -74,7 +75,7 @@ func main() {
 	case "mixed", "socks", "http":
 		startProxyMode(inbound, trans, cfg)
 	default:
-		log.Fatalf("[错误] Unsupported inbound type: %s", inbound.Type)
+		log.Fatalf("Unsupported inbound type: %s", inbound.Type)
 	}
 }
 
@@ -93,10 +94,10 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 	
 	if useTrojan {
 		password = outbound.Password
-		log.Printf("[协议] Using Trojan protocol")
+		log.Info("Protocol: Trojan")
 	} else {
 		uuid = outbound.UUID
-		log.Printf("[协议] Using EWP protocol (UUID: %s)", uuid)
+		log.Info("Protocol: EWP (UUID: %s)", uuid)
 	}
 
 	// Initialize ECH manager
@@ -115,12 +116,12 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 			dohServer = "https://223.5.5.5/dns-query"
 		}
 
-		log.Printf("[ECH] Initializing (domain: %s, DoH: %s)", echDomain, dohServer)
+		log.Info("ECH: initializing (domain: %s, DoH: %s)", echDomain, dohServer)
 		echMgr = tls.NewECHManager(echDomain, dohServer)
 		
 		if err := echMgr.Refresh(); err != nil {
 			if outbound.TLS.ECH.FallbackOnError {
-				log.Printf("[警告] ECH initialization failed, falling back to plain TLS: %v", err)
+				log.Warn("ECH initialization failed, falling back to plain TLS: %v", err)
 				useECH = false
 				echMgr = nil
 			} else {
@@ -138,7 +139,7 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 	enableFlow := outbound.Flow != nil && outbound.Flow.Enabled
 	enablePQC := outbound.TLS != nil && outbound.TLS.PQC
 
-	log.Printf("[传输] Type: %s, Flow: %v, ECH: %v, PQC: %v", 
+	log.Info("Transport: type=%s, flow=%v, ECH=%v, PQC=%v",
 		transportType, enableFlow, useECH, enablePQC)
 
 	// Create transport based on type
@@ -224,15 +225,15 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 		return nil, fmt.Errorf("unsupported transport type: %s", transportType)
 	}
 
-	log.Printf("[传输] Created: %s", trans.Name())
+	log.Info("Transport created: %s", trans.Name())
 	return trans, nil
 }
 
 func startTunMode(inbound option.InboundConfig, trans transport.Transport, cfg *option.RootConfig) {
-	log.Printf("[启动] Starting TUN mode...")
+	log.Info("Starting TUN mode...")
 
 	if !tun.IsAdmin() {
-		log.Fatalf("[错误] TUN mode requires administrator privileges")
+		log.Fatalf("TUN mode requires administrator privileges")
 	}
 
 	// Parse TUN address
@@ -265,7 +266,7 @@ func startTunMode(inbound option.InboundConfig, trans transport.Transport, cfg *
 		dns6Server = "2001:4860:4860::8888"  // Default to Google Public DNS (IPv6)
 	}
 	
-	log.Printf("[TUN] DNS: IPv4=%s, IPv6=%s (all tunneled through proxy)", dnsServer, dns6Server)
+	log.Info("TUN DNS: IPv4=%s, IPv6=%s", dnsServer, dns6Server)
 
 	tunCfg := &tun.Config{
 		IP:        tunIP,
@@ -280,11 +281,11 @@ func startTunMode(inbound option.InboundConfig, trans transport.Transport, cfg *
 
 	tunDev, err := tun.New(tunCfg)
 	if err != nil {
-		log.Fatalf("[错误] TUN initialization failed: %v", err)
+		log.Fatalf("TUN initialization failed: %v", err)
 	}
 	defer tunDev.Close()
 
-	log.Fatalf("[错误] TUN mode stopped: %v", tunDev.Start())
+	log.Fatalf("TUN mode stopped: %v", tunDev.Start())
 }
 
 func startProxyMode(inbound option.InboundConfig, trans transport.Transport, cfg *option.RootConfig) {
@@ -293,7 +294,7 @@ func startProxyMode(inbound option.InboundConfig, trans transport.Transport, cfg
 		listenAddr = "127.0.0.1:1080"
 	}
 
-	log.Printf("[启动] Starting %s proxy on %s", inbound.Type, listenAddr)
+	log.Info("Starting %s proxy on %s", inbound.Type, listenAddr)
 
 	// Determine DNS server for protocol module
 	// Use IP address to avoid DNS dependency (Alibaba Cloud DNS)
@@ -307,9 +308,19 @@ func startProxyMode(inbound option.InboundConfig, trans transport.Transport, cfg
 		}
 	}
 
+	// Build user auth map from inbound config.
+	var users socks5.Users
+	if len(inbound.Users) > 0 {
+		users = make(socks5.Users, len(inbound.Users))
+		for _, u := range inbound.Users {
+			users[u.Username] = u.Password
+		}
+		log.Info("SOCKS5 auth enabled (%d user(s))", len(users))
+	}
+
 	// Create and run proxy server
-	server := protocol.NewServer(listenAddr, trans, dnsServer)
-	log.Fatalf("[错误] Proxy server stopped: %v", server.Run())
+	server := protocol.NewServer(listenAddr, trans, dnsServer, users, inbound.MaxConnections)
+	log.Fatalf("Proxy server stopped: %v", server.Run())
 }
 
 func setupLogging(cfg *option.RootConfig) {

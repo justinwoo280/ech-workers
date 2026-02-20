@@ -54,33 +54,32 @@ var (
 
 // ======================== 快速随机数生成器 (性能优化) ========================
 // 用 math/rand 替代 crypto/rand，填充长度不需要密码学安全
+// 用 sync.Pool 替代单一全局 rand + mutex，消除高并发下的锁竞争
 
-var (
-	fastRand     *rand.Rand
-	fastRandOnce sync.Once
-)
-
-func getFastRand() *rand.Rand {
-	fastRandOnce.Do(func() {
-		fastRand = rand.New(rand.NewSource(time.Now().UnixNano()))
-	})
-	return fastRand
+var fastRandPool = sync.Pool{
+	New: func() interface{} {
+		return rand.New(rand.NewSource(time.Now().UnixNano()))
+	},
 }
 
-// FastIntn 快速生成 [0, n) 范围的随机数
+// FastIntn 快速生成 [0, n) 范围的随机数 (goroutine-safe, lock-free)
 func FastIntn(n int) int {
 	if n <= 0 {
 		return 0
 	}
-	return getFastRand().Intn(n)
+	r := fastRandPool.Get().(*rand.Rand)
+	v := r.Intn(n)
+	fastRandPool.Put(r)
+	return v
 }
 
-// FastBytes 快速填充随机字节 (用于 padding，不需要密码学安全)
+// FastBytes 快速填充随机字节 (用于 padding，不需要密码学安全, goroutine-safe)
 func FastBytes(b []byte) {
-	r := getFastRand()
+	r := fastRandPool.Get().(*rand.Rand)
 	for i := range b {
 		b[i] = byte(r.Intn(256))
 	}
+	fastRandPool.Put(r)
 }
 
 // FlowFrame represents a single flow control frame
@@ -109,9 +108,7 @@ func EncodeFlowFrame(streamID uint16, command byte, content []byte, paddingLen u
 	}
 
 	if paddingLen > 0 {
-		padding := make([]byte, paddingLen)
-		rand.Read(padding)
-		copy(buf[7+contentLen:], padding)
+		FastBytes(buf[7+contentLen:])
 	}
 
 	return buf

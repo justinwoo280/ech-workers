@@ -35,9 +35,8 @@ EWPNode ShareLink::parseLink(const QString &link)
         return node;
     }
     
-    // 解析 UUID
-    node.uuid = url.userName();
-    if (node.uuid.isEmpty()) {
+    QString credential = url.userName();
+    if (credential.isEmpty()) {
         return node;
     }
     
@@ -54,10 +53,22 @@ EWPNode ShareLink::parseLink(const QString &link)
     // 解析查询参数
     QUrlQuery query(url);
     
+    // 判断应用层协议
+    QString protocol = query.queryItemValue("protocol");
+    if (protocol == "trojan") {
+        node.appProtocol = EWPNode::TROJAN;
+        node.trojanPassword = credential;
+    } else {
+        node.appProtocol = EWPNode::EWP;
+        node.uuid = credential;
+    }
+    
     // 传输模式
     QString mode = query.queryItemValue("mode");
     if (mode == "grpc") {
         node.transportMode = EWPNode::GRPC;
+    } else if (mode == "h3grpc") {
+        node.transportMode = EWPNode::H3GRPC;
     } else if (mode == "xhttp") {
         node.transportMode = EWPNode::XHTTP;
     } else {
@@ -70,7 +81,7 @@ EWPNode ShareLink::parseLink(const QString &link)
         node.wsPath = wsPath;
     }
     
-    // gRPC 服务名
+    // gRPC / H3gRPC 服务名
     QString grpcService = query.queryItemValue("grpcService");
     if (!grpcService.isEmpty()) {
         node.grpcServiceName = grpcService;
@@ -111,18 +122,35 @@ QString ShareLink::generateLink(const EWPNode &node)
 {
     QUrl url;
     url.setScheme("ewp");
-    url.setUserName(node.uuid);
+    
+    // 根据应用层协议设置凭据
+    if (node.appProtocol == EWPNode::TROJAN) {
+        url.setUserName(node.trojanPassword);
+    } else {
+        url.setUserName(node.uuid);
+    }
+    
     url.setHost(node.serverAddress);
     url.setPort(node.serverPort);
     url.setFragment(node.name);
     
     QUrlQuery query;
     
+    // 应用层协议（非 EWP 时需要标注）
+    if (node.appProtocol == EWPNode::TROJAN) {
+        query.addQueryItem("protocol", "trojan");
+    }
+    
     // 传输模式
     switch (node.transportMode) {
         case EWPNode::GRPC:
             query.addQueryItem("mode", "grpc");
-            // gRPC 服务名
+            if (node.grpcServiceName != "ProxyService") {
+                query.addQueryItem("grpcService", node.grpcServiceName);
+            }
+            break;
+        case EWPNode::H3GRPC:
+            query.addQueryItem("mode", "h3grpc");
             if (node.grpcServiceName != "ProxyService") {
                 query.addQueryItem("grpcService", node.grpcServiceName);
             }
@@ -132,7 +160,6 @@ QString ShareLink::generateLink(const EWPNode &node)
             break;
         default:
             query.addQueryItem("mode", "ws");
-            // WebSocket 路径
             if (node.wsPath != "/") {
                 query.addQueryItem("wsPath", node.wsPath);
             }

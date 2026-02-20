@@ -2,12 +2,15 @@ package websocket
 
 import (
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"strings"
 	"sync"
 	"time"
 
 	"ewp-core/log"
+	"ewp-core/protocol/ewp"
 	"ewp-core/protocol/trojan"
 
 	"github.com/gorilla/websocket"
@@ -21,6 +24,7 @@ type TrojanConn struct {
 	connected       bool
 	mu              sync.Mutex
 	heartbeatPeriod time.Duration
+	udpGlobalID     [8]byte
 }
 
 // NewTrojanConn creates a new Trojan WebSocket connection
@@ -79,11 +83,11 @@ func (c *TrojanConn) ConnectUDP(target string, initialData []byte) error {
 		return err
 	}
 
-	// Build UDP handshake data
+	// Build Trojan UDP handshake (without raw initial data)
 	var handshakeData []byte
 	handshakeData = append(handshakeData, c.key[:]...)
 	handshakeData = append(handshakeData, trojan.CRLF...)
-	handshakeData = append(handshakeData, trojan.CommandUDP)  // ← UDP command
+	handshakeData = append(handshakeData, trojan.CommandUDP)
 
 	addrBytes, err := addr.Encode()
 	if err != nil {
@@ -92,19 +96,58 @@ func (c *TrojanConn) ConnectUDP(target string, initialData []byte) error {
 	handshakeData = append(handshakeData, addrBytes...)
 	handshakeData = append(handshakeData, trojan.CRLF...)
 
-	// Append initial data if any
-	if len(initialData) > 0 {
-		handshakeData = append(handshakeData, initialData...)
-	}
-
-	// Send UDP handshake (Trojan has no response)
+	// Send Trojan handshake as first WebSocket message
 	if err := c.conn.WriteMessage(websocket.BinaryMessage, handshakeData); err != nil {
 		return err
+	}
+
+	// Send EWP UDPStatusNew as second message to establish session on server
+	udpAddr, err := net.ResolveUDPAddr("udp", target)
+	if err != nil {
+		return fmt.Errorf("resolve UDP address: %w", err)
+	}
+
+	c.udpGlobalID = ewp.NewGlobalID()
+
+	pkt := &ewp.UDPPacket{
+		GlobalID: c.udpGlobalID,
+		Status:   ewp.UDPStatusNew,
+		Target:   udpAddr,
+		Payload:  initialData,
+	}
+
+	encoded, err := ewp.EncodeUDPPacket(pkt)
+	if err != nil {
+		return fmt.Errorf("encode UDP new packet: %w", err)
+	}
+
+	if err := c.conn.WriteMessage(websocket.BinaryMessage, encoded); err != nil {
+		return fmt.Errorf("send UDP new packet: %w", err)
 	}
 
 	c.connected = true
 	log.V("[Trojan] UDP handshake sent, target: %s", target)
 	return nil
+}
+
+// WriteUDP sends a subsequent UDP packet over the established UDP tunnel (StatusKeep, EWP framing)
+func (c *TrojanConn) WriteUDP(target string, data []byte) error {
+	encoded, err := ewp.EncodeUDPKeepPacket(c.udpGlobalID, data)
+	if err != nil {
+		return fmt.Errorf("encode UDP keep packet: %w", err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.conn.WriteMessage(websocket.BinaryMessage, encoded)
+}
+
+// ReadUDP reads and decodes an EWP-framed UDP response packet
+func (c *TrojanConn) ReadUDP() ([]byte, error) {
+	_, msg, err := c.conn.ReadMessage()
+	if err != nil {
+		return nil, err
+	}
+	return ewp.DecodeUDPPayload(msg)
 }
 
 // Read reads data from WebSocket

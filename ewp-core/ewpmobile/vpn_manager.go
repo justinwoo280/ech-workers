@@ -23,20 +23,20 @@ import (
 // tunLogger implements logger.Logger for sing-tun
 type tunLogger struct{}
 
-func (l *tunLogger) Trace(args ...interface{})                             { log.V(fmt.Sprint(args...)) }
-func (l *tunLogger) Debug(args ...interface{})                             { log.V(fmt.Sprint(args...)) }
-func (l *tunLogger) Info(args ...interface{})                              { log.Printf(fmt.Sprint(args...)) }
-func (l *tunLogger) Warn(args ...interface{})                              { log.Printf(fmt.Sprint(args...)) }
-func (l *tunLogger) Error(args ...interface{})                             { log.Printf(fmt.Sprint(args...)) }
-func (l *tunLogger) Fatal(args ...interface{})                             { log.Printf(fmt.Sprint(args...)) }
-func (l *tunLogger) Panic(args ...interface{})                             { log.Printf(fmt.Sprint(args...)) }
-func (l *tunLogger) TraceContext(ctx context.Context, args ...interface{}) { log.V(fmt.Sprint(args...)) }
-func (l *tunLogger) DebugContext(ctx context.Context, args ...interface{}) { log.V(fmt.Sprint(args...)) }
-func (l *tunLogger) InfoContext(ctx context.Context, args ...interface{})  { log.Printf(fmt.Sprint(args...)) }
-func (l *tunLogger) WarnContext(ctx context.Context, args ...interface{})  { log.Printf(fmt.Sprint(args...)) }
-func (l *tunLogger) ErrorContext(ctx context.Context, args ...interface{}) { log.Printf(fmt.Sprint(args...)) }
-func (l *tunLogger) FatalContext(ctx context.Context, args ...interface{}) { log.Printf(fmt.Sprint(args...)) }
-func (l *tunLogger) PanicContext(ctx context.Context, args ...interface{}) { log.Printf(fmt.Sprint(args...)) }
+func (l *tunLogger) Trace(args ...interface{})                             { log.V("%s", fmt.Sprint(args...)) }
+func (l *tunLogger) Debug(args ...interface{})                             { log.V("%s", fmt.Sprint(args...)) }
+func (l *tunLogger) Info(args ...interface{})                              { log.Printf("%s", fmt.Sprint(args...)) }
+func (l *tunLogger) Warn(args ...interface{})                              { log.Printf("%s", fmt.Sprint(args...)) }
+func (l *tunLogger) Error(args ...interface{})                             { log.Printf("%s", fmt.Sprint(args...)) }
+func (l *tunLogger) Fatal(args ...interface{})                             { log.Printf("%s", fmt.Sprint(args...)) }
+func (l *tunLogger) Panic(args ...interface{})                             { log.Printf("%s", fmt.Sprint(args...)) }
+func (l *tunLogger) TraceContext(ctx context.Context, args ...interface{}) { log.V("%s", fmt.Sprint(args...)) }
+func (l *tunLogger) DebugContext(ctx context.Context, args ...interface{}) { log.V("%s", fmt.Sprint(args...)) }
+func (l *tunLogger) InfoContext(ctx context.Context, args ...interface{})  { log.Printf("%s", fmt.Sprint(args...)) }
+func (l *tunLogger) WarnContext(ctx context.Context, args ...interface{})  { log.Printf("%s", fmt.Sprint(args...)) }
+func (l *tunLogger) ErrorContext(ctx context.Context, args ...interface{}) { log.Printf("%s", fmt.Sprint(args...)) }
+func (l *tunLogger) FatalContext(ctx context.Context, args ...interface{}) { log.Printf("%s", fmt.Sprint(args...)) }
+func (l *tunLogger) PanicContext(ctx context.Context, args ...interface{}) { log.Printf("%s", fmt.Sprint(args...)) }
 
 var _ logger.Logger = (*tunLogger)(nil)
 

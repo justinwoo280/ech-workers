@@ -25,8 +25,10 @@ func NewGRPCWebAdapter(grpcServer *grpc.Server) *GRPCWebAdapter {
 func (a *GRPCWebAdapter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	contentType := r.Header.Get("Content-Type")
 
-	// Check if this is a gRPC-Web request
-	if strings.HasPrefix(contentType, "application/grpc-web") {
+	// Check if this is a gRPC-Web request.
+	// Accept both the standard gRPC-Web content types and application/octet-stream,
+	// since the h3grpc client uses gRPC-Web framing with octet-stream for CDN obfuscation.
+	if strings.HasPrefix(contentType, "application/grpc-web") || contentType == "application/octet-stream" {
 		a.handleGRPCWeb(w, r)
 		return
 	}

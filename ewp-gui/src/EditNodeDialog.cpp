@@ -101,7 +101,7 @@ EWPNode EditNodeDialog::getNode() const
     
     // gRPC / H3gRPC 配置
     node.grpcServiceName = ui->editGrpcService->text().trimmed();
-    if (node.grpcServiceName.isEmpty()) node.grpcServiceName = "api";
+    if (node.grpcServiceName.isEmpty()) node.grpcServiceName = "ProxyService";
     node.userAgent = ui->editUserAgent->text().trimmed();
     node.contentType = ui->editContentType->text().trimmed();
     

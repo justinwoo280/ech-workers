@@ -22,116 +22,151 @@ type Conn struct {
 	transport  *Transport
 	request    *http.Request
 	response   *http.Response
-	client     *http.Client
-	
+
 	uuid       [16]byte
 	password   string
 	enableFlow bool
 	useTrojan  bool
 
-	encoder    *GRPCWebEncoder
-	decoder    *GRPCWebDecoder
-	
+	encoder *GRPCWebEncoder
+	decoder *GRPCWebDecoder
+
 	// Flow control (EWP Vision)
-	flowState  *ewp.FlowState
-	
+	flowState *ewp.FlowState
+
 	// Trojan (simplified, without mux for now)
 	trojanConnected bool
-	
+
 	// Channels for async I/O
-	recvChan   chan []byte
-	sendChan   chan []byte
-	closeChan  chan struct{}
-	
+	recvChan  chan []byte
+	sendChan  chan []byte
+	closeChan chan struct{}
+	connReady chan struct{} // closed when H3 connection is established
+
 	// State
-	connected  bool
-	closed     bool
-	mu         sync.Mutex
-	
+	connected      bool
+	closed         bool
+	mu             sync.Mutex
+	closeOnce      sync.Once
+	cancelFn       context.CancelFunc
+	activePipeRead *io.PipeReader // active request body; closed on Close()
+	udpGlobalID    [8]byte
+
 	// Goroutine management
-	wg         sync.WaitGroup
+	wg sync.WaitGroup
 }
 
-// Connect sends initial connection request
-func (c *Conn) Connect(target string, initialData []byte) error {
+// signalClose closes closeChan exactly once, safely from any goroutine.
+func (c *Conn) signalClose() {
+	c.closeOnce.Do(func() { close(c.closeChan) })
+}
+
+// establishH3 starts the HTTP/3 request and initialises encoder/decoder.
+// It is safe to call only once. Returns immediately; callers must call
+// waitConnected to know when the connection is ready.
+// When ECH is enabled and the server rejects the key, the connection is
+// retried once with the updated config supplied by the server.
+func (c *Conn) establishH3() error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	if c.connected {
-		return fmt.Errorf("already connected")
+		c.mu.Unlock()
+		return nil
 	}
+	c.mu.Unlock()
 
-	log.V("[H3] Connecting to target: %s", target)
-
-	// Create request body pipe
-	pipeReader, pipeWriter := io.Pipe()
-	c.request.Body = pipeReader
-
-	// Start request in background
-	ctx, cancel := context.WithCancel(context.Background())
-	defer func() {
-		if !c.connected {
-			cancel()
-		}
-	}()
-
-	c.request = c.request.WithContext(ctx)
-
-	// Send HTTP/3 request
 	go func() {
-		resp, err := c.client.Do(c.request)
-		if err != nil {
-			log.Printf("[H3] Request failed: %v", err)
-			pipeWriter.CloseWithError(err)
-			close(c.closeChan)
+		var (
+			resp       *http.Response
+			pipeWriter *io.PipeWriter
+		)
+
+		const maxAttempts = 2
+		for attempt := 0; attempt < maxAttempts; attempt++ {
+			pr, pw := io.Pipe()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			req := c.request.Clone(ctx)
+			req.Body = pr
+
+			c.mu.Lock()
+			c.cancelFn = cancel
+			c.activePipeRead = pr
+			c.mu.Unlock()
+
+			var err error
+			resp, err = c.transport.getClient().Do(req)
+			if err != nil {
+				pw.CloseWithError(err)
+				cancel()
+
+				// On first attempt only: try ECH retry
+				if attempt == 0 && c.transport.useECH {
+					if retryErr := c.transport.handleECHRejection(err); retryErr == nil {
+						log.Printf("[H3] ECH rejected by server, retrying with updated config")
+						continue
+					}
+				}
+
+				log.Printf("[H3] Request failed: %v", err)
+				c.signalClose()
+				return
+			}
+
+			pipeWriter = pw
+			break
+		}
+
+		if resp == nil {
+			c.signalClose()
 			return
 		}
 
 		c.mu.Lock()
 		c.response = resp
-		
-		// Initialize encoder/decoder
 		c.encoder = NewGRPCWebEncoder(pipeWriter, false)
 		c.decoder = NewGRPCWebDecoder(resp.Body)
-		
-		// Initialize flow state if enabled
 		if c.enableFlow {
 			c.flowState = ewp.NewFlowState(c.uuid[:])
 		}
-		
 		c.connected = true
 		c.mu.Unlock()
 
 		log.V("[H3] HTTP/3 connection established")
+		close(c.connReady)
 
-		// Start receiver goroutine
 		c.wg.Add(1)
 		go c.receiveLoop()
 	}()
 
-	// Wait for connection to establish (with timeout)
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-	timeout := time.After(10 * time.Second)
+	return nil
+}
 
-	for {
-		select {
-		case <-ticker.C:
-			c.mu.Lock()
-			connected := c.connected
-			c.mu.Unlock()
-			if connected {
-				goto Connected
-			}
-		case <-timeout:
-			return fmt.Errorf("connection timeout")
-		case <-c.closeChan:
-			return fmt.Errorf("connection closed")
-		}
+// waitConnected blocks until the H3 connection is ready or fails.
+func (c *Conn) waitConnected() error {
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
+
+	select {
+	case <-c.connReady:
+		return nil
+	case <-timer.C:
+		return fmt.Errorf("connection timeout")
+	case <-c.closeChan:
+		return fmt.Errorf("connection closed")
+	}
+}
+
+// Connect sends initial TCP connection request.
+func (c *Conn) Connect(target string, initialData []byte) error {
+	log.V("[H3] Connecting to target: %s", target)
+
+	if err := c.establishH3(); err != nil {
+		return err
+	}
+	if err := c.waitConnected(); err != nil {
+		return err
 	}
 
-Connected:
-	// Send connect request
 	if c.useTrojan {
 		return c.trojanConnect(target, initialData)
 	}
@@ -234,33 +269,18 @@ func (c *Conn) trojanConnect(target string, initialData []byte) error {
 	return nil
 }
 
+// ConnectUDP sends initial UDP connection request.
 func (c *Conn) ConnectUDP(target string, initialData []byte) error {
+	if err := c.establishH3(); err != nil {
+		return err
+	}
+	if err := c.waitConnected(); err != nil {
+		return err
+	}
+
 	if c.useTrojan {
 		return c.trojanConnectUDP(target, initialData)
 	}
-	
-	// Wait for connection to establish (similar to Connect)
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-	timeout := time.After(10 * time.Second)
-
-	for {
-		select {
-		case <-ticker.C:
-			c.mu.Lock()
-			connected := c.connected
-			c.mu.Unlock()
-			if connected {
-				goto Connected
-			}
-		case <-timeout:
-			return fmt.Errorf("connection timeout")
-		case <-c.closeChan:
-			return fmt.Errorf("connection closed")
-		}
-	}
-
-Connected:
 	return c.ewpConnectUDP(target, initialData)
 }
 
@@ -275,11 +295,11 @@ func (c *Conn) trojanConnectUDP(target string, initialData []byte) error {
 	// Generate key
 	key := trojan.GenerateKey(c.password)
 
-	// Build Trojan UDP handshake
+	// Build Trojan UDP handshake (without raw initial data)
 	var handshakeData []byte
 	handshakeData = append(handshakeData, key[:]...)
 	handshakeData = append(handshakeData, trojan.CRLF...)
-	handshakeData = append(handshakeData, trojan.CommandUDP)  // ← UDP command
+	handshakeData = append(handshakeData, trojan.CommandUDP)
 
 	addrBytes, err := addr.Encode()
 	if err != nil {
@@ -288,20 +308,39 @@ func (c *Conn) trojanConnectUDP(target string, initialData []byte) error {
 	handshakeData = append(handshakeData, addrBytes...)
 	handshakeData = append(handshakeData, trojan.CRLF...)
 
-	// Append initial data (UDP packet)
-	if len(initialData) > 0 {
-		handshakeData = append(handshakeData, initialData...)
-	}
-
-	// Send handshake
+	// Send Trojan handshake
 	socketData := &pb.SocketData{Content: handshakeData}
-	data, err := proto.Marshal(socketData)
+	marshaledData, err := proto.Marshal(socketData)
 	if err != nil {
 		return fmt.Errorf("failed to marshal UDP handshake: %w", err)
 	}
 
-	if err := c.encoder.Encode(data); err != nil {
+	if err := c.encoder.Encode(marshaledData); err != nil {
 		return fmt.Errorf("failed to send UDP handshake: %w", err)
+	}
+
+	// Send EWP UDPStatusNew as separate message to establish session on server
+	udpAddr, err := net.ResolveUDPAddr("udp", target)
+	if err != nil {
+		return fmt.Errorf("resolve UDP address: %w", err)
+	}
+
+	c.udpGlobalID = ewp.NewGlobalID()
+
+	pkt := &ewp.UDPPacket{
+		GlobalID: c.udpGlobalID,
+		Status:   ewp.UDPStatusNew,
+		Target:   udpAddr,
+		Payload:  initialData,
+	}
+
+	encoded, err := ewp.EncodeUDPPacket(pkt)
+	if err != nil {
+		return fmt.Errorf("encode UDP new packet: %w", err)
+	}
+
+	if err := c.Write(encoded); err != nil {
+		return fmt.Errorf("send UDP new packet: %w", err)
 	}
 
 	c.trojanConnected = true
@@ -341,51 +380,69 @@ func (c *Conn) ewpConnectUDP(target string, initialData []byte) error {
 		c.flowState = ewp.NewFlowState(c.uuid[:])
 	}
 
-	// Send initial UDP packet if provided (with UDP framing)
-	if len(initialData) > 0 {
-		udpAddr, err := net.ResolveUDPAddr("udp", target)
-		if err != nil {
-			return fmt.Errorf("resolve UDP address: %w", err)
-		}
+	// Always send UDPStatusNew to establish session on server (with target address)
+	udpAddr, err := net.ResolveUDPAddr("udp", target)
+	if err != nil {
+		return fmt.Errorf("resolve UDP address: %w", err)
+	}
 
-		// Generate GlobalID for this session
-		pseudoLocalAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}
-		globalID := ewp.GenerateGlobalID(pseudoLocalAddr)
+	c.udpGlobalID = ewp.NewGlobalID()
 
-		pkt := &ewp.UDPPacket{
-			GlobalID: globalID,
-			Status:   ewp.UDPStatusNew,
-			Target:   udpAddr,
-			Payload:  initialData,
-		}
+	pkt := &ewp.UDPPacket{
+		GlobalID: c.udpGlobalID,
+		Status:   ewp.UDPStatusNew,
+		Target:   udpAddr,
+		Payload:  initialData,
+	}
 
-		encoded, err := ewp.EncodeUDPPacket(pkt)
-		if err != nil {
-			return fmt.Errorf("encode UDP packet: %w", err)
-		}
+	encoded, err := ewp.EncodeUDPPacket(pkt)
+	if err != nil {
+		return fmt.Errorf("encode UDP packet: %w", err)
+	}
 
-		// Apply flow padding if enabled
-		var writeData []byte
-		if c.flowState != nil {
-			userUUID := c.uuid[:]
-			writeData = c.flowState.PadUplink(encoded, &userUUID)
-		} else {
-			writeData = encoded
-		}
+	// Apply flow padding if enabled
+	var writeData []byte
+	if c.flowState != nil {
+		userUUID := c.uuid[:]
+		writeData = c.flowState.PadUplink(encoded, &userUUID)
+	} else {
+		writeData = encoded
+	}
 
-		socketData := &pb.SocketData{Content: writeData}
-		data, err := proto.Marshal(socketData)
-		if err != nil {
-			return fmt.Errorf("failed to marshal UDP packet: %w", err)
-		}
+	socketData = &pb.SocketData{Content: writeData}
+	data, err = proto.Marshal(socketData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal UDP packet: %w", err)
+	}
 
-		if err := c.encoder.Encode(data); err != nil {
-			return fmt.Errorf("failed to send UDP packet: %w", err)
-		}
+	if err := c.encoder.Encode(data); err != nil {
+		return fmt.Errorf("failed to send UDP new packet: %w", err)
 	}
 
 	log.V("[H3] EWP UDP connect sent for %s", target)
 	return nil
+}
+
+// WriteUDP sends a subsequent UDP packet over the established UDP tunnel (StatusKeep)
+func (c *Conn) WriteUDP(target string, data []byte) error {
+	encoded, err := ewp.EncodeUDPKeepPacket(c.udpGlobalID, data)
+	if err != nil {
+		return fmt.Errorf("encode UDP keep packet: %w", err)
+	}
+	return c.Write(encoded)
+}
+
+// ReadUDP reads and decodes an EWP-framed UDP response packet
+func (c *Conn) ReadUDP() ([]byte, error) {
+	if c.closed {
+		return nil, io.EOF
+	}
+	select {
+	case data := <-c.recvChan:
+		return ewp.DecodeUDPPayload(data)
+	case <-c.closeChan:
+		return nil, io.EOF
+	}
 }
 
 // Read reads data from the connection
@@ -454,12 +511,22 @@ func (c *Conn) Close() error {
 
 	log.V("[H3] Closing connection")
 
-	// Close channels
-	close(c.closeChan)
+	c.signalClose()
 
-	// Close request body
-	if c.request != nil && c.request.Body != nil {
-		c.request.Body.Close()
+	// Cancel the HTTP/3 request context.
+	c.mu.Lock()
+	cancel := c.cancelFn
+	c.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+
+	// Close the active request body pipe to unblock the encoder
+	c.mu.Lock()
+	pr := c.activePipeRead
+	c.mu.Unlock()
+	if pr != nil {
+		pr.CloseWithError(io.ErrClosedPipe)
 	}
 
 	// Close response body
@@ -484,7 +551,7 @@ func (c *Conn) StartPing(interval time.Duration) chan struct{} {
 // receiveLoop receives and processes incoming messages
 func (c *Conn) receiveLoop() {
 	defer c.wg.Done()
-	defer close(c.recvChan)
+	defer c.signalClose()
 
 	for {
 		// Decode gRPC-Web frame

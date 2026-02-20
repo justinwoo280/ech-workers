@@ -27,7 +27,7 @@ struct EWPNode {
     QString wsPath = "/";              // WebSocket 路径
     
     // gRPC / H3gRPC 配置
-    QString grpcServiceName = "api";   // gRPC 服务名
+    QString grpcServiceName = "ProxyService";   // gRPC 服务名
     QString userAgent;                 // 自定义 User-Agent (anti-DPI)
     QString contentType;               // 自定义 Content-Type (anti-DPI)
     
@@ -85,7 +85,7 @@ struct EWPNode {
         node.trojanPassword = obj["trojanPassword"].toString();
         node.transportMode = static_cast<TransportMode>(obj["transportMode"].toInt(0));
         node.wsPath = obj["wsPath"].toString("/");
-        node.grpcServiceName = obj["grpcServiceName"].toString("api");
+        node.grpcServiceName = obj["grpcServiceName"].toString("ProxyService");
         node.userAgent = obj["userAgent"].toString();
         node.contentType = obj["contentType"].toString();
         node.enableECH = obj["enableECH"].toBool(true);

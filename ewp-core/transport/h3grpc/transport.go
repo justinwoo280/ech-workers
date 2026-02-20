@@ -34,19 +34,17 @@ type Transport struct {
 	idleTimeout    time.Duration
 	concurrency    int
 	echManager     *commontls.ECHManager
-	
+
 	// Anti-DPI settings
 	userAgent      string
 	contentType    string
 
-	// HTTP/3 specific
+	// HTTP/3 specific — protected by mu
+	mu             sync.RWMutex
 	client         *http.Client
 	http3Transport *http3.Transport
 	quicConfig     *quic.Config
 	tlsConfig      *tls.Config
-	
-	// Connection pool
-	connPool       sync.Pool
 }
 
 // New creates a new HTTP/3 transport
@@ -71,27 +69,25 @@ func NewWithProtocol(serverAddr, serverIP, uuidStr, password string, useECH, ena
 	serviceName = strings.TrimPrefix(serviceName, "/")
 
 	t := &Transport{
-		serverAddr:        serverAddr,
-		serverIP:          serverIP,
-		uuidStr:           uuidStr,
-		password:          password,
-		uuid:              uuid,
-		useECH:            useECH,
-		enableFlow:        enableFlow,
-		enablePQC:         enablePQC,
-		useTrojan:         useTrojan,
-		serviceName:       serviceName,
-		authority:         "",
-		idleTimeout:       30 * time.Second,
-		concurrency:       4,
-		echManager:        echManager,
-		
-		// Default anti-DPI settings (browser-like)
+		serverAddr:  serverAddr,
+		serverIP:    serverIP,
+		uuidStr:     uuidStr,
+		password:    password,
+		uuid:        uuid,
+		useECH:      useECH,
+		enableFlow:  enableFlow,
+		enablePQC:   enablePQC,
+		useTrojan:   useTrojan,
+		serviceName: serviceName,
+		authority:   "",
+		idleTimeout: 30 * time.Second,
+		concurrency: 4,
+		echManager:  echManager,
+
 		userAgent:   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
 		contentType: "application/octet-stream",
 	}
 
-	// Initialize HTTP/3 client
 	if err := t.initClient(); err != nil {
 		return nil, fmt.Errorf("failed to initialize HTTP/3 client: %w", err)
 	}
@@ -99,15 +95,14 @@ func NewWithProtocol(serverAddr, serverIP, uuidStr, password string, useECH, ena
 	return t, nil
 }
 
-// initClient initializes the HTTP/3 client with QUIC config
+// initClient builds the TLS/QUIC/HTTP stack.
+// Must be called under t.mu write lock (or during construction before the Transport escapes).
 func (t *Transport) initClient() error {
-	// Parse server address
 	parsed, err := transport.ParseAddress(t.serverAddr)
 	if err != nil {
 		return fmt.Errorf("invalid server address: %w", err)
 	}
 
-	// Create TLS config
 	tlsCfg, err := commontls.NewClient(commontls.ClientOptions{
 		ServerName: parsed.Host,
 		EnableECH:  t.useECH,
@@ -131,42 +126,52 @@ func (t *Transport) initClient() error {
 
 	t.tlsConfig = stdTLSConfig
 
-	// Create QUIC config with optimized parameters
 	t.quicConfig = &quic.Config{
-		// Stream flow control windows
-		InitialStreamReceiveWindow:     6 * 1024 * 1024,  // 6MB
-		MaxStreamReceiveWindow:         16 * 1024 * 1024, // 16MB
-		
-		// Connection flow control windows
-		InitialConnectionReceiveWindow: 15 * 1024 * 1024, // 15MB
-		MaxConnectionReceiveWindow:     25 * 1024 * 1024, // 25MB
-		
-		// Timeouts
+		InitialStreamReceiveWindow:     6 * 1024 * 1024,
+		MaxStreamReceiveWindow:         16 * 1024 * 1024,
+		InitialConnectionReceiveWindow: 15 * 1024 * 1024,
+		MaxConnectionReceiveWindow:     25 * 1024 * 1024,
 		MaxIdleTimeout:                 t.idleTimeout,
 		KeepAlivePeriod:                10 * time.Second,
-		
-		// Performance optimizations
-		DisablePathMTUDiscovery:        false, // Enable MTU discovery
-		EnableDatagrams:                false, // Don't need datagram support
-		
-		// 0-RTT support
+		DisablePathMTUDiscovery:        false,
+		EnableDatagrams:                false,
 		Allow0RTT:                      true,
 	}
 
-	// Create HTTP/3 Transport
 	t.http3Transport = &http3.Transport{
 		TLSClientConfig:    t.tlsConfig,
 		QUICConfig:         t.quicConfig,
-		DisableCompression: true, // gRPC handles its own compression
+		DisableCompression: true,
 	}
 
-	// Create HTTP client
 	t.client = &http.Client{
 		Transport: t.http3Transport,
-		Timeout:   0, // No timeout for long-lived connections
+		Timeout:   0,
 	}
 
 	return nil
+}
+
+// getClient returns the current HTTP client under a read lock.
+func (t *Transport) getClient() *http.Client {
+	t.mu.RLock()
+	c := t.client
+	t.mu.RUnlock()
+	return c
+}
+
+// reinitClient closes the old HTTP/3 transport and builds a fresh one.
+// Called after updating the ECH config so all future dials use the new key.
+func (t *Transport) reinitClient() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.http3Transport != nil {
+		t.http3Transport.Close()
+		t.http3Transport = nil
+	}
+
+	return t.initClient()
 }
 
 // SetAuthority sets the :authority pseudo-header
@@ -219,7 +224,7 @@ func (t *Transport) Name() string {
 		name = "H3+EWP"
 	}
 	if t.useECH {
-		name += "+ECH"
+		name += "+ECH(QUIC)"
 	} else {
 		name += "+TLS"
 	}
@@ -233,12 +238,11 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 		return nil, err
 	}
 
-	// Determine target host and port
 	host := parsed.Host
 	port := parsed.Port
 	addr := net.JoinHostPort(host, port)
 	resolvedIP := t.serverIP
-	
+
 	// Resolve serverIP if it's a domain name
 	if resolvedIP != "" && !isIPAddress(resolvedIP) {
 		ips, err := net.LookupIP(resolvedIP)
@@ -253,7 +257,7 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 			return nil, fmt.Errorf("no IPs returned for serverIP %s", t.serverIP)
 		}
 	}
-	
+
 	// If no serverIP specified, resolve using system DNS
 	if resolvedIP == "" && !isIPAddress(host) {
 		ips, err := net.LookupIP(host)
@@ -265,8 +269,7 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 			resolvedIP = ips[0].String()
 		}
 	}
-	
-	// Use resolved IP if available
+
 	if resolvedIP != "" {
 		addr = net.JoinHostPort(resolvedIP, port)
 		log.Printf("[H3] Connecting to: %s (SNI: %s)", addr, host)
@@ -274,10 +277,9 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 		log.Printf("[H3] Connecting to: %s", addr)
 	}
 
-	// Build request URL
 	scheme := "https"
 	path := "/" + t.serviceName + "/Tunnel"
-	
+
 	var url string
 	if t.authority != "" {
 		url = fmt.Sprintf("%s://%s%s", scheme, t.authority, path)
@@ -287,37 +289,32 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 
 	log.V("[H3] Connecting to %s (resolved: %s)", url, addr)
 
-	// Create request
 	req, err := http.NewRequest("POST", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Set headers (use custom values for anti-DPI)
 	req.Header.Set("Content-Type", t.contentType)
 	req.Header.Set("User-Agent", t.userAgent)
-	
-	// Override Host header if using custom IP
+
+	// Ensure SNI matches the domain (not the raw IP) for Host header and ECH routing
 	if t.serverIP != "" && t.authority == "" {
 		req.Host = host
 	} else if t.authority != "" {
 		req.Host = t.authority
 	}
 
-	// Create connection
 	conn := &Conn{
-		transport:   t,
-		request:     req,
-		client:      t.client,
-		uuid:        t.uuid,
-		password:    t.password,
-		enableFlow:  t.enableFlow,
-		useTrojan:   t.useTrojan,
-		encoder:     nil, // Will be set after response
-		decoder:     nil, // Will be set after response
-		recvChan:    make(chan []byte, 16),
-		sendChan:    make(chan []byte, 16),
-		closeChan:   make(chan struct{}),
+		transport:  t,
+		request:    req,
+		uuid:       t.uuid,
+		password:   t.password,
+		enableFlow: t.enableFlow,
+		useTrojan:  t.useTrojan,
+		recvChan:   make(chan []byte, 32),
+		sendChan:   make(chan []byte, 32),
+		closeChan:  make(chan struct{}),
+		connReady:  make(chan struct{}),
 	}
 
 	return conn, nil
@@ -325,6 +322,8 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 
 // Close closes the transport and cleans up resources
 func (t *Transport) Close() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	if t.http3Transport != nil {
 		t.http3Transport.Close()
 	}
@@ -348,51 +347,35 @@ func isIPAddress(s string) bool {
 	return net.ParseIP(s) != nil
 }
 
-// handleECHRejection checks if error is ECH rejection and updates config
+// handleECHRejection extracts the server's ECH retry config from a rejection error,
+// updates the ECH manager, and reinitialises the HTTP/3 client with the new config.
+// Returns nil when the config was successfully updated (caller should retry the dial).
 func (t *Transport) handleECHRejection(err error) error {
-	if err == nil {
-		return errors.New("nil error")
+	if !t.useECH || t.echManager == nil {
+		return errors.New("ECH not enabled or no manager")
 	}
 
-	// Try to extract ECH rejection error
-	// Go's tls.ECHRejectionError is returned wrapped in connection errors
-	var echRejErr interface{ RetryConfigList() []byte }
-	
-	// Check if error message contains ECH rejection
-	errMsg := err.Error()
-	if !strings.Contains(errMsg, "server rejected ECH") && 
-	   !strings.Contains(errMsg, "ECH") {
-		return errors.New("not ECH rejection")
+	var echRejErr *tls.ECHRejectionError
+	if !errors.As(err, &echRejErr) {
+		return errors.New("not an ECH rejection error")
 	}
 
-	// Try to unwrap and find ECHRejectionError
-	cause := err
-	for cause != nil {
-		// Check if this error has RetryConfigList method
-		if rejErr, ok := cause.(interface{ RetryConfigList() []byte }); ok {
-			echRejErr = rejErr
-			break
-		}
-		
-		// Try to unwrap
-		unwrapped := errors.Unwrap(cause)
-		if unwrapped == nil {
-			break
-		}
-		cause = unwrapped
-	}
-
-	if echRejErr == nil {
-		log.Printf("[H3] ECH rejection detected but no retry config available")
-		return errors.New("no retry config")
-	}
-
-	retryList := echRejErr.RetryConfigList()
+	retryList := echRejErr.RetryConfigList
 	if len(retryList) == 0 {
-		log.Printf("[H3] Server rejected ECH without retry config (secure signal)")
+		log.Printf("[H3] Server rejected ECH without retry config (misconfigured server or wrong domain)")
 		return errors.New("empty retry config")
 	}
 
-	log.Printf("[H3] Updating ECH config from server retry (%d bytes)", len(retryList))
-	return t.echManager.UpdateFromRetry(retryList)
+	log.Printf("[H3] ECH rejected by server; updating config from retry list (%d bytes)", len(retryList))
+
+	if err := t.echManager.UpdateFromRetry(retryList); err != nil {
+		return fmt.Errorf("update ECH config: %w", err)
+	}
+
+	if err := t.reinitClient(); err != nil {
+		return fmt.Errorf("reinit client after ECH update: %w", err)
+	}
+
+	log.Printf("[H3] ECH config updated; new client ready for retry")
+	return nil
 }

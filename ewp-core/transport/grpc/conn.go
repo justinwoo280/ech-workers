@@ -26,6 +26,7 @@ type Conn struct {
 	useTrojan         bool
 	flowState         *ewp.FlowState
 	writeOnceUserUUID []byte
+	udpGlobalID       [8]byte
 }
 
 func NewConn(conn *grpc.ClientConn, stream grpc.ClientStream, uuid [16]byte, password string, enableFlow, useTrojan bool) *Conn {
@@ -98,11 +99,11 @@ func (c *Conn) connectTrojanUDP(target string, initialData []byte) error {
 
 	key := trojan.GenerateKey(c.password)
 
-	// Build Trojan UDP handshake
+	// Build Trojan UDP handshake (without raw initial data)
 	var handshakeData []byte
 	handshakeData = append(handshakeData, key[:]...)
 	handshakeData = append(handshakeData, trojan.CRLF...)
-	handshakeData = append(handshakeData, trojan.CommandUDP)  // ← UDP command
+	handshakeData = append(handshakeData, trojan.CommandUDP)
 
 	addrBytes, err := addr.Encode()
 	if err != nil {
@@ -111,16 +112,35 @@ func (c *Conn) connectTrojanUDP(target string, initialData []byte) error {
 	handshakeData = append(handshakeData, addrBytes...)
 	handshakeData = append(handshakeData, trojan.CRLF...)
 
-	// Append initial data (UDP packet)
-	if len(initialData) > 0 {
-		handshakeData = append(handshakeData, initialData...)
-	}
-
 	c.mu.Lock()
 	err = c.stream.SendMsg(&pb.SocketData{Content: handshakeData})
 	c.mu.Unlock()
 	if err != nil {
 		return fmt.Errorf("send trojan UDP handshake: %w", err)
+	}
+
+	// Send EWP UDPStatusNew as separate message to establish session on server
+	udpAddr, err := net.ResolveUDPAddr("udp", target)
+	if err != nil {
+		return fmt.Errorf("resolve UDP address: %w", err)
+	}
+
+	c.udpGlobalID = ewp.NewGlobalID()
+
+	pkt := &ewp.UDPPacket{
+		GlobalID: c.udpGlobalID,
+		Status:   ewp.UDPStatusNew,
+		Target:   udpAddr,
+		Payload:  initialData,
+	}
+
+	encoded, err := ewp.EncodeUDPPacket(pkt)
+	if err != nil {
+		return fmt.Errorf("encode UDP new packet: %w", err)
+	}
+
+	if err := c.Write(encoded); err != nil {
+		return fmt.Errorf("send UDP new packet: %w", err)
 	}
 
 	log.V("[Trojan] gRPC UDP handshake sent, target: %s", target)
@@ -242,36 +262,54 @@ func (c *Conn) connectEWPUDP(target string, initialData []byte) error {
 		copy(c.writeOnceUserUUID, c.uuid[:])
 	}
 
-	// Send initial UDP packet if provided (with UDP framing)
-	if len(initialData) > 0 {
-		udpAddr, err := net.ResolveUDPAddr("udp", target)
-		if err != nil {
-			return fmt.Errorf("resolve UDP address: %w", err)
-		}
+	// Always send UDPStatusNew to establish session on server (with target address)
+	udpAddr, err := net.ResolveUDPAddr("udp", target)
+	if err != nil {
+		return fmt.Errorf("resolve UDP address: %w", err)
+	}
 
-		// Generate GlobalID for this session
-		pseudoLocalAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}
-		globalID := ewp.GenerateGlobalID(pseudoLocalAddr)
+	c.udpGlobalID = ewp.NewGlobalID()
 
-		pkt := &ewp.UDPPacket{
-			GlobalID: globalID,
-			Status:   ewp.UDPStatusNew,
-			Target:   udpAddr,
-			Payload:  initialData,
-		}
+	pkt := &ewp.UDPPacket{
+		GlobalID: c.udpGlobalID,
+		Status:   ewp.UDPStatusNew,
+		Target:   udpAddr,
+		Payload:  initialData,
+	}
 
-		encoded, err := ewp.EncodeUDPPacket(pkt)
-		if err != nil {
-			return fmt.Errorf("encode UDP packet: %w", err)
-		}
+	encoded, err := ewp.EncodeUDPPacket(pkt)
+	if err != nil {
+		return fmt.Errorf("encode UDP packet: %w", err)
+	}
 
-		if err := c.Write(encoded); err != nil {
-			return fmt.Errorf("send initial UDP packet: %w", err)
-		}
+	if err := c.Write(encoded); err != nil {
+		return fmt.Errorf("send UDP new packet: %w", err)
 	}
 
 	log.V("[EWP] gRPC UDP handshake success, target: %s", target)
 	return nil
+}
+
+// WriteUDP sends a subsequent UDP packet over the established UDP tunnel (StatusKeep)
+func (c *Conn) WriteUDP(target string, data []byte) error {
+	encoded, err := ewp.EncodeUDPKeepPacket(c.udpGlobalID, data)
+	if err != nil {
+		return fmt.Errorf("encode UDP keep packet: %w", err)
+	}
+	return c.Write(encoded)
+}
+
+// ReadUDP reads and decodes an EWP-framed UDP response packet
+func (c *Conn) ReadUDP() ([]byte, error) {
+	resp := &pb.SocketData{}
+	if err := c.stream.RecvMsg(resp); err != nil {
+		return nil, err
+	}
+	data := resp.Content
+	if !c.useTrojan && c.enableFlow && c.flowState != nil {
+		data = c.flowState.ProcessDownlink(data)
+	}
+	return ewp.DecodeUDPPayload(data)
 }
 
 func (c *Conn) Read(buf []byte) (int, error) {

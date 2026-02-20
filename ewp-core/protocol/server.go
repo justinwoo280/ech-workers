@@ -7,24 +7,34 @@ import (
 
 	commonnet "ewp-core/common/net"
 	"ewp-core/dns"
+	"ewp-core/log"
 	httpproxy "ewp-core/protocol/http"
 	"ewp-core/protocol/socks5"
-	"ewp-core/log"
 	"ewp-core/transport"
 )
 
+const defaultMaxConnections = 4096
+
 type Server struct {
-	listenAddr  string
+	listenAddr    string
 	tunnelHandler *TunnelHandler
-	dnsClient   *dns.Client
+	dnsClient     *dns.Client
+	users         socks5.Users
+	semaphore     chan struct{} // nil = unlimited
 }
 
-func NewServer(listenAddr string, trans transport.Transport, dnsServer string) *Server {
-	return &Server{
-		listenAddr:  listenAddr,
+func NewServer(listenAddr string, trans transport.Transport, dnsServer string, users socks5.Users, maxConns int) *Server {
+	s := &Server{
+		listenAddr:    listenAddr,
 		tunnelHandler: NewTunnelHandler(trans),
-		dnsClient:   dns.NewClient(dnsServer),
+		dnsClient:     dns.NewClient(dnsServer),
+		users:         users,
 	}
+	if maxConns <= 0 {
+		maxConns = defaultMaxConnections
+	}
+	s.semaphore = make(chan struct{}, maxConns)
+	return s
 }
 
 func (s *Server) Run() error {
@@ -45,7 +55,16 @@ func (s *Server) Run() error {
 			continue
 		}
 
-		go s.handleConnection(conn)
+		select {
+		case s.semaphore <- struct{}{}:
+			go func() {
+				defer func() { <-s.semaphore }()
+				s.handleConnection(conn)
+			}()
+		default:
+			log.Printf("[Proxy] Max connections reached, dropping connection from %s", conn.RemoteAddr())
+			conn.Close()
+		}
 	}
 }
 
@@ -83,16 +102,10 @@ func (s *Server) handleSOCKS(conn net.Conn, reader *bufio.Reader, clientAddr str
 		dnsHandler := func(dnsQuery []byte) ([]byte, error) {
 			return s.dnsClient.QueryRaw(dnsQuery)
 		}
-		
-		// Generic UDP handler for non-DNS traffic (e.g., WebRTC STUN)
-		udpHandler := func(target string, data []byte) ([]byte, error) {
-			return s.tunnelHandler.HandleUDPPacket(target, data, clientAddr)
-		}
-		
-		return socks5.HandleUDPAssociate(conn, clientAddr, dnsHandler, udpHandler)
+		return socks5.HandleUDPAssociate(conn, clientAddr, dnsHandler, s.tunnelHandler.Dial)
 	}
 
-	if err := socks5.HandleConnection(conn, reader, onConnect, onUDPAssociate); err != nil {
+	if err := socks5.HandleConnection(conn, reader, s.users, onConnect, onUDPAssociate); err != nil {
 		if !IsNormalCloseError(err) {
 			log.Printf("[SOCKS] %s proxy failed: %v", clientAddr, err)
 		}

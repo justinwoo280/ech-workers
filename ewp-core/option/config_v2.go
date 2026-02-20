@@ -40,14 +40,22 @@ type DNSServerConfig struct {
 	Detour  string `json:"detour,omitempty"`  // route through specific outbound
 }
 
+// UserConfig defines a proxy user with username and password.
+type UserConfig struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
 // InboundConfig defines an inbound connection handler
 type InboundConfig struct {
 	Type string `json:"type"` // mixed, socks, http, tun
 	Tag  string `json:"tag"`
 
 	// For socks/http/mixed
-	Listen string `json:"listen,omitempty"`
-	UDP    bool   `json:"udp,omitempty"`
+	Listen         string       `json:"listen,omitempty"`
+	UDP            bool         `json:"udp,omitempty"`
+	Users          []UserConfig `json:"users,omitempty"` // username/password auth (empty = no auth)
+	MaxConnections int          `json:"max_connections,omitempty"` // 0 = unlimited
 
 	// For TUN
 	InterfaceName string   `json:"interface_name,omitempty"`

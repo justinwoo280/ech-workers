@@ -104,46 +104,9 @@ func (h *TunnelHandler) HandleTunnel(conn net.Conn, target string, clientAddr st
 	return nil
 }
 
-func (h *TunnelHandler) HandleUDPPacket(target string, data []byte, clientAddr string) ([]byte, error) {
-	tunnelConn, err := h.transport.Dial()
-	if err != nil {
-		return nil, err
-	}
-	defer tunnelConn.Close()
-
-	// Send UDP packet through tunnel using UDP mode
-	if err := tunnelConn.ConnectUDP(target, data); err != nil {
-		return nil, err
-	}
-
-	// Wait for response with timeout
-	type readResult struct {
-		data []byte
-		err  error
-	}
-	
-	resultChan := make(chan readResult, 1)
-	
-	go func() {
-		buf := make([]byte, 65536)
-		n, err := tunnelConn.Read(buf)
-		if err != nil {
-			resultChan <- readResult{nil, err}
-			return
-		}
-		resultChan <- readResult{buf[:n], nil}
-	}()
-	
-	select {
-	case result := <-resultChan:
-		if result.err != nil {
-			return nil, result.err
-		}
-		log.V("[UDP Tunnel] %s -> %s: sent %d bytes, received %d bytes", clientAddr, target, len(data), len(result.data))
-		return result.data, nil
-	case <-time.After(5 * time.Second):
-		return nil, io.ErrUnexpectedEOF
-	}
+// Dial creates a new tunnel connection for UDP sessions.
+func (h *TunnelHandler) Dial() (transport.TunnelConn, error) {
+	return h.transport.Dial()
 }
 
 func IsNormalCloseError(err error) bool {

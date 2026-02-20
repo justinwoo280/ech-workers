@@ -1,132 +1,132 @@
 package server
 
 import (
-	"bytes"
 	"io"
-	"log"
 	"net"
 	"sync"
 	"time"
 
 	"ewp-core/protocol/ewp"
+	log "ewp-core/log"
 )
 
 // UDP 转发处理器 (服务端)
 // 实现 Full-Cone NAT，支持 P2P/游戏/语音
 
-var (
-	udpSessionManager = ewp.NewUDPSessionManager()
-	udpBufferPool     = sync.Pool{
-		New: func() interface{} {
-			return make([]byte, 65536)
-		},
-	}
-)
+const udpIdleTimeout = 5 * time.Minute
 
-// HandleUDPStream 处理 UDP 流 (通过 TCP 隧道)
-// reader: 从客户端读取 UDP 包
-// writer: 向客户端写入 UDP 响应
-func HandleUDPStream(reader io.Reader, writer io.Writer, done chan struct{}) {
+var udpBufferPool = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, 65536)
+	},
+}
+
+// udpHandler 封装单个客户端连接的 UDP 会话管理器。
+// 每次调用 HandleUDPConnection 时创建新实例，彻底消除跨连接会话污染。
+type udpHandler struct {
+	mgr *ewp.UDPSessionManager
+}
+
+func newUDPHandler() *udpHandler {
+	return &udpHandler{mgr: ewp.NewUDPSessionManager()}
+}
+
+// handleStream 阻塞式地从 reader 解码 UDP 包并分发处理。
+// 返回时关闭 done channel。
+func (h *udpHandler) handleStream(reader io.Reader, writer io.Writer, done chan struct{}) {
 	defer close(done)
 
 	for {
-		// 解码 UDP 包
 		pkt, err := ewp.DecodeUDPPacket(reader)
 		if err != nil {
 			if err != io.EOF {
-				log.Printf("❌ UDP decode error: %v", err)
+				log.Warn("UDP decode error: %v", err)
 			}
 			return
 		}
-
-		// 处理 UDP 包
-		go handleUDPPacket(pkt, writer)
+		go h.handlePacket(pkt, writer)
 	}
 }
 
-// handleUDPPacket 处理单个 UDP 包
-func handleUDPPacket(pkt *ewp.UDPPacket, writer io.Writer) {
-	// 获取或创建会话
-	session, _ := udpSessionManager.GetOrCreate(pkt.GlobalID)
+// handlePacket 处理单个 UDP 包（在 goroutine 中调用）。
+func (h *udpHandler) handlePacket(pkt *ewp.UDPPacket, writer io.Writer) {
+	session, _ := h.mgr.GetOrCreate(pkt.GlobalID)
 
 	session.Lock()
 	defer session.Unlock()
 
-	// 处理状态
 	switch pkt.Status {
 	case ewp.UDPStatusNew:
 		if pkt.Target == nil {
-			log.Printf("❌ UDP New packet without target")
+			log.Warn("UDP new packet without target")
 			return
 		}
 		session.LastTarget = pkt.Target
 
-		// 创建到目标的 UDP 连接
 		if session.RemoteConn == nil {
 			conn, err := net.DialUDP("udp", nil, pkt.Target)
 			if err != nil {
-				log.Printf("❌ UDP dial error: %v", err)
+				log.Warn("UDP dial error: %v", err)
 				return
 			}
 			session.RemoteConn = conn
-
-			// 启动接收协程
-			go receiveUDPResponses(session, writer)
+			go h.receiveResponses(session, writer)
 		}
 
-		log.Printf("📦 UDP New: %s (GlobalID: %x)", pkt.Target, pkt.GlobalID[:4])
+		log.Debug("UDP new session: %s (GlobalID: %x)", pkt.Target, pkt.GlobalID[:4])
 
 	case ewp.UDPStatusKeep:
-		// 更新目标地址（如果提供）
 		if pkt.Target != nil {
 			session.LastTarget = pkt.Target
 		}
-
-		// 如果连接不存在，需要重新建立
 		if session.RemoteConn == nil && session.LastTarget != nil {
 			conn, err := net.DialUDP("udp", nil, session.LastTarget)
 			if err != nil {
-				log.Printf("❌ UDP dial error: %v", err)
+				log.Warn("UDP dial error: %v", err)
 				return
 			}
 			session.RemoteConn = conn
-			go receiveUDPResponses(session, writer)
+			go h.receiveResponses(session, writer)
 		}
 
 	case ewp.UDPStatusEnd:
-		// 关闭会话
-		udpSessionManager.Remove(pkt.GlobalID)
-		log.Printf("📦 UDP End: GlobalID %x", pkt.GlobalID[:4])
+		h.mgr.Remove(pkt.GlobalID)
+		log.Debug("UDP session ended (GlobalID: %x)", pkt.GlobalID[:4])
 		return
 	}
 
-	// 发送数据到目标
 	if session.RemoteConn != nil && len(pkt.Payload) > 0 {
-		_, err := session.RemoteConn.Write(pkt.Payload)
-		if err != nil {
-			log.Printf("❌ UDP write error: %v", err)
+		if _, err := session.RemoteConn.Write(pkt.Payload); err != nil {
+			log.Warn("UDP write error: %v", err)
 			return
 		}
+		h.mgr.Touch(pkt.GlobalID)
 	}
 }
 
-// receiveUDPResponses 接收 UDP 响应并发送回客户端
-func receiveUDPResponses(session *ewp.UDPSession, writer io.Writer) {
+// receiveResponses 接收远端 UDP 响应并转发给客户端。
+func (h *udpHandler) receiveResponses(session *ewp.UDPSession, writer io.Writer) {
 	buf := udpBufferPool.Get().([]byte)
 	defer udpBufferPool.Put(buf)
+
+	const readDeadline = 30 * time.Second
 
 	for {
 		session.Lock()
 		conn := session.RemoteConn
+		lastActive := session.LastActive
 		session.Unlock()
 
 		if conn == nil {
 			return
 		}
 
-		// 设置读取超时
-		conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		if !lastActive.IsZero() && time.Since(lastActive) > udpIdleTimeout {
+			h.mgr.Remove(session.GlobalID)
+			return
+		}
 
+		conn.SetReadDeadline(time.Now().Add(readDeadline))
 		n, remoteAddr, err := conn.ReadFromUDP(buf)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
@@ -139,7 +139,8 @@ func receiveUDPResponses(session *ewp.UDPSession, writer io.Writer) {
 			continue
 		}
 
-		// 构建响应包
+		h.mgr.Touch(session.GlobalID)
+
 		respPkt := &ewp.UDPPacket{
 			GlobalID: session.GlobalID,
 			Status:   ewp.UDPStatusKeep,
@@ -147,31 +148,41 @@ func receiveUDPResponses(session *ewp.UDPSession, writer io.Writer) {
 			Payload:  buf[:n],
 		}
 
-		// 编码并发送
 		data, err := ewp.EncodeUDPPacket(respPkt)
 		if err != nil {
-			log.Printf("❌ UDP encode error: %v", err)
+			log.Warn("UDP encode error: %v", err)
 			continue
 		}
 
 		if _, err := writer.Write(data); err != nil {
-			log.Printf("❌ UDP response write error: %v", err)
+			log.Warn("UDP response write error: %v", err)
 			return
 		}
 	}
 }
 
-// HandleUDPConnection 处理 UDP 模式的连接 (用于 EWP CommandUDP)
+// HandleUDPConnection 处理 UDP 模式的连接 (用于 EWP CommandUDP)。
+// 每次调用创建独立的会话管理器，彻底隔离不同客户端连接的 UDP 状态。
 func HandleUDPConnection(reader io.Reader, writer io.Writer) {
+	h := newUDPHandler()
 	done := make(chan struct{})
+	sw := &syncWriter{w: writer}
 
-	// 使用带缓冲的 writer
-	bufWriter := &syncWriter{w: writer}
+	go h.handleStream(reader, sw, done)
 
-	go HandleUDPStream(reader, bufWriter, done)
+	cleanupTicker := time.NewTicker(1 * time.Minute)
+	defer cleanupTicker.Stop()
 
-	<-done
-	log.Printf("✅ UDP connection closed")
+	for {
+		select {
+		case <-done:
+			h.mgr.Close()
+			log.Info("UDP connection closed")
+			return
+		case <-cleanupTicker.C:
+			h.mgr.CloseIdle(udpIdleTimeout)
+		}
+	}
 }
 
 // syncWriter 线程安全的 writer
@@ -186,36 +197,4 @@ func (w *syncWriter) Write(p []byte) (int, error) {
 	return w.w.Write(p)
 }
 
-// CleanupUDPSessions 清理所有 UDP 会话
-func CleanupUDPSessions() {
-	udpSessionManager.Close()
-}
 
-// IsUDPTarget 检查目标是否是 UDP 模式标识
-func IsUDPTarget(target string) bool {
-	return len(target) >= 6 && target[:6] == "udp://"
-}
-
-// HandleUDPStreamBidirectional 处理双向 UDP 流
-func HandleUDPStreamBidirectional(rw io.ReadWriter) {
-	done := make(chan struct{})
-	
-	// 创建缓冲读取器
-	bufReader := &bytes.Buffer{}
-	
-	// 启动读取协程
-	go func() {
-		buf := make([]byte, 65536)
-		for {
-			n, err := rw.Read(buf)
-			if err != nil {
-				close(done)
-				return
-			}
-			bufReader.Write(buf[:n])
-		}
-	}()
-
-	// 处理 UDP 流
-	HandleUDPStream(bufReader, rw, done)
-}

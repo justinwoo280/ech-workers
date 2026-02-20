@@ -35,6 +35,7 @@ type StreamDownConn struct {
 	mu                sync.Mutex
 	flowState         *ewp.FlowState
 	writeOnceUserUUID []byte
+	udpGlobalID       [8]byte
 }
 
 func NewStreamDownConn(httpClient *http.Client, host, port, path string, uuid [16]byte, uuidStr, password string, enableFlow, useTrojan bool, transport *Transport) *StreamDownConn {
@@ -279,37 +280,54 @@ func (c *StreamDownConn) ConnectUDP(target string, initialData []byte) error {
 
 	c.respBody = getResp.Body
 
-	// Send initial UDP packet if provided (with UDP framing)
-	if len(initialData) > 0 {
-		udpAddr, err := net.ResolveUDPAddr("udp", target)
-		if err != nil {
-			return fmt.Errorf("resolve UDP address: %w", err)
-		}
+	// Always send UDPStatusNew to establish session on server (with target address)
+	udpAddr, err := net.ResolveUDPAddr("udp", target)
+	if err != nil {
+		return fmt.Errorf("resolve UDP address: %w", err)
+	}
 
-		// Generate GlobalID for this session
-		pseudoLocalAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}
-		globalID := ewp.GenerateGlobalID(pseudoLocalAddr)
+	c.udpGlobalID = ewp.NewGlobalID()
 
-		pkt := &ewp.UDPPacket{
-			GlobalID: globalID,
-			Status:   ewp.UDPStatusNew,
-			Target:   udpAddr,
-			Payload:  initialData,
-		}
+	pkt := &ewp.UDPPacket{
+		GlobalID: c.udpGlobalID,
+		Status:   ewp.UDPStatusNew,
+		Target:   udpAddr,
+		Payload:  initialData,
+	}
 
-		encoded, err := ewp.EncodeUDPPacket(pkt)
-		if err != nil {
-			return fmt.Errorf("encode UDP packet: %w", err)
-		}
+	encoded, err := ewp.EncodeUDPPacket(pkt)
+	if err != nil {
+		return fmt.Errorf("encode UDP packet: %w", err)
+	}
 
-		if err := c.Write(encoded); err != nil {
-			return fmt.Errorf("send initial UDP packet: %w", err)
-		}
+	if err := c.Write(encoded); err != nil {
+		return fmt.Errorf("send UDP new packet: %w", err)
 	}
 
 	c.connected = true
 	log.V("[XHTTP] stream-down UDP handshake success, target: %s, SessionID: %s", target, c.sessionID)
 	return nil
+}
+
+// WriteUDP sends a subsequent UDP packet over the established UDP tunnel (StatusKeep)
+func (c *StreamDownConn) WriteUDP(target string, data []byte) error {
+	encoded, err := ewp.EncodeUDPKeepPacket(c.udpGlobalID, data)
+	if err != nil {
+		return fmt.Errorf("encode UDP keep packet: %w", err)
+	}
+	return c.Write(encoded)
+}
+
+// ReadUDP reads and decodes an EWP-framed UDP response packet from the streaming response
+func (c *StreamDownConn) ReadUDP() ([]byte, error) {
+	if c.respBody == nil {
+		return nil, errors.New("not connected")
+	}
+	pkt, err := ewp.DecodeUDPPacket(c.respBody)
+	if err != nil {
+		return nil, err
+	}
+	return pkt.Payload, nil
 }
 
 func (c *StreamDownConn) Read(buf []byte) (int, error) {

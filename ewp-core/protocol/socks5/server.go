@@ -1,7 +1,8 @@
-﻿package socks5
+package socks5
 
 import (
 	"bufio"
+	"crypto/subtle"
 	"fmt"
 	"io"
 	"net"
@@ -13,9 +14,10 @@ import (
 const (
 	Version5 = 0x05
 
-	AuthMethodNone     = 0x00
-	AuthMethodPassword = 0x02
-	AuthMethodNoAccept = 0xFF
+	AuthMethodNone        = 0x00
+	AuthMethodPassword    = 0x02
+	AuthMethodNoAccept    = 0xFF
+	AuthSubnegotiation    = 0x01 // RFC 1929 sub-negotiation version
 
 	CommandConnect      = 0x01
 	CommandBind         = 0x02
@@ -36,6 +38,9 @@ const (
 	ReplyAddressNotSupported  = 0x08
 )
 
+// Users maps username → password for authentication. nil or empty means no auth required.
+type Users map[string]string
+
 type Request struct {
 	Version     byte
 	Command     byte
@@ -45,10 +50,10 @@ type Request struct {
 	Target      string
 }
 
-func HandleConnection(conn net.Conn, reader *bufio.Reader, onConnect func(net.Conn, *Request, []byte) error, onUDPAssociate func(net.Conn, string) error) error {
+func HandleConnection(conn net.Conn, reader *bufio.Reader, users Users, onConnect func(net.Conn, *Request, []byte) error, onUDPAssociate func(net.Conn, string) error) error {
 	clientAddr := conn.RemoteAddr().String()
 
-	if err := handshake(reader, conn); err != nil {
+	if err := handshake(reader, conn, users); err != nil {
 		log.V("[SOCKS] %s handshake failed: %v", clientAddr, err)
 		return err
 	}
@@ -74,7 +79,7 @@ func HandleConnection(conn net.Conn, reader *bufio.Reader, onConnect func(net.Co
 	}
 }
 
-func handshake(reader *bufio.Reader, conn net.Conn) error {
+func handshake(reader *bufio.Reader, conn net.Conn, users Users) error {
 	buf := make([]byte, 2)
 	if _, err := io.ReadFull(reader, buf); err != nil {
 		return err
@@ -92,11 +97,69 @@ func handshake(reader *bufio.Reader, conn net.Conn) error {
 		return err
 	}
 
-	if _, err := conn.Write([]byte{Version5, AuthMethodNone}); err != nil {
+	requireAuth := len(users) > 0
+
+	if !requireAuth {
+		_, err := conn.Write([]byte{Version5, AuthMethodNone})
 		return err
 	}
 
-	return nil
+	// Check if client supports username/password auth.
+	clientSupportsAuth := false
+	for _, m := range methods {
+		if m == AuthMethodPassword {
+			clientSupportsAuth = true
+			break
+		}
+	}
+	if !clientSupportsAuth {
+		conn.Write([]byte{Version5, AuthMethodNoAccept})
+		return fmt.Errorf("client does not support username/password auth")
+	}
+
+	// Tell client to use username/password auth.
+	if _, err := conn.Write([]byte{Version5, AuthMethodPassword}); err != nil {
+		return err
+	}
+
+	// RFC 1929 sub-negotiation: read username/password.
+	header := make([]byte, 2)
+	if _, err := io.ReadFull(reader, header); err != nil {
+		return err
+	}
+	if header[0] != AuthSubnegotiation {
+		return fmt.Errorf("invalid auth sub-negotiation version: 0x%02x", header[0])
+	}
+
+	ulen := int(header[1])
+	ubuf := make([]byte, ulen)
+	if _, err := io.ReadFull(reader, ubuf); err != nil {
+		return err
+	}
+
+	plenBuf := make([]byte, 1)
+	if _, err := io.ReadFull(reader, plenBuf); err != nil {
+		return err
+	}
+	pbuf := make([]byte, int(plenBuf[0]))
+	if _, err := io.ReadFull(reader, pbuf); err != nil {
+		return err
+	}
+
+	username := string(ubuf)
+	password := string(pbuf)
+
+	// Constant-time comparison to prevent timing attacks.
+	expectedPass, ok := users[username]
+	authOK := ok && subtle.ConstantTimeCompare([]byte(password), []byte(expectedPass)) == 1
+
+	if !authOK {
+		conn.Write([]byte{AuthSubnegotiation, 0xFF})
+		return fmt.Errorf("authentication failed for user: %s", username)
+	}
+
+	_, err := conn.Write([]byte{AuthSubnegotiation, 0x00})
+	return err
 }
 
 func readRequest(reader *bufio.Reader) (*Request, error) {

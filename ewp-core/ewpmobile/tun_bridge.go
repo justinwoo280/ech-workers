@@ -23,20 +23,20 @@ import (
 // bridgeLogger implements logger.Logger for sing-tun
 type bridgeLogger struct{}
 
-func (l *bridgeLogger) Trace(args ...interface{})                             { log.V(fmt.Sprint(args...)) }
-func (l *bridgeLogger) Debug(args ...interface{})                             { log.V(fmt.Sprint(args...)) }
-func (l *bridgeLogger) Info(args ...interface{})                              { log.Printf(fmt.Sprint(args...)) }
-func (l *bridgeLogger) Warn(args ...interface{})                              { log.Printf(fmt.Sprint(args...)) }
-func (l *bridgeLogger) Error(args ...interface{})                             { log.Printf(fmt.Sprint(args...)) }
-func (l *bridgeLogger) Fatal(args ...interface{})                             { log.Printf(fmt.Sprint(args...)) }
-func (l *bridgeLogger) Panic(args ...interface{})                             { log.Printf(fmt.Sprint(args...)) }
-func (l *bridgeLogger) TraceContext(ctx context.Context, args ...interface{}) { log.V(fmt.Sprint(args...)) }
-func (l *bridgeLogger) DebugContext(ctx context.Context, args ...interface{}) { log.V(fmt.Sprint(args...)) }
-func (l *bridgeLogger) InfoContext(ctx context.Context, args ...interface{})  { log.Printf(fmt.Sprint(args...)) }
-func (l *bridgeLogger) WarnContext(ctx context.Context, args ...interface{})  { log.Printf(fmt.Sprint(args...)) }
-func (l *bridgeLogger) ErrorContext(ctx context.Context, args ...interface{}) { log.Printf(fmt.Sprint(args...)) }
-func (l *bridgeLogger) FatalContext(ctx context.Context, args ...interface{}) { log.Printf(fmt.Sprint(args...)) }
-func (l *bridgeLogger) PanicContext(ctx context.Context, args ...interface{}) { log.Printf(fmt.Sprint(args...)) }
+func (l *bridgeLogger) Trace(args ...interface{})                             { log.V("%s", fmt.Sprint(args...)) }
+func (l *bridgeLogger) Debug(args ...interface{})                             { log.V("%s", fmt.Sprint(args...)) }
+func (l *bridgeLogger) Info(args ...interface{})                              { log.Printf("%s", fmt.Sprint(args...)) }
+func (l *bridgeLogger) Warn(args ...interface{})                              { log.Printf("%s", fmt.Sprint(args...)) }
+func (l *bridgeLogger) Error(args ...interface{})                             { log.Printf("%s", fmt.Sprint(args...)) }
+func (l *bridgeLogger) Fatal(args ...interface{})                             { log.Printf("%s", fmt.Sprint(args...)) }
+func (l *bridgeLogger) Panic(args ...interface{})                             { log.Printf("%s", fmt.Sprint(args...)) }
+func (l *bridgeLogger) TraceContext(ctx context.Context, args ...interface{}) { log.V("%s", fmt.Sprint(args...)) }
+func (l *bridgeLogger) DebugContext(ctx context.Context, args ...interface{}) { log.V("%s", fmt.Sprint(args...)) }
+func (l *bridgeLogger) InfoContext(ctx context.Context, args ...interface{})  { log.Printf("%s", fmt.Sprint(args...)) }
+func (l *bridgeLogger) WarnContext(ctx context.Context, args ...interface{})  { log.Printf("%s", fmt.Sprint(args...)) }
+func (l *bridgeLogger) ErrorContext(ctx context.Context, args ...interface{}) { log.Printf("%s", fmt.Sprint(args...)) }
+func (l *bridgeLogger) FatalContext(ctx context.Context, args ...interface{}) { log.Printf("%s", fmt.Sprint(args...)) }
+func (l *bridgeLogger) PanicContext(ctx context.Context, args ...interface{}) { log.Printf("%s", fmt.Sprint(args...)) }
 
 var _ logger.Logger = (*bridgeLogger)(nil)
 

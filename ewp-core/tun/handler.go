@@ -60,37 +60,35 @@ func (h *Handler) NewConnectionEx(ctx context.Context, conn net.Conn, source M.S
 
 	log.Printf("[TUN TCP] Connected: %s", target)
 
-	done := make(chan bool, 2)
+	done := make(chan struct{})
 
 	go func() {
 		buf := commpool.GetLarge()
 		defer commpool.PutLarge(buf)
+		defer close(done)
 
 		for {
 			n, err := conn.Read(buf)
 			if err != nil {
-				done <- true
 				return
 			}
-
 			if err := tunnelConn.Write(buf[:n]); err != nil {
-				done <- true
 				return
 			}
 		}
 	}()
 
 	go func() {
-		buf := make([]byte, 32*1024)
+		buf := commpool.GetLarge()
+		defer commpool.PutLarge(buf)
+
 		for {
 			n, err := tunnelConn.Read(buf)
 			if err != nil {
-				done <- true
+				conn.Close()
 				return
 			}
-
 			if _, err := conn.Write(buf[:n]); err != nil {
-				done <- true
 				return
 			}
 		}
@@ -152,7 +150,7 @@ func (h *Handler) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 			packet := buffer.Bytes()
 			udpTarget := addr.String()
 			
-			if err := tunnelConn.ConnectUDP(udpTarget, packet); err != nil {
+			if err := tunnelConn.WriteUDP(udpTarget, packet); err != nil {
 				log.V("[TUN UDP] Packet send failed: %v", err)
 				continue
 			}
@@ -160,23 +158,21 @@ func (h *Handler) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 	}()
 
 	go func() {
-		readBuf := make([]byte, 32*1024)
 		for {
-			n, err := tunnelConn.Read(readBuf)
+			payload, err := tunnelConn.ReadUDP()
 			if err != nil {
 				done <- true
 				return
 			}
 
-			buffer := buf.NewSize(n)
-			buffer.Write(readBuf[:n])
+			buffer := buf.NewSize(len(payload))
+			buffer.Write(payload)
 			
 			if err := conn.WritePacket(buffer, destination); err != nil {
 				buffer.Release()
 				log.V("[TUN UDP] Response write failed: %v", err)
 				continue
 			}
-			buffer.Release()
 		}
 	}()
 

@@ -29,8 +29,8 @@ const (
 	MaxPaddingLength = 255
 	TimeWindow       = 120
 
-	MinPayloadLength = 64
-	MaxPayloadLength = 512
+	MinPayloadLength = 80  // min ciphertext = min plaintext(64) + Poly1305 tag(16)
+	MaxPayloadLength = 768 // max ciphertext = max plaintext(~537) + tag(16) = ~553, rounded up
 )
 
 var (
@@ -106,7 +106,7 @@ func (r *HandshakeRequest) Encode() ([]byte, error) {
 	// === 1. 构建 AD (Authenticated Data) ===
 	buf[0] = r.Version
 	copy(buf[1:13], r.Nonce[:])
-	binary.BigEndian.PutUint16(buf[13:15], uint16(plaintextLen))
+	binary.BigEndian.PutUint16(buf[13:15], uint16(plaintextLen+16)) // ciphertext length = plaintext + Poly1305 tag
 	ad := buf[:15]
 	
 	// === 2. 构建 Plaintext (先临时写入，后续原地加密) ===
