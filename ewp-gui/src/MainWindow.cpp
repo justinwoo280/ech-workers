@@ -259,7 +259,7 @@ void MainWindow::onAddNode()
 {
     EWPNode node;
     node.name = "新节点";
-    node.serverAddress = "example.com";
+    node.serverIP = "example.com";
     node.serverPort = 443;
     node.uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
     

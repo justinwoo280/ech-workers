@@ -18,19 +18,20 @@ import (
 
 // Transport implements WebSocket transport
 type Transport struct {
-	serverAddr        string
-	serverIP          string
-	token             string
-	password          string  // Trojan password
-	uuid              [16]byte
-	useECH            bool
-	enableFlow        bool
-	enablePQC         bool
-	useTrojan         bool    // Use Trojan protocol instead of EWP
-	path              string
-	host              string
-	headers           map[string]string
-	echManager        *commontls.ECHManager
+	serverAddr string
+	serverIP   string
+	token      string
+	password   string // Trojan password
+	uuid       [16]byte
+	useECH     bool
+	enableFlow bool
+	enablePQC  bool
+	useTrojan  bool // Use Trojan protocol instead of EWP
+	path       string
+	host       string
+	headers    map[string]string
+	echManager *commontls.ECHManager
+	bypassCfg  *transport.BypassConfig
 }
 
 // New creates a new WebSocket transport
@@ -54,18 +55,18 @@ func NewWithProtocol(serverAddr, serverIP, token, password string, useECH, enabl
 	}
 
 	return &Transport{
-		serverAddr:        serverAddr,
-		serverIP:          serverIP,
-		token:             token,
-		password:          password,
-		uuid:              uuid,
-		useECH:            useECH,
-		enableFlow:        enableFlow,
-		enablePQC:         enablePQC,
-		useTrojan:         useTrojan,
-		path:              path,
-		headers:           make(map[string]string),
-		echManager:        echMgr,
+		serverAddr: serverAddr,
+		serverIP:   serverIP,
+		token:      token,
+		password:   password,
+		uuid:       uuid,
+		useECH:     useECH,
+		enableFlow: enableFlow,
+		enablePQC:  enablePQC,
+		useTrojan:  useTrojan,
+		path:       path,
+		headers:    make(map[string]string),
+		echManager: echMgr,
 	}, nil
 }
 
@@ -140,12 +141,11 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 		}
 	}
 
-	// Configure dialer with TCP Fast Open support
+	// Configure dialer — use bypass dialer in TUN mode to avoid routing loops
 	dialer := websocket.Dialer{
 		TLSClientConfig:  stdConfig,
 		HandshakeTimeout: 10 * time.Second,
 		NetDial: func(network, address string) (net.Conn, error) {
-			// Use resolved IP if available
 			if resolvedIP != "" {
 				_, p, err := net.SplitHostPort(address)
 				if err != nil {
@@ -154,7 +154,9 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 				address = net.JoinHostPort(resolvedIP, p)
 				log.Printf("[WebSocket] Connecting to: %s (SNI: %s)", address, parsed.Host)
 			}
-			// Use TCP Fast Open for reduced latency
+			if t.bypassCfg != nil && t.bypassCfg.TCPDialer != nil {
+				return t.bypassCfg.TCPDialer.Dial(network, address)
+			}
 			return commonnet.DialTFO(network, address, 10*time.Second)
 		},
 	}
@@ -196,7 +198,11 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 	if t.enableFlow {
 		return NewFlowConn(wsConn, t.uuid), nil
 	}
-	return NewSimpleConn(wsConn, t.token), nil
+	return NewSimpleConnWithUUID(wsConn, t.uuid), nil
+}
+
+func (t *Transport) SetBypassConfig(cfg *transport.BypassConfig) {
+	t.bypassCfg = cfg
 }
 
 func (t *Transport) SetHost(host string) *Transport {

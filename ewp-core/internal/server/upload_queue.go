@@ -99,7 +99,7 @@ func (q *UploadQueue) Read(b []byte) (int, error) {
 				return 0, io.ErrShortBuffer
 			}
 			heap.Push(&q.heap, packet)
-			
+
 			q.mu.Unlock()
 			packet2, more := <-q.pushedPackets
 			q.mu.Lock()

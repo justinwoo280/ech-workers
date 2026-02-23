@@ -330,6 +330,19 @@ func (c *StreamDownConn) ReadUDP() ([]byte, error) {
 	return pkt.Payload, nil
 }
 
+// ReadUDPTo reads and decodes an EWP-framed UDP response packet directly into the provided buffer
+func (c *StreamDownConn) ReadUDPTo(buf []byte) (int, error) {
+	if c.respBody == nil {
+		return 0, errors.New("not connected")
+	}
+	pkt, err := ewp.DecodeUDPPacket(c.respBody)
+	if err != nil {
+		return 0, err
+	}
+	n := copy(buf, pkt.Payload)
+	return n, nil
+}
+
 func (c *StreamDownConn) Read(buf []byte) (int, error) {
 	if c.respBody == nil {
 		return 0, errors.New("not connected")

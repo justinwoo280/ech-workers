@@ -29,19 +29,19 @@ type TransportAdapter interface {
 }
 
 type TunnelForwarder struct {
-	transport   TransportAdapter
-	remote      net.Conn
-	flowState   *ewp.FlowState
-	bufferPool  *sync.Pool
-	done        chan struct{}
-	enableFlow  bool
+	transport  TransportAdapter
+	remote     net.Conn
+	flowState  *ewp.FlowState
+	bufferPool *sync.Pool
+	done       chan struct{}
+	enableFlow bool
 }
 
 func NewTunnelForwarder(transport TransportAdapter, remote net.Conn, flowState *ewp.FlowState) *TunnelForwarder {
 	return &TunnelForwarder{
-		transport:  transport,
-		remote:     remote,
-		flowState:  flowState,
+		transport: transport,
+		remote:    remote,
+		flowState: flowState,
 		bufferPool: &sync.Pool{
 			New: func() interface{} {
 				return make([]byte, 32*1024)

@@ -199,6 +199,18 @@ func (c *FlowConn) ReadUDP() ([]byte, error) {
 	return ewp.DecodeUDPPayload(msg)
 }
 
+// ReadUDPTo reads and decodes an EWP-framed UDP response packet directly into the provided buffer
+func (c *FlowConn) ReadUDPTo(buf []byte) (int, error) {
+	_, msg, err := c.conn.ReadMessage()
+	if err != nil {
+		return 0, err
+	}
+	if c.flowState != nil {
+		msg = c.flowState.ProcessDownlink(msg)
+	}
+	return ewp.DecodeUDPPayloadTo(msg, buf)
+}
+
 // Read reads data from WebSocket with Flow protocol unpacking
 func (c *FlowConn) Read(buf []byte) (int, error) {
 	_, msg, err := c.conn.ReadMessage()

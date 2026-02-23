@@ -1,3 +1,4 @@
+//go:build linux
 // +build linux
 
 package net
@@ -21,7 +22,7 @@ func enableTFO(fd int) error {
 		log.V("[TFO] Failed to enable TCP Fast Open on Linux: %v", err)
 		return err
 	}
-	
+
 	log.V("[TFO] TCP Fast Open enabled on socket %d", fd)
 	return nil
 }
@@ -36,7 +37,7 @@ func enableTFOListener(fd int) error {
 		log.V("[TFO] Failed to enable TCP Fast Open on listener (Linux): %v", err)
 		return err
 	}
-	
+
 	log.V("[TFO] TCP Fast Open enabled on listener socket %d (queue=128)", fd)
 	return nil
 }

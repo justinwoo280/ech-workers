@@ -68,7 +68,7 @@ func ParseResponse(response []byte) (string, error) {
 			// HTTPS record data format:
 			// Priority (2 bytes) + Target (variable) + SvcParams (variable)
 			// ECH is in SvcParams with key 5
-			
+
 			if dataLen < 3 {
 				offset += dataLen
 				continue
@@ -76,7 +76,7 @@ func ParseResponse(response []byte) (string, error) {
 
 			// Skip priority (2 bytes)
 			dataOffset := offset + 2
-			
+
 			// Skip target name
 			for dataOffset < offset+dataLen && response[dataOffset] != 0 {
 				labelLen := int(response[dataOffset])

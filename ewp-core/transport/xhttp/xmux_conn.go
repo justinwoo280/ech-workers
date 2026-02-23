@@ -9,11 +9,11 @@ import (
 
 // XmuxHTTPClient 包装 HTTP 客户端实现 XmuxConn 接口
 type XmuxHTTPClient struct {
-	client      *http.Client
-	closed      int32  // 使用 atomic 操作
-	lastActive  int64  // UnixNano 时间戳
+	client       *http.Client
+	closed       int32 // 使用 atomic 操作
+	lastActive   int64 // UnixNano 时间戳
 	requestCount int64 // 请求计数
-	mu          sync.RWMutex
+	mu           sync.RWMutex
 }
 
 // NewXmuxHTTPClient 创建新的 Xmux HTTP 客户端
@@ -34,12 +34,12 @@ func (x *XmuxHTTPClient) Close() error {
 	if !atomic.CompareAndSwapInt32(&x.closed, 0, 1) {
 		return nil // 已经关闭
 	}
-	
+
 	// 关闭 HTTP 客户端的空闲连接
 	if transport, ok := x.client.Transport.(*http.Transport); ok {
 		transport.CloseIdleConnections()
 	}
-	
+
 	return nil
 }
 
@@ -67,11 +67,11 @@ func (x *XmuxHTTPClient) GetClient() *http.Client {
 
 // XmuxStreamOneConn 包装 StreamOneConn 实现 XmuxConn 接口
 type XmuxStreamOneConn struct {
-	conn        *StreamOneConn
-	closed      int32
-	lastActive  int64
+	conn         *StreamOneConn
+	closed       int32
+	lastActive   int64
 	requestCount int64
-	mu          sync.RWMutex
+	mu           sync.RWMutex
 }
 
 // NewXmuxStreamOneConn 创建新的 Xmux StreamOne 连接
@@ -92,7 +92,7 @@ func (x *XmuxStreamOneConn) Close() error {
 	if !atomic.CompareAndSwapInt32(&x.closed, 0, 1) {
 		return nil // 已经关闭
 	}
-	
+
 	return x.conn.Close()
 }
 
@@ -120,11 +120,11 @@ func (x *XmuxStreamOneConn) GetConn() *StreamOneConn {
 
 // XmuxStreamDownConn 包装 StreamDownConn 实现 XmuxConn 接口
 type XmuxStreamDownConn struct {
-	conn        *StreamDownConn
-	closed      int32
-	lastActive  int64
+	conn         *StreamDownConn
+	closed       int32
+	lastActive   int64
 	requestCount int64
-	mu          sync.RWMutex
+	mu           sync.RWMutex
 }
 
 // NewXmuxStreamDownConn 创建新的 Xmux StreamDown 连接
@@ -145,7 +145,7 @@ func (x *XmuxStreamDownConn) Close() error {
 	if !atomic.CompareAndSwapInt32(&x.closed, 0, 1) {
 		return nil // 已经关闭
 	}
-	
+
 	return x.conn.Close()
 }
 

@@ -3,6 +3,7 @@ package tun
 import (
 	"context"
 	"net"
+	"sync"
 	"time"
 
 	commpool "ewp-core/common/bufferpool"
@@ -60,41 +61,44 @@ func (h *Handler) NewConnectionEx(ctx context.Context, conn net.Conn, source M.S
 
 	log.Printf("[TUN TCP] Connected: %s", target)
 
-	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
 
 	go func() {
-		buf := commpool.GetLarge()
-		defer commpool.PutLarge(buf)
-		defer close(done)
-
+		defer wg.Done()
+		b := commpool.GetLarge()
+		defer commpool.PutLarge(b)
 		for {
-			n, err := conn.Read(buf)
+			n, err := conn.Read(b)
 			if err != nil {
+				tunnelConn.Close()
 				return
 			}
-			if err := tunnelConn.Write(buf[:n]); err != nil {
+			if err := tunnelConn.Write(b[:n]); err != nil {
+				conn.Close()
 				return
 			}
 		}
 	}()
 
 	go func() {
-		buf := commpool.GetLarge()
-		defer commpool.PutLarge(buf)
-
+		defer wg.Done()
+		b := commpool.GetLarge()
+		defer commpool.PutLarge(b)
 		for {
-			n, err := tunnelConn.Read(buf)
+			n, err := tunnelConn.Read(b)
 			if err != nil {
 				conn.Close()
 				return
 			}
-			if _, err := conn.Write(buf[:n]); err != nil {
+			if _, err := conn.Write(b[:n]); err != nil {
+				tunnelConn.Close()
 				return
 			}
 		}
 	}()
 
-	<-done
+	wg.Wait()
 	log.Printf("[TUN TCP] Disconnected: %s", target)
 }
 
@@ -106,8 +110,7 @@ func (h *Handler) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 	}()
 
 	target := destination.String()
-	
-	// Detect WebRTC STUN/TURN requests
+
 	if destination.Port == 3478 || destination.Port == 19302 {
 		log.Printf("[TUN WebRTC] STUN request intercepted: %s -> %s (tunneled)", source, target)
 	} else {
@@ -133,51 +136,57 @@ func (h *Handler) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 
 	log.V("[TUN UDP] Connected: %s", target)
 
-	done := make(chan bool, 2)
+	// wg ensures both goroutines finish before defers run (conn/tunnelConn.Close).
+	// Previously a bare channel <-done exited after the first goroutine signalled,
+	// leaving the second goroutine writing to already-closed connections.
+	var wg sync.WaitGroup
+	wg.Add(2)
 
+	// TUN → tunnel
 	go func() {
-		buffer := buf.New()
-		defer buffer.Release()
-		
+		defer wg.Done()
+		readBuf := buf.New()
+		defer readBuf.Release()
 		for {
-			buffer.Reset()
-			addr, err := conn.ReadPacket(buffer)
+			readBuf.Reset()
+			addr, err := conn.ReadPacket(readBuf)
 			if err != nil {
-				done <- true
+				tunnelConn.Close()
 				return
 			}
-
-			packet := buffer.Bytes()
-			udpTarget := addr.String()
-			
-			if err := tunnelConn.WriteUDP(udpTarget, packet); err != nil {
+			if err := tunnelConn.WriteUDP(addr.String(), readBuf.Bytes()); err != nil {
 				log.V("[TUN UDP] Packet send failed: %v", err)
-				done <- true
+				conn.Close()
 				return
 			}
 		}
 	}()
 
+	// tunnel → TUN
+	// ReadUDPTo reads payload directly into the provided buffer; we wrap it in a pooled sing
+	// buffer (buf.New, not buf.NewSize) so WritePacket can return it to the pool.
 	go func() {
+		defer wg.Done()
 		for {
-			payload, err := tunnelConn.ReadUDP()
+			// Allocate from sing's fixed-size pool (better pool hit rate than NewSize).
+			writeBuf := buf.New()
+			n, err := tunnelConn.ReadUDPTo(writeBuf.FreeBytes())
 			if err != nil {
-				done <- true
+				writeBuf.Release()
+				conn.Close()
 				return
 			}
-
-			buffer := buf.NewSize(len(payload))
-			buffer.Write(payload)
-			
-			if err := conn.WritePacket(buffer, destination); err != nil {
-				buffer.Release()
+			writeBuf.Resize(0, n)
+			if err := conn.WritePacket(writeBuf, destination); err != nil {
+				writeBuf.Release()
 				log.V("[TUN UDP] Response write failed: %v", err)
-				done <- true
+				tunnelConn.Close()
 				return
 			}
+			// On success WritePacket takes ownership; no Release needed here.
 		}
 	}()
 
-	<-done
+	wg.Wait()
 	log.V("[TUN UDP] Disconnected: %s", target)
 }

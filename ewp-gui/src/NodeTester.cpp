@@ -24,8 +24,7 @@ void NodeTester::startTest()
 {
     timer.start();
     
-    QString host = node.serverIP.isEmpty() ? node.serverAddress : node.serverIP;
-    socket->connectToHost(host, node.serverPort);
+    socket->connectToHost(node.serverIP, node.serverPort);
 }
 
 void NodeTester::onConnected()

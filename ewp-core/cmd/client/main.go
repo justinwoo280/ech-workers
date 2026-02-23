@@ -35,16 +35,6 @@ func main() {
 	log.Info("EWP-Core Client")
 	log.Info("Config: Inbounds=%d, Outbounds=%d", len(cfg.Inbounds), len(cfg.Outbounds))
 
-	// Setup signal handler
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	go func() {
-		<-sigChan
-		log.Info("Received exit signal, shutting down...")
-		os.Exit(0)
-	}()
-
 	// Get the first outbound (primary proxy)
 	if len(cfg.Outbounds) == 0 {
 		log.Fatalf("No outbound configured")
@@ -87,11 +77,11 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 
 	// Determine server address
 	serverAddr := net.JoinHostPort(outbound.Server, fmt.Sprint(outbound.ServerPort))
-	
+
 	// Determine authentication
 	var uuid, password string
 	useTrojan := outbound.Type == "trojan"
-	
+
 	if useTrojan {
 		password = outbound.Password
 		log.Info("Protocol: Trojan")
@@ -103,11 +93,11 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 	// Initialize ECH manager
 	var echMgr *tls.ECHManager
 	useECH := outbound.TLS != nil && outbound.TLS.ECH != nil && outbound.TLS.ECH.Enabled
-	
+
 	if useECH {
 		echDomain := outbound.TLS.ECH.ConfigDomain
 		dohServer := outbound.TLS.ECH.DOHServer
-		
+
 		if echDomain == "" {
 			echDomain = "cloudflare-ech.com"
 		}
@@ -118,7 +108,7 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 
 		log.Info("ECH: initializing (domain: %s, DoH: %s)", echDomain, dohServer)
 		echMgr = tls.NewECHManager(echDomain, dohServer)
-		
+
 		if err := echMgr.Refresh(); err != nil {
 			if outbound.TLS.ECH.FallbackOnError {
 				log.Warn("ECH initialization failed, falling back to plain TLS: %v", err)
@@ -174,13 +164,9 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 		if err != nil {
 			return nil, err
 		}
-		
-		// Apply anti-DPI settings from config
+
 		if outbound.Transport.UserAgent != "" {
 			grpcTrans.SetUserAgent(outbound.Transport.UserAgent)
-		}
-		if outbound.Transport.ContentType != "" {
-			grpcTrans.SetContentType(outbound.Transport.ContentType)
 		}
 		trans = grpcTrans
 
@@ -197,7 +183,7 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 		if err != nil {
 			return nil, err
 		}
-		
+
 		// Apply anti-DPI settings from config
 		if outbound.Transport.UserAgent != "" {
 			h3Trans.SetUserAgent(outbound.Transport.UserAgent)
@@ -245,7 +231,7 @@ func startTunMode(inbound option.InboundConfig, trans transport.Transport, cfg *
 	// Parse TUN IPv6 address (dual-stack enabled by default)
 	tunIPv6 := inbound.Inet6Address
 	if tunIPv6 == "" {
-		tunIPv6 = "fd00:5ca1:e::2/64"  // Default IPv6 ULA address
+		tunIPv6 = "fd00:5ca1:e::2/64" // Default IPv6 ULA address
 	}
 
 	mtu := inbound.MTU
@@ -257,26 +243,38 @@ func startTunMode(inbound option.InboundConfig, trans transport.Transport, cfg *
 	// All DNS traffic will be routed through the proxy tunnel automatically
 	dnsServer := inbound.DNS
 	if dnsServer == "" {
-		dnsServer = "8.8.8.8"  // Default to Google Public DNS (IPv4)
+		dnsServer = "8.8.8.8" // Default to Google Public DNS (IPv4)
 	}
-	
+
 	// IPv6 DNS server - must be a real public address (not virtual)
 	dns6Server := inbound.IPv6DNS
 	if dns6Server == "" {
-		dns6Server = "2001:4860:4860::8888"  // Default to Google Public DNS (IPv6)
+		dns6Server = "2001:4860:4860::8888" // Default to Google Public DNS (IPv6)
 	}
-	
+
 	log.Info("TUN DNS: IPv4=%s, IPv6=%s", dnsServer, dns6Server)
 
+	// Create bypass dialer BEFORE starting TUN so that the physical interface
+	// can be detected while the routing table is still unmodified.
+	// This prevents routing loops: the transport's outgoing TCP/UDP sockets
+	// will be bound to the physical interface and bypass the TUN device.
+	bypassDialer, bdErr := tun.NewBypassDialer(cfg.Outbounds[0].ServerIP)
+	if bdErr != nil {
+		log.Printf("[TUN] Warning: bypass dialer unavailable (%v) — routing loops may occur", bdErr)
+	} else {
+		trans.SetBypassConfig(bypassDialer.ToBypassConfig())
+	}
+
 	tunCfg := &tun.Config{
-		IP:        tunIP,
-		Gateway:   "10.0.85.1",
-		Mask:      "255.255.255.0",
-		DNS:       dnsServer,
-		IPv6:      tunIPv6,
-		IPv6DNS:   dns6Server,
-		MTU:       mtu,
-		Transport: trans,
+		IP:          tunIP,
+		DNS:         dnsServer,
+		IPv6:        tunIPv6,
+		IPv6DNS:     dns6Server,
+		MTU:         mtu,
+		Stack:       inbound.Stack,
+		AutoRoute:   inbound.AutoRoute,
+		StrictRoute: inbound.StrictRoute,
+		Transport:   trans,
 	}
 
 	tunDev, err := tun.New(tunCfg)
@@ -285,7 +283,18 @@ func startTunMode(inbound option.InboundConfig, trans transport.Transport, cfg *
 	}
 	defer tunDev.Close()
 
-	log.Fatalf("TUN mode stopped: %v", tunDev.Start())
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigChan)
+	go func() {
+		<-sigChan
+		log.Info("Received exit signal, shutting down TUN...")
+		tunDev.Close()
+	}()
+
+	if err := tunDev.Start(); err != nil {
+		log.Printf("[TUN] TUN mode stopped: %v", err)
+	}
 }
 
 func startProxyMode(inbound option.InboundConfig, trans transport.Transport, cfg *option.RootConfig) {
@@ -318,7 +327,14 @@ func startProxyMode(inbound option.InboundConfig, trans transport.Transport, cfg
 		log.Info("SOCKS5 auth enabled (%d user(s))", len(users))
 	}
 
-	// Create and run proxy server
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		log.Info("Received exit signal, shutting down...")
+		os.Exit(0)
+	}()
+
 	server := protocol.NewServer(listenAddr, trans, dnsServer, users, inbound.MaxConnections)
 	log.Fatalf("Proxy server stopped: %v", server.Run())
 }

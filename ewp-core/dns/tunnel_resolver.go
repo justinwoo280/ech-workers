@@ -15,13 +15,13 @@ import (
 type TunnelDNSTransport interface {
 	// QueryRaw performs a raw DNS query through the tunnel
 	QueryRaw(ctx context.Context, dnsQuery []byte) ([]byte, error)
-	
+
 	// Type returns the transport type (e.g., "DoH", "DoT", "DoQ")
 	Type() string
-	
+
 	// Server returns the server address
 	Server() string
-	
+
 	// Close closes the transport and releases resources
 	Close() error
 }
@@ -113,7 +113,7 @@ func createTunnelTransport(trans transport.Transport, config TunnelServerConfig)
 func (r *TunnelDNSResolver) QueryRaw(ctx context.Context, dnsQuery []byte) ([]byte, error) {
 	// Generate cache key from query
 	cacheKey := fmt.Sprintf("%x", dnsQuery[:min(len(dnsQuery), 32)])
-	
+
 	// Check cache first
 	if cached, ok := r.cache.Load(cacheKey); ok {
 		result := cached.(*cachedTunnelResult)

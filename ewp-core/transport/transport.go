@@ -21,6 +21,10 @@ type TunnelConn interface {
 	// ReadUDP reads and decodes an EWP-framed UDP response packet
 	// Returns the payload bytes. Must be called after ConnectUDP.
 	ReadUDP() ([]byte, error)
+	// ReadUDPTo reads and decodes an EWP-framed UDP response packet
+	// directly into the provided buffer (zero-copy optimization).
+	// Returns the number of bytes read. Must be called after ConnectUDP.
+	ReadUDPTo(buf []byte) (int, error)
 	// Read reads data from tunnel to provided buffer (zero-copy optimization)
 	Read(buf []byte) (int, error)
 	// Write writes data to tunnel
@@ -31,12 +35,29 @@ type TunnelConn interface {
 	StartPing(interval time.Duration) chan struct{}
 }
 
+// BypassConfig holds dialers that bypass the TUN routing table.
+// Used in TUN mode to prevent routing loops: the transport's outgoing
+// TCP/UDP sockets are bound to the physical network interface so they
+// are not captured by the TUN device.
+type BypassConfig struct {
+	// TCPDialer is used by TCP-based transports (grpc, websocket, xhttp).
+	// The Dialer.Control function binds each socket to the physical interface.
+	TCPDialer *net.Dialer
+	// UDPListenConfig is used by QUIC-based transports (h3grpc).
+	// ListenPacket binds the UDP socket to the physical interface.
+	UDPListenConfig *net.ListenConfig
+}
+
 // Transport is the transport layer interface
 type Transport interface {
 	// Dial establishes a new connection
 	Dial() (TunnelConn, error)
 	// Name returns the transport layer name
 	Name() string
+	// SetBypassConfig injects a bypass dialer for TUN mode.
+	// When set, all outgoing sockets bypass the TUN routing table.
+	// Pass nil to disable bypass mode.
+	SetBypassConfig(cfg *BypassConfig)
 }
 
 // ParsedAddress represents parsed server address

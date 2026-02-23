@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"ewp-core/log"
-	
+
 	"golang.org/x/net/http2"
 )
 
@@ -29,7 +29,7 @@ func NewDoHTransport(serverURL string) *DoHTransport {
 	// Parse URL to get server name for SNI
 	u, _ := url.Parse(serverURL)
 	serverName := u.Hostname()
-	
+
 	// Create TLS config for HTTP/2
 	tlsConfig := &tls.Config{
 		MinVersion: tls.VersionTLS12,
@@ -37,7 +37,7 @@ func NewDoHTransport(serverURL string) *DoHTransport {
 		ServerName: serverName, // Use hostname as SNI even when connecting to IP
 		// InsecureSkipVerify: false means verify the cert against ServerName
 	}
-	
+
 	// Create HTTP/2 transport with custom dialer (no DNS resolution needed)
 	transport := &http2.Transport{
 		TLSClientConfig:    tlsConfig,
@@ -47,18 +47,18 @@ func NewDoHTransport(serverURL string) *DoHTransport {
 		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
 			// addr is already "ip:port" from the URL, no DNS lookup needed
 			log.V("[DoH Bootstrap] Dialing %s %s (SNI: %s)", network, addr, cfg.ServerName)
-			
+
 			dialer := &net.Dialer{
 				Timeout: 5 * time.Second,
 			}
-			
+
 			// Dial TCP connection
 			conn, err := dialer.DialContext(ctx, network, addr)
 			if err != nil {
 				log.V("[DoH Bootstrap] TCP dial failed: %v", err)
 				return nil, err
 			}
-			
+
 			// Perform TLS handshake
 			tlsConn := tls.Client(conn, cfg)
 			if err := tlsConn.HandshakeContext(ctx); err != nil {
@@ -66,7 +66,7 @@ func NewDoHTransport(serverURL string) *DoHTransport {
 				log.V("[DoH Bootstrap] TLS handshake failed: %v", err)
 				return nil, err
 			}
-			
+
 			log.V("[DoH Bootstrap] TLS connection established to %s", addr)
 			return tlsConn, nil
 		},
@@ -84,7 +84,7 @@ func NewDoHTransport(serverURL string) *DoHTransport {
 // Query performs a DNS query via DoH using HTTP/2 POST method (RFC 8484)
 func (t *DoHTransport) Query(ctx context.Context, domain string, qtype uint16) ([]net.IP, error) {
 	log.V("[DoH Bootstrap] Querying %s (type %d) via %s", domain, qtype, t.serverURL)
-	
+
 	// Build DNS query
 	dnsQuery := BuildQuery(domain, qtype)
 
@@ -125,7 +125,7 @@ func (t *DoHTransport) Query(ctx context.Context, domain string, qtype uint16) (
 		log.V("[DoH Bootstrap] Failed to parse response for %s: %v", domain, err)
 		return nil, fmt.Errorf("failed to parse DNS response: %w", err)
 	}
-	
+
 	log.V("[DoH Bootstrap] Resolved %s -> %v (%d IPs)", domain, ips, len(ips))
 
 	return ips, nil

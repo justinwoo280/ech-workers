@@ -22,15 +22,15 @@ type VPNConfigBuilder struct {
 func NewVPNConfig(serverAddr, token string) *VPNConfigBuilder {
 	return &VPNConfigBuilder{
 		config: &VPNConfig{
-			ServerAddr:   serverAddr,
-			Token:        token,
-			Protocol:     "ws",        // 默认 WebSocket
-			AppProtocol:  "ewp",       // 默认 EWP
-			Path:         "/",         // 默认路径
-			EnableECH:    true,        // 默认启用 ECH
-			EnableFlow:   true,        // 默认启用 Vision 流控
-			EnablePQC:    false,       // 默认不启用 PQC
-			TunMTU:       1400,        // 默认 MTU
+			ServerAddr:  serverAddr,
+			Token:       token,
+			Protocol:    "ws",  // 默认 WebSocket
+			AppProtocol: "ewp", // 默认 EWP
+			Path:        "/",   // 默认路径
+			EnableECH:   true,  // 默认启用 ECH
+			EnableFlow:  true,  // 默认启用 Vision 流控
+			EnablePQC:   false, // 默认不启用 PQC
+			TunMTU:      1400,  // 默认 MTU
 		},
 	}
 }
@@ -138,16 +138,16 @@ func (b *VPNConfigBuilder) Build() *VPNConfig {
 func StartVPN(tunFD int, config *VPNConfig) error {
 	vpnMu.Lock()
 	defer vpnMu.Unlock()
-	
+
 	// 如果已有 VPN 在运行，先停止
 	if globalVPN != nil && globalVPN.IsRunning() {
 		log.Printf("[VPN] Stopping existing VPN before starting new one")
 		globalVPN.Stop()
 	}
-	
+
 	// 创建新的 VPN 管理器
 	globalVPN = NewVPNManager()
-	
+
 	// 启动 VPN
 	return globalVPN.Start(tunFD, config)
 }
@@ -156,11 +156,11 @@ func StartVPN(tunFD int, config *VPNConfig) error {
 func StopVPN() error {
 	vpnMu.Lock()
 	defer vpnMu.Unlock()
-	
+
 	if globalVPN == nil {
 		return nil
 	}
-	
+
 	err := globalVPN.Stop()
 	globalVPN = nil
 	return err
@@ -170,11 +170,11 @@ func StopVPN() error {
 func IsVPNRunning() bool {
 	vpnMu.Lock()
 	defer vpnMu.Unlock()
-	
+
 	if globalVPN == nil {
 		return false
 	}
-	
+
 	return globalVPN.IsRunning()
 }
 
@@ -182,11 +182,11 @@ func IsVPNRunning() bool {
 func GetVPNStats() string {
 	vpnMu.Lock()
 	defer vpnMu.Unlock()
-	
+
 	if globalVPN == nil {
 		return `{"running":false}`
 	}
-	
+
 	return globalVPN.GetStats()
 }
 
@@ -236,16 +236,17 @@ func StartVPNTrojan(tunFD int, serverAddr, password, protocol string) error {
 
 // StartVPNAdvanced 启动 VPN（完整配置）
 // 参数示例：
-//   serverAddr: "xxx.workers.dev:443"
-//   serverIP: "104.16.1.2" (可选，优选 IP)
-//   token: "your-uuid"
-//   password: "" (Trojan 协议需要)
-//   protocol: "ws" / "grpc" / "xhttp"
-//   appProtocol: "ewp" / "trojan"
-//   path: "/" (WebSocket 路径或 gRPC 服务名)
-//   enableECH: true
-//   enableFlow: true
-//   enablePQC: false
+//
+//	serverAddr: "xxx.workers.dev:443"
+//	serverIP: "104.16.1.2" (可选，优选 IP)
+//	token: "your-uuid"
+//	password: "" (Trojan 协议需要)
+//	protocol: "ws" / "grpc" / "xhttp"
+//	appProtocol: "ewp" / "trojan"
+//	path: "/" (WebSocket 路径或 gRPC 服务名)
+//	enableECH: true
+//	enableFlow: true
+//	enablePQC: false
 func StartVPNAdvanced(
 	tunFD int,
 	serverAddr, serverIP, token, password string,
@@ -253,17 +254,17 @@ func StartVPNAdvanced(
 	enableECH, enableFlow, enablePQC bool,
 ) error {
 	config := &VPNConfig{
-		ServerAddr:   serverAddr,
-		ServerIP:     serverIP,
-		Token:        token,
-		Password:     password,
-		Protocol:     protocol,
-		AppProtocol:  appProtocol,
-		Path:         path,
-		EnableECH:    enableECH,
-		EnableFlow:   enableFlow,
-		EnablePQC:    enablePQC,
-		TunMTU:       1400,
+		ServerAddr:  serverAddr,
+		ServerIP:    serverIP,
+		Token:       token,
+		Password:    password,
+		Protocol:    protocol,
+		AppProtocol: appProtocol,
+		Path:        path,
+		EnableECH:   enableECH,
+		EnableFlow:  enableFlow,
+		EnablePQC:   enablePQC,
+		TunMTU:      1400,
 	}
 	return StartVPN(tunFD, config)
 }

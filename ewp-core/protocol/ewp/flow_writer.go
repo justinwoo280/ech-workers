@@ -6,9 +6,9 @@ import (
 
 // FlowWriter wraps a writer and applies Vision-style padding
 type FlowWriter struct {
-	writer           io.Writer
-	state            *FlowState
-	isUplink         bool
+	writer            io.Writer
+	state             *FlowState
+	isUplink          bool
 	writeOnceUserUUID []byte
 }
 

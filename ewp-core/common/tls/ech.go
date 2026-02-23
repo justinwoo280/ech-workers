@@ -1,4 +1,4 @@
-﻿package tls
+package tls
 
 import (
 	"encoding/base64"
@@ -13,15 +13,15 @@ import (
 
 // ECHManager manages ECH configuration with TTL-based caching
 type ECHManager struct {
-	domain     string
-	dnsServer  string
-	echList    []byte
-	lastFetch  time.Time
-	cacheTTL   time.Duration
-	mu         sync.RWMutex
-	dnsClient  *dns.Client
-	stopClean  chan struct{}
-	cleanOnce  sync.Once
+	domain    string
+	dnsServer string
+	echList   []byte
+	lastFetch time.Time
+	cacheTTL  time.Duration
+	mu        sync.RWMutex
+	dnsClient *dns.Client
+	stopClean chan struct{}
+	cleanOnce sync.Once
 }
 
 // NewECHManager creates a new ECH manager with 1-hour cache TTL
@@ -187,7 +187,7 @@ func (m *ECHManager) Stop() {
 func (m *ECHManager) GetCacheAge() time.Duration {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	
+
 	if m.lastFetch.IsZero() {
 		return 0
 	}

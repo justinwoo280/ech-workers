@@ -22,7 +22,7 @@ const (
 	CommandTCP byte = 0x01
 	CommandUDP byte = 0x02
 
-	OptionMux           byte = 0x01
+	OptionMux            byte = 0x01
 	OptionDataEncryption byte = 0x02
 
 	MinPaddingLength = 64
@@ -70,12 +70,12 @@ func NewHandshakeRequest(uuid [16]byte, command byte, addr Address) *HandshakeRe
 	// 使用 crypto/rand 生成随机 Version (1-255)
 	versionBig, _ := rand.Int(rand.Reader, big.NewInt(255))
 	version := byte(versionBig.Int64() + 1)
-	
+
 	// 使用 crypto/rand 生成随机 Padding 长度
 	paddingRange := MaxPaddingLength - MinPaddingLength + 1
 	paddingBig, _ := rand.Int(rand.Reader, big.NewInt(int64(paddingRange)))
 	paddingLen := byte(paddingBig.Int64() + MinPaddingLength)
-	
+
 	req := &HandshakeRequest{
 		Version:       version,
 		Timestamp:     uint32(time.Now().Unix()),
@@ -95,20 +95,20 @@ func (r *HandshakeRequest) Encode() ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("encode address: %w", err)
 	}
-	
+
 	// 计算 Plaintext 长度: Timestamp(4) + UUID(16) + Command(1) + Addr + Options(1) + PadLen(1) + Padding
 	plaintextLen := 4 + 16 + 1 + len(addrBytes) + 1 + 1 + int(r.PaddingLength)
-	
+
 	// 预分配完整缓冲区: AD(15) + Ciphertext(plaintext + 16-byte Poly1305 tag) + HMAC(16)
 	totalLen := 15 + plaintextLen + 16 + 16
 	buf := make([]byte, totalLen)
-	
+
 	// === 1. 构建 AD (Authenticated Data) ===
 	buf[0] = r.Version
 	copy(buf[1:13], r.Nonce[:])
 	binary.BigEndian.PutUint16(buf[13:15], uint16(plaintextLen+16)) // ciphertext length = plaintext + Poly1305 tag
 	ad := buf[:15]
-	
+
 	// === 2. 构建 Plaintext (先临时写入，后续原地加密) ===
 	offset := 15
 	binary.BigEndian.PutUint32(buf[offset:], r.Timestamp)
@@ -123,22 +123,22 @@ func (r *HandshakeRequest) Encode() ([]byte, error) {
 	offset++
 	buf[offset] = r.PaddingLength
 	offset++
-	
+
 	// 填充随机 Padding
 	rand.Read(buf[offset : offset+int(r.PaddingLength)])
 	offset += int(r.PaddingLength)
-	
+
 	// === 3. 加密 (ChaCha20-Poly1305) ===
 	key := deriveEncryptionKey(r.UUID, r.Nonce)
 	aead, err := chacha20poly1305.New(key)
 	if err != nil {
 		return nil, fmt.Errorf("create cipher: %w", err)
 	}
-	
+
 	// Seal 会追加 16 字节 Poly1305 tag
 	plaintext := buf[15 : 15+plaintextLen]
 	ciphertext := aead.Seal(buf[15:15], r.Nonce[:], plaintext, ad)
-	
+
 	// === 4. 计算外层 HMAC (快速熔断器) ===
 	authTag := computeHMAC(r.UUID, ad, ciphertext)
 	copy(buf[15+len(ciphertext):], authTag)
@@ -230,17 +230,17 @@ func DecodeHandshakeRequest(data []byte, validUUIDs [][16]byte) (*HandshakeReque
 func (r *HandshakeResponse) Encode(uuid [16]byte) ([]byte, error) {
 	// 预分配: VersionEcho(1) + Status(1) + ServerTime(4) + NonceEcho(12) + AuthTag(8) = 26 bytes
 	buf := make([]byte, 26)
-	
+
 	buf[0] = r.VersionEcho
 	buf[1] = r.Status
 	binary.BigEndian.PutUint32(buf[2:6], r.ServerTime)
 	copy(buf[6:18], r.NonceEcho[:])
-	
+
 	// 计算 HMAC (前 17 字节)
 	tag := computeResponseHMAC(uuid, buf[:17])
 	copy(r.AuthTag[:], tag[:8])
 	copy(buf[18:26], r.AuthTag[:])
-	
+
 	return buf, nil
 }
 

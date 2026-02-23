@@ -9,10 +9,10 @@ import (
 )
 
 type TunnelOptions struct {
-	Protocol    ProtocolHandler
-	Transport   TransportAdapter
-	ClientIP    string
-	Timeout     time.Duration
+	Protocol  ProtocolHandler
+	Transport TransportAdapter
+	ClientIP  string
+	Timeout   time.Duration
 }
 
 func EstablishTunnel(ctx context.Context, handshakeData []byte, opts TunnelOptions) error {
@@ -36,13 +36,13 @@ func EstablishTunnel(ctx context.Context, handshakeData []byte, opts TunnelOptio
 
 	if result.IsUDP {
 		log.Info("[Tunnel] UDP mode: %s -> %s", opts.ClientIP, result.Target)
-		
+
 		// Create io.Reader/io.Writer adapter for TransportAdapter
 		rw := &transportReaderWriter{transport: opts.Transport}
-		
+
 		// Handle UDP stream through tunnel
 		HandleUDPConnection(rw, rw)
-		
+
 		log.Info("[Tunnel] UDP closed: %s -> %s", opts.ClientIP, result.Target)
 		return nil
 	}

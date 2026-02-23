@@ -299,12 +299,6 @@ func (c *StreamOneConn) connectEWP(target string, initialData []byte) error {
 		return fmt.Errorf("EWP handshake failed with status: %d", resp.Status)
 	}
 
-	if len(initialData) > 0 {
-		if err := c.Write(initialData); err != nil {
-			return fmt.Errorf("send initial data: %w", err)
-		}
-	}
-
 	c.connected = true
 	log.V("[XHTTP] stream-one EWP handshake success, target: %s", target)
 	return nil
@@ -470,6 +464,19 @@ func (c *StreamOneConn) ReadUDP() ([]byte, error) {
 		return nil, err
 	}
 	return pkt.Payload, nil
+}
+
+// ReadUDPTo reads and decodes an EWP-framed UDP response packet directly into the provided buffer
+func (c *StreamOneConn) ReadUDPTo(buf []byte) (int, error) {
+	if c.respBody == nil {
+		return 0, errors.New("not connected")
+	}
+	pkt, err := ewp.DecodeUDPPacket(c.respBody)
+	if err != nil {
+		return 0, err
+	}
+	n := copy(buf, pkt.Payload)
+	return n, nil
 }
 
 func (c *StreamOneConn) connectTrojanUDP(target string, initialData []byte) error {

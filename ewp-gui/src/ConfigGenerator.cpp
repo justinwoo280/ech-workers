@@ -90,10 +90,10 @@ QJsonObject ConfigGenerator::generateOutbound(const EWPNode &node)
     
     outbound["type"] = (node.appProtocol == EWPNode::TROJAN) ? "trojan" : "ewp";
     outbound["tag"] = "proxy-out";
-    outbound["server"] = node.serverAddress;
+    outbound["server"] = node.effectiveHost();
     outbound["server_port"] = node.serverPort;
-    
-    if (!node.serverIP.isEmpty()) {
+
+    if (!node.serverAddress.isEmpty() && node.serverIP != node.serverAddress) {
         outbound["server_ip"] = node.serverIP;
     }
     
@@ -128,9 +128,6 @@ QJsonObject ConfigGenerator::generateTransport(const EWPNode &node)
             transport["service_name"] = node.grpcServiceName;
             if (!node.userAgent.isEmpty()) {
                 transport["user_agent"] = node.userAgent;
-            }
-            if (!node.contentType.isEmpty()) {
-                transport["content_type"] = node.contentType;
             }
             break;
             
@@ -176,11 +173,15 @@ QJsonObject ConfigGenerator::generateTransport(const EWPNode &node)
 QJsonObject ConfigGenerator::generateTLS(const EWPNode &node)
 {
     QJsonObject tls;
-    
-    tls["enabled"] = true;
-    tls["server_name"] = node.serverAddress;
+
+    tls["enabled"] = node.enableTLS;
+    tls["server_name"] = node.effectiveSNI();
     tls["insecure"] = false;
-    
+
+    if (node.minTLSVersion == "1.3") {
+        tls["min_version"] = "1.3";
+    }
+
     QJsonArray alpn;
     if (node.transportMode == EWPNode::H3GRPC) {
         alpn.append("h3");
@@ -190,7 +191,7 @@ QJsonObject ConfigGenerator::generateTLS(const EWPNode &node)
         alpn.append("http/1.1");
     }
     tls["alpn"] = alpn;
-    
+
     if (node.enableECH) {
         QJsonObject ech;
         ech["enabled"] = true;
@@ -199,11 +200,11 @@ QJsonObject ConfigGenerator::generateTLS(const EWPNode &node)
         ech["fallback_on_error"] = true;
         tls["ech"] = ech;
     }
-    
+
     if (node.enablePQC) {
         tls["pqc"] = true;
     }
-    
+
     return tls;
 }
 

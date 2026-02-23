@@ -1,4 +1,4 @@
-﻿package option
+package option
 
 import (
 	"flag"
@@ -14,16 +14,16 @@ type Config struct {
 	ServerAddr string
 	ServerIP   string
 	Token      string
-	Password   string  // Trojan 密码
+	Password   string // Trojan 密码
 
 	// Transport settings
 	ProtoMode   string
-	AppProtocol string  // 应用层协议: ewp 或 trojan
+	AppProtocol string // 应用层协议: ewp 或 trojan
 	XHTTPMode   string
 	NumConns    int
 	EnableFlow  bool
 	EnablePQC   bool
-	EnableMux   bool    // Trojan 多路复用
+	EnableMux   bool // Trojan 多路复用
 
 	// TLS/ECH settings
 	DNSServer string

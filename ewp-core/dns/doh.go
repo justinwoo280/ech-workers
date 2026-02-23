@@ -1,4 +1,4 @@
-﻿package dns
+package dns
 
 import (
 	"bytes"
@@ -14,7 +14,7 @@ import (
 
 	"ewp-core/constant"
 	"ewp-core/log"
-	
+
 	"golang.org/x/net/http2"
 )
 
@@ -44,16 +44,16 @@ func NewClient(serverURL string) *Client {
 			},
 		}
 	}
-	
+
 	serverName := u.Hostname()
-	
+
 	// Create TLS config for HTTP/2
 	tlsConfig := &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		NextProtos: []string{"h2"},
 		ServerName: serverName,
 	}
-	
+
 	// Create HTTP/2 transport with custom dialer (no DNS resolution needed)
 	transport := &http2.Transport{
 		TLSClientConfig:    tlsConfig,
@@ -61,18 +61,18 @@ func NewClient(serverURL string) *Client {
 		AllowHTTP:          false,
 		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
 			log.V("[DoH Client] Dialing %s %s (SNI: %s)", network, addr, cfg.ServerName)
-			
+
 			dialer := &net.Dialer{
 				Timeout: 5 * time.Second,
 			}
-			
+
 			// Dial TCP connection
 			conn, err := dialer.DialContext(ctx, network, addr)
 			if err != nil {
 				log.Printf("[DoH Client] TCP dial failed: %v", err)
 				return nil, err
 			}
-			
+
 			// Perform TLS handshake
 			tlsConn := tls.Client(conn, cfg)
 			if err := tlsConn.HandshakeContext(ctx); err != nil {
@@ -80,7 +80,7 @@ func NewClient(serverURL string) *Client {
 				log.Printf("[DoH Client] TLS handshake failed: %v", err)
 				return nil, err
 			}
-			
+
 			log.V("[DoH Client] TLS connection established to %s", addr)
 			return tlsConn, nil
 		},
@@ -104,7 +104,7 @@ func (c *Client) QueryHTTPS(domain string) (string, error) {
 // Query performs a DoH query using POST method (RFC 8484)
 func (c *Client) Query(domain string, qtype uint16) (string, error) {
 	log.Printf("[DoH Client] Querying %s (type %d) via %s", domain, qtype, c.ServerURL)
-	
+
 	u, err := url.Parse(c.ServerURL)
 	if err != nil {
 		return "", fmt.Errorf("invalid DoH URL: %w", err)
