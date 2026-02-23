@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	commpool "ewp-core/common/bufferpool"
@@ -78,19 +79,30 @@ func (m *sessionMap) closeAll() {
 	m.sessions = make(map[string]*udpSession)
 }
 
+func (m *sessionMap) get(target string) (*udpSession, bool) {
+	m.mu.Lock()
+	s, ok := m.sessions[target]
+	m.mu.Unlock()
+	return s, ok
+}
+
 func (m *sessionMap) closeIdle() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	now := time.Now()
+	var idle []*udpSession
 	for target, s := range m.sessions {
 		s.mu.Lock()
-		idle := now.Sub(s.lastActive) > udpSessionIdleTimeout
+		expired := now.Sub(s.lastActive) > udpSessionIdleTimeout
 		s.mu.Unlock()
-		if idle {
-			s.close()
+		if expired {
+			idle = append(idle, s)
 			delete(m.sessions, target)
 			log.V("[UDP] Session idle-expired: %s", target)
 		}
+	}
+	m.mu.Unlock()
+	for _, s := range idle {
+		s.close()
 	}
 }
 
@@ -133,8 +145,9 @@ func HandleUDPAssociate(
 
 	sessions := newSessionMap()
 	stopChan := make(chan struct{})
+	var lastSenderAddr atomic.Pointer[net.UDPAddr]
 
-	go relayUDPLoop(udpConn, clientAddr, clientIP, stopChan, dnsHandler, dialFn, sessions)
+	go relayUDPLoop(udpConn, clientAddr, clientIP, stopChan, dnsHandler, dialFn, sessions, &lastSenderAddr)
 
 	// Block until the control TCP connection is closed (any read/error).
 	tcpConn.SetReadDeadline(time.Time{})
@@ -165,14 +178,13 @@ func relayUDPLoop(
 	dnsHandler func([]byte) ([]byte, error),
 	dialFn func() (transport.TunnelConn, error),
 	sessions *sessionMap,
+	lastSender *atomic.Pointer[net.UDPAddr],
 ) {
 	idleTicker := time.NewTicker(1 * time.Minute)
 	defer idleTicker.Stop()
 
 	buf := commpool.GetUDP()
 	defer commpool.PutUDP(buf)
-
-	var lastSenderAddr *net.UDPAddr
 
 	for {
 		select {
@@ -252,12 +264,13 @@ func relayUDPLoop(
 
 		target := fmt.Sprintf("%s:%d", dstHost, dstPort)
 
+		// Update last sender atomically so readTunnelResponses can read it race-free.
+		lastSender.Store(senderAddr)
+
 		headerCopy := make([]byte, headerLen)
 		copy(headerCopy, buf[:headerLen])
 		payloadCopy := make([]byte, n-headerLen)
 		copy(payloadCopy, buf[headerLen:n])
-
-		lastSenderAddr = senderAddr
 
 		if dstPort == 53 && dnsHandler != nil {
 			log.V("[UDP-DNS] %s -> %s", clientAddr, target)
@@ -268,7 +281,16 @@ func relayUDPLoop(
 			} else {
 				log.V("[UDP] %s -> %s", clientAddr, target)
 			}
-			go handleTunnelUDP(udpConn, senderAddr, payloadCopy, headerCopy, target, sessions, dialFn, &lastSenderAddr)
+			// Fast path: session already exists — write inline without spawning a goroutine.
+			if s, ok := sessions.get(target); ok {
+				if err := s.tunnelConn.WriteUDP(target, payloadCopy); err != nil {
+					log.V("[UDP] %s WriteUDP failed for %s: %v", clientAddr, target, err)
+				}
+				s.touch()
+			} else {
+				// Slow path: new session — dial may block, run in goroutine.
+				go handleTunnelUDP(udpConn, payloadCopy, headerCopy, target, sessions, dialFn, lastSender)
+			}
 		}
 	}
 }
@@ -295,34 +317,33 @@ func handleDNSRelay(
 
 func handleTunnelUDP(
 	udpConn *net.UDPConn,
-	clientAddr *net.UDPAddr,
 	payload []byte,
 	socks5Header []byte,
 	target string,
 	sessions *sessionMap,
 	dialFn func() (transport.TunnelConn, error),
-	lastSender **net.UDPAddr,
+	lastSender *atomic.Pointer[net.UDPAddr],
 ) {
 	session, isNew, err := sessions.getOrCreate(target, dialFn)
 	if err != nil {
-		log.Printf("[UDP] %s tunnel dial failed for %s: %v", clientAddr, target, err)
+		log.Printf("[UDP] tunnel dial failed for %s: %v", target, err)
 		return
 	}
 
 	if isNew {
 		if err := session.tunnelConn.ConnectUDP(target, payload); err != nil {
-			log.Printf("[UDP] %s ConnectUDP failed for %s: %v", clientAddr, target, err)
+			log.Printf("[UDP] ConnectUDP failed for %s: %v", target, err)
 			sessions.mu.Lock()
 			delete(sessions.sessions, target)
 			sessions.mu.Unlock()
 			session.close()
 			return
 		}
-		// Start response reader goroutine for this session.
 		go readTunnelResponses(udpConn, session, socks5Header, target, lastSender)
 	} else {
+		// Session was created by another goroutine between get() and getOrCreate() (rare).
 		if err := session.tunnelConn.WriteUDP(target, payload); err != nil {
-			log.V("[UDP] %s WriteUDP failed for %s: %v", clientAddr, target, err)
+			log.V("[UDP] WriteUDP failed for %s: %v", target, err)
 		}
 	}
 	session.touch()
@@ -333,7 +354,7 @@ func readTunnelResponses(
 	session *udpSession,
 	socks5Header []byte,
 	target string,
-	lastSender **net.UDPAddr,
+	lastSender *atomic.Pointer[net.UDPAddr],
 ) {
 	for {
 		payload, err := session.tunnelConn.ReadUDP()
@@ -347,7 +368,7 @@ func readTunnelResponses(
 
 		session.touch()
 
-		sender := *lastSender
+		sender := lastSender.Load()
 		if sender == nil {
 			continue
 		}

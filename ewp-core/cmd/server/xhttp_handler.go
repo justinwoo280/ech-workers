@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	log "ewp-core/log"
 	"ewp-core/internal/server"
+	log "ewp-core/log"
 	"ewp-core/protocol/trojan"
 	xhttptransport "ewp-core/transport/xhttp"
 )

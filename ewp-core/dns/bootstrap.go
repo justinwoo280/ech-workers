@@ -31,6 +31,7 @@ type cachedResult struct {
 // Examples:
 //   - "doh:https://dns.alidns.com/dns-query, doq:dns.google:853"
 //   - "doq:dns.alidns.com:853, doh:https://1.1.1.1/dns-query, dot:1.1.1.1:853"
+//
 // If empty, defaults to Alibaba Cloud DoH + Cloudflare DoH
 func NewBootstrapResolver(serversConfig string) *BootstrapResolver {
 	resolver := &BootstrapResolver{
@@ -47,7 +48,7 @@ func NewBootstrapResolver(serversConfig string) *BootstrapResolver {
 	}
 
 	servers := parseBootstrapServers(serversConfig)
-	
+
 	// Create transports
 	for i, server := range servers {
 		transport, err := createTransport(server)
@@ -73,7 +74,7 @@ func NewBootstrapResolver(serversConfig string) *BootstrapResolver {
 // Format: "protocol:address, protocol:address, ..."
 func parseBootstrapServers(config string) []ServerConfig {
 	var servers []ServerConfig
-	
+
 	parts := strings.Split(config, ",")
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
@@ -116,24 +117,24 @@ func resolveBootstrapServerAddress(protocol, address string) string {
 	// Map of well-known DNS servers
 	knownServers := map[string]string{
 		// Alibaba Cloud DNS
-		"dns.alidns.com":                    "223.5.5.5",
-		"https://dns.alidns.com/dns-query":  "https://223.5.5.5/dns-query",
-		
+		"dns.alidns.com":                   "223.5.5.5",
+		"https://dns.alidns.com/dns-query": "https://223.5.5.5/dns-query",
+
 		// Cloudflare DNS
-		"1.1.1.1":                           "1.1.1.1",
-		"https://1.1.1.1/dns-query":         "https://1.1.1.1/dns-query",
-		"cloudflare-dns.com":                "1.1.1.1",
+		"1.1.1.1":                              "1.1.1.1",
+		"https://1.1.1.1/dns-query":            "https://1.1.1.1/dns-query",
+		"cloudflare-dns.com":                   "1.1.1.1",
 		"https://cloudflare-dns.com/dns-query": "https://1.1.1.1/dns-query",
-		
+
 		// Google DNS
-		"dns.google":                        "8.8.8.8",
-		"https://dns.google/dns-query":      "https://8.8.8.8/dns-query",
-		"8.8.8.8":                           "8.8.8.8",
-		"https://8.8.8.8/dns-query":         "https://8.8.8.8/dns-query",
-		
+		"dns.google":                   "8.8.8.8",
+		"https://dns.google/dns-query": "https://8.8.8.8/dns-query",
+		"8.8.8.8":                      "8.8.8.8",
+		"https://8.8.8.8/dns-query":    "https://8.8.8.8/dns-query",
+
 		// Quad9 DNS
-		"dns.quad9.net":                     "9.9.9.9",
-		"https://dns.quad9.net/dns-query":   "https://9.9.9.9/dns-query",
+		"dns.quad9.net":                   "9.9.9.9",
+		"https://dns.quad9.net/dns-query": "https://9.9.9.9/dns-query",
 	}
 
 	if resolved, ok := knownServers[address]; ok {
@@ -175,7 +176,7 @@ func (r *BootstrapResolver) LookupIP(ctx context.Context, domain string) ([]net.
 				ips:       ips,
 				expiresAt: time.Now().Add(r.cacheTTL),
 			})
-			
+
 			log.Printf("[Bootstrap] Resolved %s -> %s", domain, ips[0].String())
 			return ips, nil
 		}

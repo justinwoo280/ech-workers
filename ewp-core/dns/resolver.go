@@ -11,13 +11,13 @@ import (
 type BootstrapTransport interface {
 	// Query performs a DNS query for the given domain and record type
 	Query(ctx context.Context, domain string, qtype uint16) ([]net.IP, error)
-	
+
 	// Type returns the transport type (e.g., "DoH", "DoT", "DoQ")
 	Type() string
-	
+
 	// Server returns the server address
 	Server() string
-	
+
 	// Close closes the transport and releases resources
 	Close() error
 }

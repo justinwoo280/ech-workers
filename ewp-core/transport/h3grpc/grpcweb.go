@@ -12,11 +12,11 @@ const (
 	grpcWebFlagCompressed   = 0x01
 
 	// gRPC-Web Content-Type
-	ContentTypeGRPCWeb       = "application/grpc-web+proto"
-	ContentTypeGRPCWebText   = "application/grpc-web-text+proto"
-	
+	ContentTypeGRPCWeb     = "application/grpc-web+proto"
+	ContentTypeGRPCWebText = "application/grpc-web-text+proto"
+
 	// Standard gRPC Content-Type (for comparison)
-	ContentTypeGRPC          = "application/grpc+proto"
+	ContentTypeGRPC = "application/grpc+proto"
 )
 
 // GRPCWebEncoder encodes messages in gRPC-Web binary format
@@ -34,12 +34,9 @@ func NewGRPCWebEncoder(w io.Writer, compressed bool) *GRPCWebEncoder {
 	}
 }
 
-// Encode encodes a message into gRPC-Web format and writes to the underlying writer
+// Encode encodes a message into gRPC-Web format and writes to the underlying writer.
+// Zero-length data is allowed and produces a heartbeat frame (5-byte header, no body).
 func (e *GRPCWebEncoder) Encode(data []byte) error {
-	if len(data) == 0 {
-		return fmt.Errorf("cannot encode empty message")
-	}
-
 	// Prepare header: [Compressed-Flag: 1 byte][Length: 4 bytes]
 	header := make([]byte, 5)
 
@@ -58,9 +55,11 @@ func (e *GRPCWebEncoder) Encode(data []byte) error {
 		return fmt.Errorf("failed to write header: %w", err)
 	}
 
-	// Write message body
-	if _, err := e.writer.Write(data); err != nil {
-		return fmt.Errorf("failed to write message: %w", err)
+	// Write message body (skipped for heartbeat frames where len == 0)
+	if len(data) > 0 {
+		if _, err := e.writer.Write(data); err != nil {
+			return fmt.Errorf("failed to write message: %w", err)
+		}
 	}
 
 	return nil
@@ -97,7 +96,8 @@ func (d *GRPCWebDecoder) Decode() ([]byte, error) {
 	messageLen := binary.BigEndian.Uint32(header[1:5])
 
 	if messageLen == 0 {
-		return nil, fmt.Errorf("invalid message length: 0")
+		// Heartbeat frame: zero-length body, silently acknowledged.
+		return []byte{}, nil
 	}
 
 	// Sanity check: prevent excessive memory allocation
@@ -142,13 +142,13 @@ func (r *GRPCWebFrameReader) Read(p []byte) (int, error) {
 	if r.currentFrame != nil && r.currentOffset < len(r.currentFrame) {
 		n := copy(p, r.currentFrame[r.currentOffset:])
 		r.currentOffset += n
-		
+
 		// If frame is fully consumed, clear it
 		if r.currentOffset >= len(r.currentFrame) {
 			r.currentFrame = nil
 			r.currentOffset = 0
 		}
-		
+
 		return n, nil
 	}
 
@@ -160,7 +160,7 @@ func (r *GRPCWebFrameReader) Read(p []byte) (int, error) {
 
 	// Copy to output buffer
 	n := copy(p, frame)
-	
+
 	// If buffer is too small, save remaining data
 	if n < len(frame) {
 		r.currentFrame = frame

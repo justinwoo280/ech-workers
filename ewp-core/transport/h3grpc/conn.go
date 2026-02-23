@@ -445,6 +445,19 @@ func (c *Conn) ReadUDP() ([]byte, error) {
 	}
 }
 
+// ReadUDPTo reads and decodes an EWP-framed UDP response packet directly into the provided buffer
+func (c *Conn) ReadUDPTo(buf []byte) (int, error) {
+	if c.closed {
+		return 0, io.EOF
+	}
+	select {
+	case data := <-c.recvChan:
+		return ewp.DecodeUDPPayloadTo(data, buf)
+	case <-c.closeChan:
+		return 0, io.EOF
+	}
+}
+
 // Read reads data from the connection
 func (c *Conn) Read(buf []byte) (int, error) {
 	if c.closed {

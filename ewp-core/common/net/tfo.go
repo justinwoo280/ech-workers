@@ -27,11 +27,11 @@ func DialTFOContext(ctx context.Context, network, address string, timeout time.D
 	if err != nil {
 		// Fallback to standard dial if TFO fails
 		log.V("[TFO] Failed to enable TCP Fast Open, falling back to standard dial: %v", err)
-		
+
 		if timeout > 0 {
 			return net.DialTimeout(network, address, timeout)
 		}
-		
+
 		d := &net.Dialer{}
 		return d.DialContext(ctx, network, address)
 	}

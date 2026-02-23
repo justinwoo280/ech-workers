@@ -81,13 +81,13 @@ func (w *WebSocketReadCloser) Read(p []byte) (n int, err error) {
 		if msgType != websocket.BinaryMessage {
 			continue
 		}
-		
+
 		if len(msg) > len(p) {
 			copy(p, msg[:len(p)])
 			w.reader = io.NopCloser(io.MultiReader(io.NopCloser(&byteReader{data: msg[len(p):]})))
 			return len(p), nil
 		}
-		
+
 		copy(p, msg)
 		return len(msg), nil
 	}

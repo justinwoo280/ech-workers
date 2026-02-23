@@ -8,9 +8,9 @@ import (
 // WaitReadCloser - 基于 Xray-core 设计的异步响应处理
 // 支持延迟设置响应体，提前返回连接
 type WaitReadCloser struct {
-	Wait     chan struct{}
+	Wait       chan struct{}
 	ReadCloser io.ReadCloser
-	mu       sync.Mutex
+	mu         sync.Mutex
 }
 
 // NewWaitReadCloser 创建新的 WaitReadCloser
@@ -32,7 +32,7 @@ func (w *WaitReadCloser) SetReadCloser(rc io.ReadCloser) {
 func (w *WaitReadCloser) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	
+
 	if w.ReadCloser != nil {
 		return w.ReadCloser.Close()
 	}
@@ -54,7 +54,7 @@ func (w *WaitReadCloser) Read(b []byte) (int, error) {
 func (w *WaitReadCloser) Fail(err error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	
+
 	if w.ReadCloser == nil {
 		w.ReadCloser = &errorReader{err: err}
 		close(w.Wait)

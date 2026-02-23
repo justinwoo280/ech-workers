@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"ewp-core/protocol/ewp"
 	log "ewp-core/log"
+	"ewp-core/protocol/ewp"
 )
 
 var (

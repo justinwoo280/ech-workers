@@ -8,68 +8,68 @@ import (
 
 // ServerConfig represents server configuration
 type ServerConfig struct {
-	Log      LogConfig         `json:"log"`
-	Listener ListenerConfig    `json:"listener"`
-	Protocol ProtocolConfig    `json:"protocol"`
-	TLS      *ServerTLSConfig  `json:"tls,omitempty"`
-	Advanced AdvancedConfig    `json:"advanced,omitempty"`
+	Log      LogConfig        `json:"log"`
+	Listener ListenerConfig   `json:"listener"`
+	Protocol ProtocolConfig   `json:"protocol"`
+	TLS      *ServerTLSConfig `json:"tls,omitempty"`
+	Advanced AdvancedConfig   `json:"advanced,omitempty"`
 }
 
 // ListenerConfig defines server listening settings
 type ListenerConfig struct {
-	Port      int      `json:"port"`               // Listen port
-	Address   string   `json:"address,omitempty"`  // Listen address (default: 0.0.0.0)
-	Modes     []string `json:"modes"`              // ws, grpc, xhttp, h3 (can enable multiple)
-	
+	Port    int      `json:"port"`              // Listen port
+	Address string   `json:"address,omitempty"` // Listen address (default: 0.0.0.0)
+	Modes   []string `json:"modes"`             // ws, grpc, xhttp, h3 (can enable multiple)
+
 	// Mode-specific paths
-	WSPath    string   `json:"ws_path,omitempty"`    // WebSocket path
-	XHTTPPath string   `json:"xhttp_path,omitempty"` // XHTTP path
+	WSPath      string `json:"ws_path,omitempty"`      // WebSocket path
+	XHTTPPath   string `json:"xhttp_path,omitempty"`   // XHTTP path
 	GRPCService string `json:"grpc_service,omitempty"` // gRPC service name
 }
 
 // ProtocolConfig defines protocol settings
 type ProtocolConfig struct {
-	Type     string   `json:"type"`              // ewp or trojan
-	UUID     string   `json:"uuid,omitempty"`    // For EWP
-	Password string   `json:"password,omitempty"` // For Trojan (comma-separated for multiple)
-	
+	Type     string `json:"type"`               // ewp or trojan
+	UUID     string `json:"uuid,omitempty"`     // For EWP
+	Password string `json:"password,omitempty"` // For Trojan (comma-separated for multiple)
+
 	// Flow control
-	EnableFlow bool     `json:"enable_flow,omitempty"`
-	
+	EnableFlow bool `json:"enable_flow,omitempty"`
+
 	// Trojan specific
-	Fallback   string   `json:"fallback,omitempty"` // Trojan fallback address
+	Fallback string `json:"fallback,omitempty"` // Trojan fallback address
 }
 
 // ServerTLSConfig defines server TLS settings
 type ServerTLSConfig struct {
-	Enabled         bool     `json:"enabled"`
-	CertFile        string   `json:"cert_file"`
-	KeyFile         string   `json:"key_file"`
-	ALPN            []string `json:"alpn,omitempty"` // h3, h2, http/1.1
-	MinVersion      string   `json:"min_version,omitempty"`
-	MaxVersion      string   `json:"max_version,omitempty"`
-	CipherSuites    []string `json:"cipher_suites,omitempty"`
+	Enabled      bool     `json:"enabled"`
+	CertFile     string   `json:"cert_file"`
+	KeyFile      string   `json:"key_file"`
+	ALPN         []string `json:"alpn,omitempty"` // h3, h2, http/1.1
+	MinVersion   string   `json:"min_version,omitempty"`
+	MaxVersion   string   `json:"max_version,omitempty"`
+	CipherSuites []string `json:"cipher_suites,omitempty"`
 }
 
 // AdvancedConfig defines advanced settings
 type AdvancedConfig struct {
 	// gRPC-Web support
-	EnableGRPCWeb    bool   `json:"enable_grpc_web,omitempty"`
-	
+	EnableGRPCWeb bool `json:"enable_grpc_web,omitempty"`
+
 	// Padding
-	PaddingMin       int    `json:"padding_min,omitempty"`
-	PaddingMax       int    `json:"padding_max,omitempty"`
-	
+	PaddingMin int `json:"padding_min,omitempty"`
+	PaddingMax int `json:"padding_max,omitempty"`
+
 	// SSE Headers for disguise
-	SSEHeaders       bool   `json:"sse_headers,omitempty"`
-	
+	SSEHeaders bool `json:"sse_headers,omitempty"`
+
 	// HTTP/3 specific
-	H3MaxBidiStreams int    `json:"h3_max_bidi_streams,omitempty"`
-	H3MaxUniStreams  int    `json:"h3_max_uni_streams,omitempty"`
-	
+	H3MaxBidiStreams int `json:"h3_max_bidi_streams,omitempty"`
+	H3MaxUniStreams  int `json:"h3_max_uni_streams,omitempty"`
+
 	// Buffer sizes
-	ReadBufferSize   int    `json:"read_buffer_size,omitempty"`
-	WriteBufferSize  int    `json:"write_buffer_size,omitempty"`
+	ReadBufferSize  int `json:"read_buffer_size,omitempty"`
+	WriteBufferSize int `json:"write_buffer_size,omitempty"`
 }
 
 // DefaultServerConfig returns default server configuration
@@ -94,7 +94,7 @@ func DefaultServerConfig() *ServerConfig {
 		},
 		TLS: nil, // TLS disabled by default
 		Advanced: AdvancedConfig{
-			EnableGRPCWeb: true,  // Enable by default for CDN compatibility
+			EnableGRPCWeb: true, // Enable by default for CDN compatibility
 			PaddingMin:    100,
 			PaddingMax:    1000,
 			SSEHeaders:    true,
@@ -158,7 +158,7 @@ func (c *ServerConfig) Validate() error {
 		if c.TLS.CertFile == "" || c.TLS.KeyFile == "" {
 			return fmt.Errorf("cert_file and key_file are required when TLS is enabled")
 		}
-		
+
 		// Check if files exist
 		if _, err := os.Stat(c.TLS.CertFile); os.IsNotExist(err) {
 			return fmt.Errorf("cert file not found: %s", c.TLS.CertFile)
@@ -174,7 +174,7 @@ func (c *ServerConfig) Validate() error {
 			if c.TLS == nil || !c.TLS.Enabled {
 				return fmt.Errorf("HTTP/3 requires TLS to be enabled")
 			}
-			
+
 			// Ensure h3 is in ALPN
 			hasH3 := false
 			for _, alpn := range c.TLS.ALPN {

@@ -29,7 +29,7 @@ type User struct {
 
 // Service 是 Trojan 服务端核心
 type Service struct {
-	users           map[string]*User      // name -> user
+	users           map[string]*User          // name -> user
 	keys            map[[KeyLength]byte]*User // key -> user
 	handler         Handler
 	fallbackHandler FallbackHandler

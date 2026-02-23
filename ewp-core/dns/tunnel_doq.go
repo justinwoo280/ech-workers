@@ -53,7 +53,7 @@ func (c *TunnelDoQTransport) QueryRaw(ctx context.Context, dnsQuery []byte) ([]b
 
 	// Parse server URL to get target
 	target := c.server
-	
+
 	// If server is a URL, extract hostname:port
 	if u, err := url.Parse(c.server); err == nil && u.Host != "" {
 		target = u.Host
@@ -73,7 +73,7 @@ func (c *TunnelDoQTransport) QueryRaw(ctx context.Context, dnsQuery []byte) ([]b
 	// Write length prefix (2 bytes, big endian)
 	lengthPrefix := make([]byte, 2)
 	binary.BigEndian.PutUint16(lengthPrefix, uint16(len(dnsQuery)))
-	
+
 	if err := conn.Write(lengthPrefix); err != nil {
 		return nil, fmt.Errorf("failed to write length prefix: %w", err)
 	}

@@ -14,10 +14,10 @@ import (
 const (
 	Version5 = 0x05
 
-	AuthMethodNone        = 0x00
-	AuthMethodPassword    = 0x02
-	AuthMethodNoAccept    = 0xFF
-	AuthSubnegotiation    = 0x01 // RFC 1929 sub-negotiation version
+	AuthMethodNone     = 0x00
+	AuthMethodPassword = 0x02
+	AuthMethodNoAccept = 0xFF
+	AuthSubnegotiation = 0x01 // RFC 1929 sub-negotiation version
 
 	CommandConnect      = 0x01
 	CommandBind         = 0x02

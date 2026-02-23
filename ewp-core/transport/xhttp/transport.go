@@ -1,4 +1,4 @@
-﻿package xhttp
+package xhttp
 
 import (
 	"context"
@@ -20,42 +20,45 @@ import (
 )
 
 type Transport struct {
-	serverAddr        string
-	serverIP          string
-	token             string
-	password          string // Trojan password
-	uuid              [16]byte
-	uuidStr           string
-	useECH            bool
-	enableFlow        bool
-	enablePQC         bool
-	useTrojan         bool // Use Trojan protocol
-	path              string
-	mode              string
-	echManager        *commontls.ECHManager
+	serverAddr string
+	serverIP   string
+	token      string
+	password   string // Trojan password
+	uuid       [16]byte
+	uuidStr    string
+	useECH     bool
+	enableFlow bool
+	enablePQC  bool
+	useTrojan  bool // Use Trojan protocol
+	path       string
+	mode       string
+	echManager *commontls.ECHManager
 
 	// Xray-core 风格的随机化配置
-	paddingBytes     RangeConfig  // Referer padding 大小
-	postSizeRange    RangeConfig  // POST 请求体大小随机化
-	requestInterval  RangeConfig  // 请求间隔随机化
-	maxConcurrent    RangeConfig  // 最大并发数随机化
-	connectionTimeout RangeConfig  // 连接超时随机化
+	paddingBytes      RangeConfig // Referer padding 大小
+	postSizeRange     RangeConfig // POST 请求体大小随机化
+	requestInterval   RangeConfig // 请求间隔随机化
+	maxConcurrent     RangeConfig // 最大并发数随机化
+	connectionTimeout RangeConfig // 连接超时随机化
 
 	// HTTP 头部配置
 	customHeaders    map[string]string
-	enablePadding    bool  // 是否启用 padding（ECH 环境下建议关闭路径 padding）
-	paddingInReferer bool  // 仅在 Referer 中添加 padding
+	enablePadding    bool // 是否启用 padding（ECH 环境下建议关闭路径 padding）
+	paddingInReferer bool // 仅在 Referer 中添加 padding
 
 	// Browser Dialer 配置
-	useBrowserDialer bool  // 是否使用 Browser Dialer
+	useBrowserDialer bool // 是否使用 Browser Dialer
 
 	// SSE 伪装配置
-	useSSEHeaders bool  // 伪装成 Server-Sent Events 流
-	noSSEHeader   bool  // 禁用 SSE Content-Type（某些 CDN 场景）
+	useSSEHeaders bool // 伪装成 Server-Sent Events 流
+	noSSEHeader   bool // 禁用 SSE Content-Type（某些 CDN 场景）
 
 	// Xmux 连接池管理
-	xmuxConfig XmuxConfig
+	xmuxConfig  XmuxConfig
 	xmuxManager *XmuxManager
+	xmuxMu      sync.Mutex
+
+	bypassCfg *transport.BypassConfig
 }
 
 func New(serverAddr, serverIP, token string, useECH, enableFlow bool, path string, echManager *commontls.ECHManager) (*Transport, error) {
@@ -81,47 +84,47 @@ func NewWithProtocol(serverAddr, serverIP, token, password string, useECH, enabl
 
 	// 初始化 Xmux 配置
 	xmuxConfig := XmuxConfig{
-		MaxConcurrency: &RangeConfig{From: 2, To: 5},      // 每个连接最大并发 2-5
-		MaxConnections: &RangeConfig{From: 1, To: 3},      // 总共 1-3 个连接
-		CMaxReuseTimes: &RangeConfig{From: 0, To: 0},     // 连接复用次数无限制
-		HMaxRequestTimes: &RangeConfig{From: 50, To: 100}, // 每个连接处理 50-100 个请求
+		MaxConcurrency:   &RangeConfig{From: 2, To: 5},     // 每个连接最大并发 2-5
+		MaxConnections:   &RangeConfig{From: 1, To: 3},     // 总共 1-3 个连接
+		CMaxReuseTimes:   &RangeConfig{From: 0, To: 0},     // 连接复用次数无限制
+		HMaxRequestTimes: &RangeConfig{From: 50, To: 100},  // 每个连接处理 50-100 个请求
 		HMaxReusableSecs: &RangeConfig{From: 300, To: 600}, // 连接可重用 5-10 分钟
-		HKeepAlivePeriod: 30, // Keep-Alive 30 秒
+		HKeepAlivePeriod: 30,                               // Keep-Alive 30 秒
 	}
 
 	return &Transport{
-		serverAddr:        serverAddr,
-		serverIP:          serverIP,
-		token:             token,
-		password:          password,
-		uuid:              uuid,
-		uuidStr:           token,
-		useECH:            useECH,
-		enableFlow:        enableFlow,
-		enablePQC:         enablePQC,
-		useTrojan:         useTrojan,
-		path:              path,
-		mode:              "stream-one",
-		echManager:        echManager,
+		serverAddr: serverAddr,
+		serverIP:   serverIP,
+		token:      token,
+		password:   password,
+		uuid:       uuid,
+		uuidStr:    token,
+		useECH:     useECH,
+		enableFlow: enableFlow,
+		enablePQC:  enablePQC,
+		useTrojan:  useTrojan,
+		path:       path,
+		mode:       "stream-one",
+		echManager: echManager,
 
 		// 随机化配置 - 基于 Xray-core
-		paddingBytes:     RangeConfig{From: 50, To: 200},   // Referer padding
-		postSizeRange:    RangeConfig{From: 1024, To: 4096}, // POST 大小
-		requestInterval:  RangeConfig{From: 10, To: 100},   // 请求间隔 ms
-		maxConcurrent:    RangeConfig{From: 2, To: 5},      // 并发数
+		paddingBytes:      RangeConfig{From: 50, To: 200},     // Referer padding
+		postSizeRange:     RangeConfig{From: 1024, To: 4096},  // POST 大小
+		requestInterval:   RangeConfig{From: 10, To: 100},     // 请求间隔 ms
+		maxConcurrent:     RangeConfig{From: 2, To: 5},        // 并发数
 		connectionTimeout: RangeConfig{From: 5000, To: 10000}, // 连接超时 ms
 
 		// HTTP 配置
 		customHeaders:    make(map[string]string),
 		enablePadding:    true,
 		paddingInReferer: paddingInReferer,
-		
+
 		// SSE 伪装配置（默认启用）
-		useSSEHeaders:    true,  // 伪装成 SSE 流，对抗 CDN/Nginx 缓冲
-		noSSEHeader:      false, // 某些 CDN 可能需要禁用 Content-Type
+		useSSEHeaders: true,  // 伪装成 SSE 流，对抗 CDN/Nginx 缓冲
+		noSSEHeader:   false, // 某些 CDN 可能需要禁用 Content-Type
 
 		// Xmux 连接池配置
-		xmuxConfig: xmuxConfig,
+		xmuxConfig:  xmuxConfig,
 		xmuxManager: nil, // 延迟初始化
 	}, nil
 }
@@ -146,8 +149,9 @@ func (t *Transport) SetPaddingConfig(enable bool, onlyReferer bool) *Transport {
 
 // SetXmuxConfig 设置 Xmux 连接池配置
 func (t *Transport) SetXmuxConfig(config XmuxConfig) *Transport {
+	t.xmuxMu.Lock()
+	defer t.xmuxMu.Unlock()
 	t.xmuxConfig = config
-	// 重新初始化连接池管理器
 	if t.xmuxManager != nil {
 		t.xmuxManager.Close()
 		t.xmuxManager = nil
@@ -173,11 +177,22 @@ func (t *Transport) SetBrowserDialer(enable bool) *Transport {
 	return t
 }
 
-// getXmuxManager 获取或创建 Xmux 管理器
+func (t *Transport) SetBypassConfig(cfg *transport.BypassConfig) {
+	t.xmuxMu.Lock()
+	defer t.xmuxMu.Unlock()
+	t.bypassCfg = cfg
+	if t.xmuxManager != nil {
+		t.xmuxManager.Close()
+		t.xmuxManager = nil
+	}
+}
+
+// getXmuxManager 获取或创建 Xmux 管理器（线程安全）
 func (t *Transport) getXmuxManager() *XmuxManager {
+	t.xmuxMu.Lock()
+	defer t.xmuxMu.Unlock()
 	if t.xmuxManager == nil {
 		t.xmuxManager = NewXmuxManager(t.xmuxConfig, func() XmuxConn {
-			// 创建新的 HTTP 客户端连接
 			httpClient, _ := t.createHTTPClient(t.parseHost(), t.parsePort())
 			return NewXmuxHTTPClient(httpClient)
 		})
@@ -224,14 +239,14 @@ func (t *Transport) GetRequestHeader(rawURL string) http.Header {
 
 	// 添加其他标准头部
 	header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-	
+
 	// SSE 伪装：Accept text/event-stream 让中间件认为这是 SSE 长连接
 	if t.useSSEHeaders {
 		header.Set("Accept", "text/event-stream")
 	} else {
 		header.Set("Accept", "*/*")
 	}
-	
+
 	header.Set("Accept-Language", "en-US,en;q=0.9")
 	header.Set("Cache-Control", "no-cache")
 	header.Set("Pragma", "no-cache")
@@ -323,15 +338,20 @@ func (t *Transport) createHTTPClient(host, port string) (*http.Client, error) {
 	// HTTP/2 Transport 配置 - 参考 Xray-core ChromeH2KeepAlivePeriod
 	h2Transport := &http2.Transport{
 		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
-			// 使用 TCP Fast Open 减少延迟
-			rawConn, err := commonnet.DialTFOContext(ctx, "tcp", target, 10*time.Second)
+			var rawConn net.Conn
+			var err error
+			if t.bypassCfg != nil && t.bypassCfg.TCPDialer != nil {
+				rawConn, err = t.bypassCfg.TCPDialer.DialContext(ctx, "tcp", target)
+			} else {
+				rawConn, err = commonnet.DialTFOContext(ctx, "tcp", target, 10*time.Second)
+			}
 			if err != nil {
 				return nil, err
 			}
 			return tls.Client(rawConn, stdConfig), nil
 		},
-		IdleConnTimeout:            90 * time.Second,  // 连接空闲超时
-		ReadIdleTimeout:            15 * time.Second,  // 读空闲超时（参考 Chrome）→ 触发 HTTP/2 PING
+		IdleConnTimeout:            90 * time.Second, // 连接空闲超时
+		ReadIdleTimeout:            15 * time.Second, // 读空闲超时（参考 Chrome）→ 触发 HTTP/2 PING
 		StrictMaxConcurrentStreams: true,             // 严格限制并发流数
 	}
 
@@ -446,8 +466,8 @@ func (t *Transport) dialStreamDown() (transport.TunnelConn, error) {
 		t, // 传递 Transport 以获取新功能
 	), nil
 }
-  
-// isIPAddress checks if a string is an IP address  
-func isIPAddress(s string) bool {  
-	return net.ParseIP(s) != nil  
-} 
+
+// isIPAddress checks if a string is an IP address
+func isIPAddress(s string) bool {
+	return net.ParseIP(s) != nil
+}

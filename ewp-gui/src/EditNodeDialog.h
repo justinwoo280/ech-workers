@@ -22,6 +22,7 @@ private slots:
     void onTransportModeChanged(int index);
     void onProtocolChanged(int index);
     void onEnableECHToggled(bool checked);
+    void onEnableTLSToggled(bool checked);
     void onGenerateUUID();
 
 private:

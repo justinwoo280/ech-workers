@@ -13,7 +13,7 @@ const (
 
 	CommandTCP byte = 0x01
 	CommandUDP byte = 0x03
-	CommandMux byte = 0x7f  // Mux 多路复用命令
+	CommandMux byte = 0x7f // Mux 多路复用命令
 
 	AddressTypeIPv4   byte = 0x01
 	AddressTypeIPv6   byte = 0x04

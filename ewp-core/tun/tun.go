@@ -1,4 +1,4 @@
-﻿package tun
+package tun
 
 import (
 	"context"
@@ -15,14 +15,15 @@ import (
 )
 
 type Config struct {
-	IP        string
-	Gateway   string
-	Mask      string
-	DNS       string
-	IPv6      string
-	IPv6DNS   string
-	MTU       int
-	Transport transport.Transport
+	IP          string
+	DNS         string
+	IPv6        string
+	IPv6DNS     string
+	MTU         int
+	Stack       string
+	AutoRoute   bool
+	StrictRoute bool
+	Transport   transport.Transport
 }
 
 type TUN struct {
@@ -36,20 +37,34 @@ type TUN struct {
 
 type tunLogger struct{}
 
-func (l *tunLogger) Trace(args ...interface{})                   { log.V("%s", fmt.Sprint(args...)) }
-func (l *tunLogger) Debug(args ...interface{})                   { log.V("%s", fmt.Sprint(args...)) }
-func (l *tunLogger) Info(args ...interface{})                    { log.Printf("%s", fmt.Sprint(args...)) }
-func (l *tunLogger) Warn(args ...interface{})                    { log.Printf("%s", fmt.Sprint(args...)) }
-func (l *tunLogger) Error(args ...interface{})                   { log.Printf("%s", fmt.Sprint(args...)) }
-func (l *tunLogger) Fatal(args ...interface{})                   { log.Printf("%s", fmt.Sprint(args...)) }
-func (l *tunLogger) Panic(args ...interface{})                   { log.Printf("%s", fmt.Sprint(args...)) }
-func (l *tunLogger) TraceContext(ctx context.Context, args ...interface{}) { log.V("%s", fmt.Sprint(args...)) }
-func (l *tunLogger) DebugContext(ctx context.Context, args ...interface{}) { log.V("%s", fmt.Sprint(args...)) }
-func (l *tunLogger) InfoContext(ctx context.Context, args ...interface{})  { log.Printf("%s", fmt.Sprint(args...)) }
-func (l *tunLogger) WarnContext(ctx context.Context, args ...interface{})  { log.Printf("%s", fmt.Sprint(args...)) }
-func (l *tunLogger) ErrorContext(ctx context.Context, args ...interface{}) { log.Printf("%s", fmt.Sprint(args...)) }
-func (l *tunLogger) FatalContext(ctx context.Context, args ...interface{}) { log.Printf("%s", fmt.Sprint(args...)) }
-func (l *tunLogger) PanicContext(ctx context.Context, args ...interface{}) { log.Printf("%s", fmt.Sprint(args...)) }
+func (l *tunLogger) Trace(args ...interface{}) { log.V("%s", fmt.Sprint(args...)) }
+func (l *tunLogger) Debug(args ...interface{}) { log.V("%s", fmt.Sprint(args...)) }
+func (l *tunLogger) Info(args ...interface{})  { log.Printf("%s", fmt.Sprint(args...)) }
+func (l *tunLogger) Warn(args ...interface{})  { log.Printf("%s", fmt.Sprint(args...)) }
+func (l *tunLogger) Error(args ...interface{}) { log.Printf("%s", fmt.Sprint(args...)) }
+func (l *tunLogger) Fatal(args ...interface{}) { log.Printf("%s", fmt.Sprint(args...)) }
+func (l *tunLogger) Panic(args ...interface{}) { log.Printf("%s", fmt.Sprint(args...)) }
+func (l *tunLogger) TraceContext(ctx context.Context, args ...interface{}) {
+	log.V("%s", fmt.Sprint(args...))
+}
+func (l *tunLogger) DebugContext(ctx context.Context, args ...interface{}) {
+	log.V("%s", fmt.Sprint(args...))
+}
+func (l *tunLogger) InfoContext(ctx context.Context, args ...interface{}) {
+	log.Printf("%s", fmt.Sprint(args...))
+}
+func (l *tunLogger) WarnContext(ctx context.Context, args ...interface{}) {
+	log.Printf("%s", fmt.Sprint(args...))
+}
+func (l *tunLogger) ErrorContext(ctx context.Context, args ...interface{}) {
+	log.Printf("%s", fmt.Sprint(args...))
+}
+func (l *tunLogger) FatalContext(ctx context.Context, args ...interface{}) {
+	log.Printf("%s", fmt.Sprint(args...))
+}
+func (l *tunLogger) PanicContext(ctx context.Context, args ...interface{}) {
+	log.Printf("%s", fmt.Sprint(args...))
+}
 
 var _ logger.Logger = (*tunLogger)(nil)
 
@@ -72,7 +87,6 @@ func New(cfg *Config) (*TUN, error) {
 		cancel()
 		return nil, fmt.Errorf("parse IPv4 address failed: %w", err)
 	}
-	// Always enable IPv6 (dual-stack by default)
 	inet6Addrs := []netip.Prefix{}
 	if cfg.IPv6 != "" {
 		inet6Addr, err := netip.ParsePrefix(cfg.IPv6)
@@ -81,13 +95,8 @@ func New(cfg *Config) (*TUN, error) {
 		} else {
 			inet6Addrs = append(inet6Addrs, inet6Addr)
 		}
-	} else {
-		// Default IPv6 ULA (Unique Local Address) to prevent IPv6 leaks
-		inet6Addr, _ := netip.ParsePrefix("fd00:5ca1:e::2/64")
-		inet6Addrs = append(inet6Addrs, inet6Addr)
 	}
 
-	// Configure DNS servers (IPv4 + IPv6)
 	dnsAddrs := []netip.Addr{}
 	if cfg.DNS != "" {
 		dnsAddr, err := netip.ParseAddr(cfg.DNS)
@@ -100,19 +109,21 @@ func New(cfg *Config) (*TUN, error) {
 		if err == nil {
 			dnsAddrs = append(dnsAddrs, dns6Addr)
 		}
-	} else {
-		// Default to Google Public DNS IPv6 (real public address)
-		// This will be tunneled through the proxy to the real DNS server
-		dns6Addr, _ := netip.ParseAddr("2001:4860:4860::8888")
-		dnsAddrs = append(dnsAddrs, dns6Addr)
 	}
+
+	stackName := cfg.Stack
+	if stackName == "" {
+		stackName = "system"
+	}
+	cfg.Stack = stackName
 
 	tunOptions := tun.Options{
 		Name:         "ewp-tun",
 		Inet4Address: []netip.Prefix{inet4Addr},
 		Inet6Address: inet6Addrs,
 		MTU:          mtu,
-		AutoRoute:    true,
+		AutoRoute:    cfg.AutoRoute,
+		StrictRoute:  cfg.StrictRoute,
 		DNSServers:   dnsAddrs,
 		Logger:       &tunLogger{},
 	}
@@ -132,7 +143,7 @@ func New(cfg *Config) (*TUN, error) {
 		UDPTimeout: 5 * time.Minute,
 	}
 
-	stack, err := tun.NewStack("system", stackOptions)
+	stack, err := tun.NewStack(stackName, stackOptions)
 	if err != nil {
 		tunDevice.Close()
 		cancel()
@@ -154,23 +165,24 @@ func (t *TUN) Start() error {
 		return fmt.Errorf("start stack failed: %w", err)
 	}
 
-	log.Printf("[TUN] TUN mode started (dual-stack)")
+	log.Printf("[TUN] TUN mode started (stack=%s, auto_route=%v, strict_route=%v)",
+		t.config.Stack, t.config.AutoRoute, t.config.StrictRoute)
 	log.Printf("[TUN] IPv4: %s", t.config.IP)
 	if t.config.IPv6 != "" {
 		log.Printf("[TUN] IPv6: %s", t.config.IPv6)
-	} else {
-		log.Printf("[TUN] IPv6: fd00:5ca1:e::2/64 (auto-configured)")
 	}
 	log.Printf("[TUN] DNS: IPv4=%s, IPv6=%s", t.config.DNS, t.config.IPv6DNS)
-	log.Printf("[TUN] ✅ All traffic (IPv4 + IPv6) routed through proxy tunnel")
-	log.Printf("[TUN] ✅ DNS leak protection enabled (dual-stack)")
-	log.Printf("[TUN] ✅ WebRTC leak protection enabled (STUN/TURN tunneled)")
 
-	select {}
+	<-t.ctx.Done()
+	return nil
 }
 
 func (t *TUN) Close() error {
 	log.Printf("[TUN] Stopping TUN mode...")
+
+	if t.cancel != nil {
+		t.cancel()
+	}
 
 	if t.stack != nil {
 		t.stack.Close()
@@ -178,10 +190,6 @@ func (t *TUN) Close() error {
 
 	if t.device != nil {
 		t.device.Close()
-	}
-
-	if t.cancel != nil {
-		t.cancel()
 	}
 
 	log.Printf("[TUN] TUN mode stopped")

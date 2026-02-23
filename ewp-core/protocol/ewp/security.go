@@ -11,7 +11,7 @@ import (
 type NonceCache struct {
 	mu      sync.RWMutex
 	entries map[string]int64 // nonce -> expireTime
-	ttl     int64             // 过期时间（秒）
+	ttl     int64            // 过期时间（秒）
 }
 
 // NewNonceCache 创建 Nonce 缓存
@@ -20,10 +20,10 @@ func NewNonceCache() *NonceCache {
 		entries: make(map[string]int64),
 		ttl:     TimeWindow * 2, // 240 秒
 	}
-	
+
 	// 启动清理 goroutine
 	go cache.cleanup()
-	
+
 	return cache
 }
 
@@ -71,10 +71,10 @@ func (c *NonceCache) CheckAndAdd(nonce [12]byte) bool {
 func (c *NonceCache) cleanup() {
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
-	
+
 	for range ticker.C {
 		now := time.Now().Unix()
-		
+
 		c.mu.Lock()
 		for key, expireTime := range c.entries {
 			if expireTime <= now {
@@ -87,15 +87,15 @@ func (c *NonceCache) cleanup() {
 
 // RateLimiter 实现 IP 级别的速率限制（防 DoS）
 type RateLimiter struct {
-	mu       sync.RWMutex
-	entries  map[string]*rateLimitEntry
-	maxRate  int           // 每秒最大请求数
-	banTime  time.Duration // 封禁时长
+	mu      sync.RWMutex
+	entries map[string]*rateLimitEntry
+	maxRate int           // 每秒最大请求数
+	banTime time.Duration // 封禁时长
 }
 
 type rateLimitEntry struct {
-	count      int
-	resetTime  int64
+	count       int
+	resetTime   int64
 	bannedUntil int64
 }
 
@@ -108,10 +108,10 @@ func NewRateLimiter(maxRate int, banTime time.Duration) *RateLimiter {
 		maxRate: maxRate,
 		banTime: banTime,
 	}
-	
+
 	// 启动清理 goroutine
 	go limiter.cleanup()
-	
+
 	return limiter
 }
 
@@ -119,10 +119,10 @@ func NewRateLimiter(maxRate int, banTime time.Duration) *RateLimiter {
 // 返回 true 表示允许，false 表示拒绝（被封禁或超限）
 func (r *RateLimiter) Allow(ip string) bool {
 	now := time.Now().Unix()
-	
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	
+
 	entry, exists := r.entries[ip]
 	if !exists {
 		// 新 IP，创建条目
@@ -132,38 +132,38 @@ func (r *RateLimiter) Allow(ip string) bool {
 		}
 		return true
 	}
-	
+
 	// 检查是否被封禁
 	if entry.bannedUntil > now {
 		return false
 	}
-	
+
 	// 检查是否需要重置计数器
 	if entry.resetTime <= now {
 		entry.count = 1
 		entry.resetTime = now + 1
 		return true
 	}
-	
+
 	// 增加计数
 	entry.count++
-	
+
 	// 检查是否超限
 	if entry.count > r.maxRate {
 		entry.bannedUntil = now + int64(r.banTime.Seconds())
 		return false
 	}
-	
+
 	return true
 }
 
 // RecordFailure 记录认证失败（多次失败可延长封禁）
 func (r *RateLimiter) RecordFailure(ip string) {
 	now := time.Now().Unix()
-	
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	
+
 	entry, exists := r.entries[ip]
 	if !exists {
 		r.entries[ip] = &rateLimitEntry{
@@ -173,7 +173,7 @@ func (r *RateLimiter) RecordFailure(ip string) {
 		}
 		return
 	}
-	
+
 	// 延长封禁时间（每次失败增加封禁时间）
 	entry.bannedUntil = now + int64(r.banTime.Seconds())
 }
@@ -182,10 +182,10 @@ func (r *RateLimiter) RecordFailure(ip string) {
 func (r *RateLimiter) cleanup() {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
-	
+
 	for range ticker.C {
 		now := time.Now().Unix()
-		
+
 		r.mu.Lock()
 		for ip, entry := range r.entries {
 			// 清理已解封且计数器已重置的条目

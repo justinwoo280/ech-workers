@@ -21,9 +21,9 @@ type RootConfig struct {
 
 // LogConfig configures logging behavior
 type LogConfig struct {
-	Level     string `json:"level"`      // debug, info, warn, error
-	File      string `json:"file"`       // log file path (empty for stdout)
-	Timestamp bool   `json:"timestamp"`  // show timestamp
+	Level     string `json:"level"`     // debug, info, warn, error
+	File      string `json:"file"`      // log file path (empty for stdout)
+	Timestamp bool   `json:"timestamp"` // show timestamp
 }
 
 // DNSConfig configures DNS resolution (for tunnel DNS in TUN mode)
@@ -35,9 +35,9 @@ type DNSConfig struct {
 // DNSServerConfig defines a DNS server
 type DNSServerConfig struct {
 	Tag     string `json:"tag"`
-	Address string `json:"address"`           // IP, DoH URL, DoT server, or DoQ server
-	Type    string `json:"type,omitempty"`    // "doh", "dot", "doq", or empty for system DNS
-	Detour  string `json:"detour,omitempty"`  // route through specific outbound
+	Address string `json:"address"`          // IP, DoH URL, DoT server, or DoQ server
+	Type    string `json:"type,omitempty"`   // "doh", "dot", "doq", or empty for system DNS
+	Detour  string `json:"detour,omitempty"` // route through specific outbound
 }
 
 // UserConfig defines a proxy user with username and password.
@@ -54,7 +54,7 @@ type InboundConfig struct {
 	// For socks/http/mixed
 	Listen         string       `json:"listen,omitempty"`
 	UDP            bool         `json:"udp,omitempty"`
-	Users          []UserConfig `json:"users,omitempty"` // username/password auth (empty = no auth)
+	Users          []UserConfig `json:"users,omitempty"`           // username/password auth (empty = no auth)
 	MaxConnections int          `json:"max_connections,omitempty"` // 0 = unlimited
 
 	// For TUN
@@ -64,10 +64,10 @@ type InboundConfig struct {
 	MTU           int      `json:"mtu,omitempty"`
 	AutoRoute     bool     `json:"auto_route,omitempty"`
 	StrictRoute   bool     `json:"strict_route,omitempty"`
-	Stack         string   `json:"stack,omitempty"`       // gvisor, system
-	DNS           string   `json:"dns,omitempty"`         // IPv4 DNS server
-	IPv6DNS       string   `json:"ipv6_dns,omitempty"`    // IPv6 DNS server
-	TunnelDNS     []string `json:"tunnel_dns,omitempty"`  // Remote DNS servers for TUN mode (format: "type:address", e.g., "doq:dns.google:853")
+	Stack         string   `json:"stack,omitempty"`      // gvisor, system
+	DNS           string   `json:"dns,omitempty"`        // IPv4 DNS server
+	IPv6DNS       string   `json:"ipv6_dns,omitempty"`   // IPv6 DNS server
+	TunnelDNS     []string `json:"tunnel_dns,omitempty"` // Remote DNS servers for TUN mode (format: "type:address", e.g., "doq:dns.google:853")
 }
 
 // OutboundConfig defines an outbound connection handler
@@ -85,10 +85,10 @@ type OutboundConfig struct {
 	Password string `json:"password,omitempty"` // for trojan
 
 	// Protocol-specific
-	Transport  *TransportConfig  `json:"transport,omitempty"`
-	TLS        *TLSConfig        `json:"tls,omitempty"`
-	Flow       *FlowConfig       `json:"flow,omitempty"`       // for ewp
-	Multiplex  *MultiplexConfig  `json:"multiplex,omitempty"`  // for trojan
+	Transport *TransportConfig `json:"transport,omitempty"`
+	TLS       *TLSConfig       `json:"tls,omitempty"`
+	Flow      *FlowConfig      `json:"flow,omitempty"`      // for ewp
+	Multiplex *MultiplexConfig `json:"multiplex,omitempty"` // for trojan
 }
 
 // TransportConfig defines transport layer settings
@@ -96,26 +96,26 @@ type TransportConfig struct {
 	Type string `json:"type"` // ws, grpc, h3grpc, xhttp
 
 	// WebSocket
-	Path                 string            `json:"path,omitempty"`
-	Headers              map[string]string `json:"headers,omitempty"`
-	MaxEarlyData         int               `json:"max_early_data,omitempty"`
-	EarlyDataHeaderName  string            `json:"early_data_header_name,omitempty"`
+	Path                string            `json:"path,omitempty"`
+	Headers             map[string]string `json:"headers,omitempty"`
+	MaxEarlyData        int               `json:"max_early_data,omitempty"`
+	EarlyDataHeaderName string            `json:"early_data_header_name,omitempty"`
 
 	// gRPC / H3gRPC
-	ServiceName         string         `json:"service_name,omitempty"`
-	IdleTimeout         string         `json:"idle_timeout,omitempty"`
-	HealthCheckTimeout  string         `json:"health_check_timeout,omitempty"`
-	PermitWithoutStream bool           `json:"permit_without_stream,omitempty"`
-	InitialWindowSize   int32          `json:"initial_window_size,omitempty"`
+	ServiceName         string `json:"service_name,omitempty"`
+	IdleTimeout         string `json:"idle_timeout,omitempty"`
+	HealthCheckTimeout  string `json:"health_check_timeout,omitempty"`
+	PermitWithoutStream bool   `json:"permit_without_stream,omitempty"`
+	InitialWindowSize   int32  `json:"initial_window_size,omitempty"`
 
 	// H3gRPC specific
 	GRPCWeb     *GRPCWebConfig `json:"grpc_web,omitempty"`
 	Concurrency int            `json:"concurrency,omitempty"`
 	QUIC        *QUICConfig    `json:"quic,omitempty"`
-	
-	// Anti-DPI / Obfuscation (for gRPC/H3gRPC)
-	UserAgent   string `json:"user_agent,omitempty"`    // Custom User-Agent (default: browser-like)
-	ContentType string `json:"content_type,omitempty"`  // Custom Content-Type (default: application/octet-stream)
+
+	// Anti-DPI / Obfuscation
+	UserAgent   string `json:"user_agent,omitempty"`   // Custom User-Agent (gRPC/H3gRPC)
+	ContentType string `json:"content_type,omitempty"` // Custom Content-Type (H3gRPC only; gRPC H2 uses application/grpc+proto set by the library)
 
 	// XHTTP
 	Mode string `json:"mode,omitempty"` // auto, stream-one, stream-down
@@ -130,30 +130,30 @@ type GRPCWebConfig struct {
 
 // QUICConfig defines QUIC protocol settings
 type QUICConfig struct {
-	InitialStreamWindowSize      int    `json:"initial_stream_window_size"`
-	MaxStreamWindowSize          int    `json:"max_stream_window_size"`
-	InitialConnectionWindowSize  int    `json:"initial_connection_window_size"`
-	MaxConnectionWindowSize      int    `json:"max_connection_window_size"`
-	MaxIdleTimeout               string `json:"max_idle_timeout"`
-	KeepAlivePeriod              string `json:"keep_alive_period"`
-	DisablePathMTUDiscovery      bool   `json:"disable_path_mtu_discovery"`
+	InitialStreamWindowSize     int    `json:"initial_stream_window_size"`
+	MaxStreamWindowSize         int    `json:"max_stream_window_size"`
+	InitialConnectionWindowSize int    `json:"initial_connection_window_size"`
+	MaxConnectionWindowSize     int    `json:"max_connection_window_size"`
+	MaxIdleTimeout              string `json:"max_idle_timeout"`
+	KeepAlivePeriod             string `json:"keep_alive_period"`
+	DisablePathMTUDiscovery     bool   `json:"disable_path_mtu_discovery"`
 }
 
 // TLSConfig defines TLS settings
 type TLSConfig struct {
-	Enabled        bool        `json:"enabled"`
-	ServerName     string      `json:"server_name,omitempty"`
-	Insecure       bool        `json:"insecure,omitempty"`
-	ALPN           []string    `json:"alpn,omitempty"`
-	ECH            *ECHConfig  `json:"ech,omitempty"`
-	PQC            bool        `json:"pqc,omitempty"`
-	MinVersion     string      `json:"min_version,omitempty"`
-	MaxVersion     string      `json:"max_version,omitempty"`
-	CipherSuites   []string    `json:"cipher_suites,omitempty"`
-	Certificate    string      `json:"certificate,omitempty"`
+	Enabled         bool       `json:"enabled"`
+	ServerName      string     `json:"server_name,omitempty"`
+	Insecure        bool       `json:"insecure,omitempty"`
+	ALPN            []string   `json:"alpn,omitempty"`
+	ECH             *ECHConfig `json:"ech,omitempty"`
+	PQC             bool       `json:"pqc,omitempty"`
+	MinVersion      string     `json:"min_version,omitempty"`
+	MaxVersion      string     `json:"max_version,omitempty"`
+	CipherSuites    []string   `json:"cipher_suites,omitempty"`
+	Certificate     string     `json:"certificate,omitempty"`
 	CertificatePath string     `json:"certificate_path,omitempty"`
-	Key            string      `json:"key,omitempty"`
-	KeyPath        string      `json:"key_path,omitempty"`
+	Key             string     `json:"key,omitempty"`
+	KeyPath         string     `json:"key_path,omitempty"`
 }
 
 // ECHConfig defines ECH settings
@@ -166,8 +166,8 @@ type ECHConfig struct {
 
 // FlowConfig defines Vision flow control settings
 type FlowConfig struct {
-	Enabled bool    `json:"enabled"`
-	Padding []int   `json:"padding,omitempty"` // [long_max, long_min, short_max, short_min]
+	Enabled bool  `json:"enabled"`
+	Padding []int `json:"padding,omitempty"` // [long_max, long_min, short_max, short_min]
 }
 
 // MultiplexConfig defines multiplexing settings (for Trojan)
@@ -179,24 +179,24 @@ type MultiplexConfig struct {
 
 // RouteConfig defines routing rules
 type RouteConfig struct {
-	Final               string       `json:"final"` // default outbound tag
-	AutoDetectInterface bool         `json:"auto_detect_interface,omitempty"`
-	Rules               []RouteRule  `json:"rules,omitempty"`
+	Final               string      `json:"final"` // default outbound tag
+	AutoDetectInterface bool        `json:"auto_detect_interface,omitempty"`
+	Rules               []RouteRule `json:"rules,omitempty"`
 }
 
 // RouteRule defines a single routing rule
 type RouteRule struct {
-	Inbound        []string `json:"inbound,omitempty"`
-	Domain         []string `json:"domain,omitempty"`
-	DomainSuffix   []string `json:"domain_suffix,omitempty"`
-	DomainKeyword  []string `json:"domain_keyword,omitempty"`
-	DomainRegex    []string `json:"domain_regex,omitempty"`
-	IPCidr         []string `json:"ip_cidr,omitempty"`
-	SourceIPCidr   []string `json:"source_ip_cidr,omitempty"`
-	Protocol       []string `json:"protocol,omitempty"`
-	Port           []int    `json:"port,omitempty"`
-	PortRange      []string `json:"port_range,omitempty"`
-	Outbound       string   `json:"outbound"` // target outbound tag
+	Inbound       []string `json:"inbound,omitempty"`
+	Domain        []string `json:"domain,omitempty"`
+	DomainSuffix  []string `json:"domain_suffix,omitempty"`
+	DomainKeyword []string `json:"domain_keyword,omitempty"`
+	DomainRegex   []string `json:"domain_regex,omitempty"`
+	IPCidr        []string `json:"ip_cidr,omitempty"`
+	SourceIPCidr  []string `json:"source_ip_cidr,omitempty"`
+	Protocol      []string `json:"protocol,omitempty"`
+	Port          []int    `json:"port,omitempty"`
+	PortRange     []string `json:"port_range,omitempty"`
+	Outbound      string   `json:"outbound"` // target outbound tag
 }
 
 // DefaultRootConfig returns a RootConfig with sensible defaults
@@ -351,7 +351,7 @@ func (i *InboundConfig) Validate() error {
 			return fmt.Errorf("MTU must be at least 576")
 		}
 		if i.Stack == "" {
-			i.Stack = "gvisor"
+			i.Stack = "system"
 		}
 	}
 

@@ -40,14 +40,14 @@ EWPNode ShareLink::parseLink(const QString &link)
         return node;
     }
     
-    // 解析服务器地址和端口
-    node.serverAddress = url.host();
+    // 服务器地址（实际连接目标）和端口
+    node.serverIP = url.host();
     node.serverPort = url.port(443);
     
     // 解析节点名称
     node.name = url.fragment();
     if (node.name.isEmpty()) {
-        node.name = node.serverAddress;
+        node.name = node.serverIP;
     }
     
     // 解析查询参数
@@ -87,9 +87,17 @@ EWPNode ShareLink::parseLink(const QString &link)
         node.grpcServiceName = grpcService;
     }
     
-    // 优选 IP
-    node.serverIP = query.queryItemValue("ip");
-    
+    // Host 头（留空则同 serverIP）
+    node.serverAddress = query.queryItemValue("host");
+
+    // TLS 配置
+    node.enableTLS = query.queryItemValue("tls") != "0";
+    node.sni = query.queryItemValue("sni");
+    QString tlsVer = query.queryItemValue("tlsVer");
+    if (!tlsVer.isEmpty()) {
+        node.minTLSVersion = tlsVer;
+    }
+
     // ECH 配置
     node.enableECH = query.queryItemValue("ech") == "1";
     QString echDomain = query.queryItemValue("echDomain");
@@ -130,7 +138,7 @@ QString ShareLink::generateLink(const EWPNode &node)
         url.setUserName(node.uuid);
     }
     
-    url.setHost(node.serverAddress);
+    url.setHost(node.serverIP);
     url.setPort(node.serverPort);
     url.setFragment(node.name);
     
@@ -166,11 +174,22 @@ QString ShareLink::generateLink(const EWPNode &node)
             break;
     }
     
-    // 优选 IP
-    if (!node.serverIP.isEmpty()) {
-        query.addQueryItem("ip", node.serverIP);
+    // Host 头（非空且不同于连接目标时才写入）
+    if (!node.serverAddress.isEmpty()) {
+        query.addQueryItem("host", node.serverAddress);
     }
-    
+
+    // TLS 配置
+    if (!node.enableTLS) {
+        query.addQueryItem("tls", "0");
+    }
+    if (!node.sni.isEmpty()) {
+        query.addQueryItem("sni", node.sni);
+    }
+    if (node.minTLSVersion == "1.3") {
+        query.addQueryItem("tlsVer", "1.3");
+    }
+
     // ECH 配置
     query.addQueryItem("ech", node.enableECH ? "1" : "0");
     if (node.enableECH && node.echDomain != "cloudflare-ech.com") {

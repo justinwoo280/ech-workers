@@ -192,6 +192,15 @@ func (c *SimpleConn) ReadUDP() ([]byte, error) {
 	return ewp.DecodeUDPPayload(msg)
 }
 
+// ReadUDPTo reads and decodes an EWP-framed UDP response packet directly into the provided buffer
+func (c *SimpleConn) ReadUDPTo(buf []byte) (int, error) {
+	_, msg, err := c.conn.ReadMessage()
+	if err != nil {
+		return 0, err
+	}
+	return ewp.DecodeUDPPayloadTo(msg, buf)
+}
+
 // Read reads data from WebSocket
 func (c *SimpleConn) Read(buf []byte) (int, error) {
 	_, msg, err := c.conn.ReadMessage()

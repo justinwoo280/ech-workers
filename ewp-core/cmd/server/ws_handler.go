@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"time"
 
-	log "ewp-core/log"
 	"ewp-core/internal/server"
+	log "ewp-core/log"
 	"ewp-core/protocol/trojan"
 	wstransport "ewp-core/transport/websocket"
 

@@ -312,6 +312,19 @@ func (c *Conn) ReadUDP() ([]byte, error) {
 	return ewp.DecodeUDPPayload(data)
 }
 
+// ReadUDPTo reads and decodes an EWP-framed UDP response packet directly into the provided buffer
+func (c *Conn) ReadUDPTo(buf []byte) (int, error) {
+	resp := &pb.SocketData{}
+	if err := c.stream.RecvMsg(resp); err != nil {
+		return 0, err
+	}
+	data := resp.Content
+	if !c.useTrojan && c.enableFlow && c.flowState != nil {
+		data = c.flowState.ProcessDownlink(data)
+	}
+	return ewp.DecodeUDPPayloadTo(data, buf)
+}
+
 func (c *Conn) Read(buf []byte) (int, error) {
 	resp := &pb.SocketData{}
 	err := c.stream.RecvMsg(resp)

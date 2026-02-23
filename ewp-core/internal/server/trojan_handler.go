@@ -3,8 +3,8 @@ package server
 import (
 	"strings"
 
-	"ewp-core/protocol/trojan"
 	ewplog "ewp-core/log"
+	"ewp-core/protocol/trojan"
 )
 
 var (

@@ -1,4 +1,4 @@
-﻿package grpc
+package grpc
 
 import (
 	"context"
@@ -26,6 +26,7 @@ type grpcConnKey struct {
 	authority string
 	useTLS    bool
 	useECH    bool
+	bypass    bool
 }
 
 var (
@@ -37,12 +38,12 @@ type Transport struct {
 	serverAddr          string
 	serverIP            string
 	uuidStr             string
-	password            string  // Trojan password
+	password            string // Trojan password
 	uuid                [16]byte
 	useECH              bool
 	enableFlow          bool
 	enablePQC           bool
-	useTrojan           bool    // Use Trojan protocol
+	useTrojan           bool // Use Trojan protocol
 	serviceName         string
 	authority           string
 	idleTimeout         time.Duration
@@ -50,8 +51,8 @@ type Transport struct {
 	permitWithoutStream bool
 	initialWindowSize   int32
 	userAgent           string
-	contentType         string
 	echManager          *commontls.ECHManager
+	bypassCfg           *transport.BypassConfig
 }
 
 func New(serverAddr, serverIP, uuidStr string, useECH, enableFlow bool, serviceName string, echManager *commontls.ECHManager) (*Transport, error) {
@@ -90,7 +91,6 @@ func NewWithProtocol(serverAddr, serverIP, uuidStr, password string, useECH, ena
 		permitWithoutStream: false,
 		initialWindowSize:   0,
 		userAgent:           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-		contentType:         "application/octet-stream",
 		echManager:          echManager,
 	}, nil
 }
@@ -117,11 +117,8 @@ func (t *Transport) SetUserAgent(userAgent string) *Transport {
 	return t
 }
 
-func (t *Transport) SetContentType(contentType string) *Transport {
-	if contentType != "" {
-		t.contentType = contentType
-	}
-	return t
+func (t *Transport) SetBypassConfig(cfg *transport.BypassConfig) {
+	t.bypassCfg = cfg
 }
 
 func (t *Transport) Name() string {
@@ -149,7 +146,7 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 
 	addr := net.JoinHostPort(parsed.Host, parsed.Port)
 	resolvedIP := t.serverIP
-	
+
 	// Resolve serverIP if it's a domain name using system DNS
 	if resolvedIP != "" && !isIPAddress(resolvedIP) {
 		ips, err := net.LookupIP(resolvedIP)
@@ -164,7 +161,7 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 			return nil, fmt.Errorf("no IPs returned for serverIP %s", t.serverIP)
 		}
 	}
-	
+
 	// If no serverIP specified, resolve using system DNS
 	if resolvedIP == "" && !isIPAddress(parsed.Host) {
 		ips, err := net.LookupIP(parsed.Host)
@@ -176,7 +173,7 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 			resolvedIP = ips[0].String()
 		}
 	}
-	
+
 	if resolvedIP != "" {
 		addr = net.JoinHostPort(resolvedIP, parsed.Port)
 		log.Printf("[gRPC] Connecting to: %s (SNI: %s)", addr, parsed.Host)
@@ -223,6 +220,7 @@ func (t *Transport) getOrCreateConn(host, addr string) (*grpc.ClientConn, error)
 		authority: t.authority,
 		useTLS:    true,
 		useECH:    t.useECH,
+		bypass:    t.bypassCfg != nil,
 	}
 
 	grpcConnPoolMutex.Lock()
@@ -239,8 +237,11 @@ func (t *Transport) getOrCreateConn(host, addr string) (*grpc.ClientConn, error)
 
 	var opts []grpc.DialOption
 
-	// Use TCP Fast Open for reduced latency
+	// Use bypass dialer in TUN mode to avoid routing loops; else TFO
 	opts = append(opts, grpc.WithContextDialer(func(ctx context.Context, address string) (net.Conn, error) {
+		if t.bypassCfg != nil && t.bypassCfg.TCPDialer != nil {
+			return t.bypassCfg.TCPDialer.DialContext(ctx, "tcp", address)
+		}
 		return commonnet.DialTFOContext(ctx, "tcp", address, 10*time.Second)
 	}))
 
@@ -328,11 +329,11 @@ func (t *Transport) handleECHRejection(err error) error {
 	// Try to extract ECH rejection error
 	// Go's tls.ECHRejectionError is returned wrapped in connection errors
 	var echRejErr interface{ RetryConfigList() []byte }
-	
+
 	// Check if error message contains ECH rejection
 	errMsg := err.Error()
-	if !strings.Contains(errMsg, "server rejected ECH") && 
-	   !strings.Contains(errMsg, "ECH") {
+	if !strings.Contains(errMsg, "server rejected ECH") &&
+		!strings.Contains(errMsg, "ECH") {
 		return errors.New("not ECH rejection")
 	}
 
@@ -344,7 +345,7 @@ func (t *Transport) handleECHRejection(err error) error {
 			echRejErr = rejErr
 			break
 		}
-		
+
 		// Try to unwrap
 		unwrapped := errors.Unwrap(cause)
 		if unwrapped == nil {

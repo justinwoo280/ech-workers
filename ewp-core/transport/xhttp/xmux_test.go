@@ -9,9 +9,9 @@ import (
 func TestXmuxManager(t *testing.T) {
 	// 创建测试配置
 	config := XmuxConfig{
-		MaxConcurrency:  &RangeConfig{From: 2, To: 3},
-		MaxConnections:  &RangeConfig{From: 1, To: 2},
-		CMaxReuseTimes:  &RangeConfig{From: 5, To: 10},
+		MaxConcurrency:   &RangeConfig{From: 2, To: 3},
+		MaxConnections:   &RangeConfig{From: 1, To: 2},
+		CMaxReuseTimes:   &RangeConfig{From: 5, To: 10},
 		HMaxRequestTimes: &RangeConfig{From: 10, To: 20},
 		HMaxReusableSecs: &RangeConfig{From: 60, To: 120},
 		HKeepAlivePeriod: 30,
@@ -72,8 +72,8 @@ func TestXmuxConfigNormalization(t *testing.T) {
 
 // mockXmuxConn 模拟连接实现
 type mockXmuxConn struct {
-	closed      bool
-	lastActive  time.Time
+	closed       bool
+	lastActive   time.Time
 	requestCount int64
 }
 
@@ -102,7 +102,7 @@ func (m *mockXmuxConn) IncrementRequestCount() {
 // TestRangeConfigRand 测试随机化配置
 func TestRangeConfigRand(t *testing.T) {
 	config := RangeConfig{From: 10, To: 20}
-	
+
 	// 测试多次随机生成
 	for i := 0; i < 100; i++ {
 		val := config.Rand()

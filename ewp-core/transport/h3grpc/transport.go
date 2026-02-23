@@ -1,6 +1,7 @@
 package h3grpc
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -20,24 +21,25 @@ import (
 
 // Transport implements HTTP/3 transport for gRPC-Web
 type Transport struct {
-	serverAddr     string
-	serverIP       string
-	uuidStr        string
-	password       string
-	uuid           [16]byte
-	useECH         bool
-	enableFlow     bool
-	enablePQC      bool
-	useTrojan      bool
-	serviceName    string
-	authority      string
-	idleTimeout    time.Duration
-	concurrency    int
-	echManager     *commontls.ECHManager
+	serverAddr  string
+	serverIP    string
+	uuidStr     string
+	password    string
+	uuid        [16]byte
+	useECH      bool
+	enableFlow  bool
+	enablePQC   bool
+	useTrojan   bool
+	serviceName string
+	authority   string
+	idleTimeout time.Duration
+	concurrency int
+	echManager  *commontls.ECHManager
+	bypassCfg   *transport.BypassConfig
 
 	// Anti-DPI settings
-	userAgent      string
-	contentType    string
+	userAgent   string
+	contentType string
 
 	// HTTP/3 specific — protected by mu
 	mu             sync.RWMutex
@@ -85,7 +87,7 @@ func NewWithProtocol(serverAddr, serverIP, uuidStr, password string, useECH, ena
 		echManager:  echManager,
 
 		userAgent:   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-		contentType: "application/octet-stream",
+		contentType: "application/grpc-web+proto",
 	}
 
 	if err := t.initClient(); err != nil {
@@ -211,6 +213,47 @@ func (t *Transport) SetContentType(ct string) *Transport {
 		t.contentType = ct
 	}
 	return t
+}
+
+// SetBypassConfig injects a bypass dialer for TUN mode.
+// When set, QUIC connections are established via a UDP socket bound to the
+// physical network interface, bypassing the TUN routing table.
+func (t *Transport) SetBypassConfig(cfg *transport.BypassConfig) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.bypassCfg = cfg
+	if t.http3Transport == nil {
+		return
+	}
+	if cfg != nil && cfg.UDPListenConfig != nil {
+		t.http3Transport.Dial = t.makeBypassQUICDial(cfg.UDPListenConfig)
+	} else {
+		t.http3Transport.Dial = nil
+	}
+}
+
+// makeBypassQUICDial returns an http3.Transport.Dial function that uses a UDP
+// socket bound to the physical interface to avoid TUN routing loops.
+func (t *Transport) makeBypassQUICDial(lc *net.ListenConfig) func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
+	return func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
+		udpAddr, err := net.ResolveUDPAddr("udp", addr)
+		if err != nil {
+			return nil, fmt.Errorf("bypass QUIC dial: resolve addr %s: %w", addr, err)
+		}
+
+		pconn, err := lc.ListenPacket(ctx, "udp", ":0")
+		if err != nil {
+			return nil, fmt.Errorf("bypass QUIC dial: bind UDP socket: %w", err)
+		}
+
+		qt := &quic.Transport{Conn: pconn}
+		earlyConn, err := qt.DialEarly(ctx, udpAddr, tlsCfg, cfg)
+		if err != nil {
+			qt.Close()
+			return nil, fmt.Errorf("bypass QUIC dial: %w", err)
+		}
+		return earlyConn, nil
+	}
 }
 
 // Name returns the transport name
