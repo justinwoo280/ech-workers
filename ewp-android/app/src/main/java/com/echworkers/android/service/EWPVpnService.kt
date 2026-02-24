@@ -54,7 +54,7 @@ class EWPVpnService : VpnService(), SocketProtector {
         createNotificationChannel()
     }
     
-    override fun Protect(fd: Long): Boolean {
+    override fun protect(fd: Long): Boolean {
         val result = protect(fd.toInt())
         if (!result) {
             Log.w(TAG, "Failed to protect socket: fd=$fd")
