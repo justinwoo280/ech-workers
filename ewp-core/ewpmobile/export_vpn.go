@@ -2,7 +2,10 @@ package ewpmobile
 
 import (
 	"log"
+	"net"
 	"sync"
+	"syscall"
+	"time"
 )
 
 // GoMobile 导出的 VPN 接口
@@ -125,6 +128,48 @@ func (b *VPNConfigBuilder) SetTunMTU(mtu int) *VPNConfigBuilder {
 	return b
 }
 
+// SetHost 设置 HTTP Host 头覆盖（CDN 域名，留空则同 ServerAddr）
+func (b *VPNConfigBuilder) SetHost(host string) *VPNConfigBuilder {
+	b.config.Host = host
+	return b
+}
+
+// SetSNI 设置 TLS SNI 覆盖（留空则同 Host）
+func (b *VPNConfigBuilder) SetSNI(sni string) *VPNConfigBuilder {
+	b.config.SNI = sni
+	return b
+}
+
+// SetEnableTLS 设置是否启用 TLS
+func (b *VPNConfigBuilder) SetEnableTLS(enable bool) *VPNConfigBuilder {
+	b.config.EnableTLS = enable
+	return b
+}
+
+// SetMinTLSVersion 设置最低 TLS 版本（"1.2" 或 "1.3"）
+func (b *VPNConfigBuilder) SetMinTLSVersion(version string) *VPNConfigBuilder {
+	b.config.MinTLSVersion = version
+	return b
+}
+
+// SetXhttpMode 设置 XHTTP 模式（"auto" / "stream-one" / "stream-down"）
+func (b *VPNConfigBuilder) SetXhttpMode(mode string) *VPNConfigBuilder {
+	b.config.XhttpMode = mode
+	return b
+}
+
+// SetUserAgent 设置 gRPC/H3gRPC User-Agent
+func (b *VPNConfigBuilder) SetUserAgent(ua string) *VPNConfigBuilder {
+	b.config.UserAgent = ua
+	return b
+}
+
+// SetContentType 设置 H3gRPC Content-Type
+func (b *VPNConfigBuilder) SetContentType(ct string) *VPNConfigBuilder {
+	b.config.ContentType = ct
+	return b
+}
+
 // Build 构建配置
 func (b *VPNConfigBuilder) Build() *VPNConfig {
 	return b.config
@@ -188,6 +233,37 @@ func GetVPNStats() string {
 	}
 
 	return globalVPN.GetStats()
+}
+
+// ========== 网络工具 ==========
+
+// TestLatency 测试到服务器的 TCP 连接延迟（毫秒）。
+// 返回值：>= 0 为延迟 ms，-1 表示连接失败或超时。
+// serverAddr 格式: "host:port"，例如 "example.com:443"
+// 若 socket 保护器已设置（VPN 运行中），自动使用保护 socket 避免路由死循环。
+func TestLatency(serverAddr string) int {
+	start := time.Now()
+	var conn net.Conn
+	var err error
+
+	if IsSocketProtectorSet() {
+		dialer := &net.Dialer{
+			Timeout: 5 * time.Second,
+			Control: func(network, address string, c syscall.RawConn) error {
+				c.Control(func(fd uintptr) { ProtectSocket(int(fd)) })
+				return nil
+			},
+		}
+		conn, err = dialer.Dial("tcp", serverAddr)
+	} else {
+		conn, err = net.DialTimeout("tcp", serverAddr, 5*time.Second)
+	}
+
+	if err != nil {
+		return -1
+	}
+	conn.Close()
+	return int(time.Since(start).Milliseconds())
 }
 
 // ========== 简化的快捷函数 ==========

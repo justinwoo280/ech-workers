@@ -8,6 +8,8 @@ import com.echworkers.android.data.NodeRepository
 import com.echworkers.android.data.VpnRepository
 import com.echworkers.android.model.EWPNode
 import com.echworkers.android.model.ProxyMode
+import ewpmobile.Ewpmobile
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -82,6 +84,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     
     fun disconnect() {
         vpnRepository.disconnect()
+    }
+
+    fun testLatency(node: EWPNode) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val serverAddr = "${node.serverAddress}:${node.serverPort}"
+            val latency = Ewpmobile.testLatency(serverAddr).toInt()
+            nodeRepository.updateNode(node.copy(latency = latency))
+        }
+    }
+
+    fun testAllLatencies() {
+        viewModelScope.launch(Dispatchers.IO) {
+            nodes.value.forEach { node ->
+                val serverAddr = "${node.serverAddress}:${node.serverPort}"
+                val latency = Ewpmobile.testLatency(serverAddr).toInt()
+                nodeRepository.updateNode(node.copy(latency = latency))
+            }
+        }
     }
     
     fun setProxyMode(mode: ProxyMode) {

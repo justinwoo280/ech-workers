@@ -1,0 +1,142 @@
+name: Build Android Debug APK
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+    paths:
+      - 'ewp-core/ewpmobile/**'
+      - 'ewp-core/transport/**'
+      - 'ewp-core/protocol/**'
+      - 'ewp-core/tun/**'
+      - 'ewp-core/common/**'
+      - 'ewp-core/go.mod'
+      - 'ewp-core/go.sum'
+      - 'ewp-android/**'
+  pull_request:
+    paths:
+      - 'ewp-core/ewpmobile/**'
+      - 'ewp-android/**'
+  workflow_dispatch:
+
+jobs:
+  build-aar:
+    name: Build AAR
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ewp-core
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+          cache-dependency-path: ewp-core/go.sum
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        run: |
+          echo "y" | sdkmanager "ndk;25.2.9519653" --sdk_root="$ANDROID_HOME"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653" >> $GITHUB_ENV
+
+      - name: Install gomobile
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+
+      - name: Initialize gomobile
+        run: gomobile init
+
+      - name: Add golang.org/x/mobile dependency
+        run: go get golang.org/x/mobile@latest
+
+      - name: Download Go modules
+        run: go mod download
+
+      - name: Build Android AAR
+        env:
+          GOFLAGS: -mod=mod
+        run: |
+          mkdir -p output/android
+          gomobile bind \
+            -v \
+            -target=android \
+            -androidapi=21 \
+            -ldflags="-s -w" \
+            -o output/android/ewp-core.aar \
+            ./ewpmobile
+
+      - name: Upload AAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ewp-core-aar
+          path: ewp-core/output/android/ewp-core.aar
+          retention-days: 1
+
+  build-apk:
+    name: Build Debug APK
+    runs-on: ubuntu-latest
+    needs: build-aar
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Download AAR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ewp-core-aar
+          path: ewp-android/app/libs/
+
+      - name: Grant Gradle execute permission
+        run: chmod +x ewp-android/gradlew
+
+      - name: Build Debug APK (all ABIs)
+        working-directory: ewp-android
+        run: |
+          ./gradlew assembleDebug \
+            -Pandroid.injected.build.abi=arm64-v8a,armeabi-v7a,x86_64,x86
+
+      - name: Collect APKs
+        run: |
+          mkdir -p apk-output
+          find ewp-android/app/build/outputs/apk/debug -name "*.apk" \
+            -exec cp {} apk-output/ \;
+          ls -lh apk-output/
+
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ewp-android-debug-apk
+          path: apk-output/*.apk
+          retention-days: 30
+
+      - name: Upload APKs to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: apk-output/*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

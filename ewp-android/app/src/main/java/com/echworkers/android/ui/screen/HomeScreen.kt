@@ -24,7 +24,7 @@ fun HomeScreen(
     viewModel: MainViewModel,
     onNavigateToNodeEdit: (String) -> Unit,
     onNavigateToAppSelect: () -> Unit,
-    onRequestVpnPermission: () -> Unit
+    onRequestVpnPermission: () -> Unit,
 ) {
     val nodes by viewModel.nodes.collectAsState()
     val selectedNode by viewModel.selectedNode.collectAsState()
@@ -38,6 +38,9 @@ fun HomeScreen(
             TopAppBar(
                 title = { Text("EWP VPN") },
                 actions = {
+                    IconButton(onClick = { viewModel.testAllLatencies() }) {
+                        Icon(Icons.Default.NetworkCheck, contentDescription = "测速")
+                    }
                     IconButton(onClick = { onNavigateToAppSelect() }) {
                         Badge(
                             containerColor = if (proxyConfig.selectedPackages.isNotEmpty()) 
@@ -80,6 +83,7 @@ fun HomeScreen(
                 proxyMode = proxyConfig.mode,
                 onConnect = onRequestVpnPermission,
                 onDisconnect = { viewModel.disconnect() },
+                onNavigateToAppSelect = onNavigateToAppSelect,
                 modifier = Modifier.padding(16.dp)
             )
             
@@ -102,7 +106,8 @@ fun HomeScreen(
                         isConnected = vpnState.isActive(),
                         onSelect = { viewModel.selectNode(node.id) },
                         onEdit = { onNavigateToNodeEdit(node.id) },
-                        onDelete = { showDeleteDialog = node.id }
+                        onDelete = { showDeleteDialog = node.id },
+                        onTestLatency = { viewModel.testLatency(node) },
                     )
                 }
                 
@@ -146,6 +151,7 @@ private fun ConnectionCard(
     proxyMode: com.echworkers.android.model.ProxyMode,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
+    onNavigateToAppSelect: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Card(
@@ -233,7 +239,7 @@ private fun ConnectionCard(
                 }
                 
                 OutlinedButton(
-                    onClick = { },
+                    onClick = onNavigateToAppSelect,
                     modifier = Modifier.weight(1f)
                 ) {
                     Icon(
@@ -329,7 +335,8 @@ private fun NodeCard(
     isConnected: Boolean,
     onSelect: () -> Unit,
     onEdit: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onTestLatency: () -> Unit,
 ) {
     Card(
         modifier = Modifier
@@ -394,6 +401,20 @@ private fun NodeCard(
             }
             
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                IconButton(onClick = onTestLatency) {
+                    Icon(
+                        Icons.Default.NetworkCheck,
+                        "测速",
+                        tint = when {
+                            node.latency < 0 -> MaterialTheme.colorScheme.error
+                            node.latency in 1..150 -> SuccessColor
+                            node.latency in 151..300 -> WarningColor
+                            node.latency > 300 -> MaterialTheme.colorScheme.error
+                            else -> MaterialTheme.colorScheme.onSurfaceVariant
+                        }
+                    )
+                }
+
                 IconButton(onClick = onEdit, enabled = !isConnected) {
                     Icon(Icons.Default.Edit, "编辑")
                 }

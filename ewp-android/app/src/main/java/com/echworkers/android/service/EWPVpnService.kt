@@ -103,6 +103,8 @@ class EWPVpnService : VpnService(), Ewpmobile.SocketProtector {
                     return@launch
                 }
                 
+                startForeground(NOTIFICATION_ID, createNotification(node))
+                
                 val config = buildVPNConfig(node)
                 
                 Ewpmobile.startVPN(tunFD.toLong(), config)
@@ -111,8 +113,6 @@ class EWPVpnService : VpnService(), Ewpmobile.SocketProtector {
                 
                 Log.i(TAG, "VPN started successfully")
                 broadcastState(VpnServiceState.CONNECTED)
-                
-                startForeground(NOTIFICATION_ID, createNotification(node))
                 
                 monitorVPN()
                 
@@ -129,12 +129,14 @@ class EWPVpnService : VpnService(), Ewpmobile.SocketProtector {
             EWPNode.TransportMode.WS -> "ws"
             EWPNode.TransportMode.GRPC -> "grpc"
             EWPNode.TransportMode.XHTTP -> "xhttp"
+            EWPNode.TransportMode.H3GRPC -> "h3grpc"
         }
         
         val path = when (node.transportMode) {
             EWPNode.TransportMode.WS -> node.wsPath
             EWPNode.TransportMode.GRPC -> node.grpcServiceName
             EWPNode.TransportMode.XHTTP -> node.xhttpPath
+            EWPNode.TransportMode.H3GRPC -> node.grpcServiceName
         }
         
         val serverAddr = "${node.serverAddress}:${node.serverPort}"
@@ -154,11 +156,30 @@ class EWPVpnService : VpnService(), Ewpmobile.SocketProtector {
             if (node.serverIP.isNotEmpty()) {
                 setServerIP(node.serverIP)
             }
+            if (node.host.isNotEmpty()) {
+                setHost(node.host)
+            }
+            if (node.sni.isNotEmpty()) {
+                setSNI(node.sni)
+            }
+            
+            setEnableTLS(node.enableTLS)
+            setMinTLSVersion(node.minTLSVersion)
             
             setEnableECH(node.enableECH)
             if (node.enableECH) {
                 setECHDomain(node.echDomain)
                 setDNSServer(node.dnsServer)
+            }
+            
+            if (node.transportMode == EWPNode.TransportMode.XHTTP && node.xhttpMode.isNotEmpty()) {
+                setXhttpMode(node.xhttpMode)
+            }
+            if (node.userAgent.isNotEmpty()) {
+                setUserAgent(node.userAgent)
+            }
+            if (node.transportMode == EWPNode.TransportMode.H3GRPC && node.contentType.isNotEmpty()) {
+                setContentType(node.contentType)
             }
             
             setEnableFlow(node.enableFlow)

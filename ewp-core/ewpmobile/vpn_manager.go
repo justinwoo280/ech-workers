@@ -13,6 +13,7 @@ import (
 	"ewp-core/log"
 	"ewp-core/transport"
 	"ewp-core/transport/grpc"
+	"ewp-core/transport/h3grpc"
 	"ewp-core/transport/websocket"
 	"ewp-core/transport/xhttp"
 	"ewp-core/tun"
@@ -56,9 +57,22 @@ type VPNConfig struct {
 	Password   string
 
 	// 协议配置
-	Protocol    string // "ws" / "grpc" / "xhttp"
+	Protocol    string // "ws" / "grpc" / "xhttp" / "h3grpc"
 	AppProtocol string // "ewp" / "trojan"
 	Path        string // WebSocket 路径 或 gRPC 服务名
+	XhttpMode   string // "auto" / "stream-one" / "stream-down"（仅 xhttp）
+
+	// Host/SNI 配置（CDN 场景）
+	Host string // HTTP Host 头覆盖（留空则同 ServerAddr）
+	SNI  string // TLS SNI 覆盖（留空则同 Host）
+
+	// TLS 配置
+	EnableTLS     bool   // 是否启用 TLS（移动端一般始终 true）
+	MinTLSVersion string // "1.2" 或 "1.3"
+
+	// gRPC / H3gRPC 附加配置
+	UserAgent   string // 自定义 User-Agent
+	ContentType string // H3gRPC Content-Type
 
 	// 安全配置
 	EnableECH  bool
@@ -151,7 +165,8 @@ func (vm *VPNManager) Start(tunFD int, config *VPNConfig) error {
 			echMgr,
 		)
 	case "grpc":
-		vm.transport, err = grpc.NewWithProtocol(
+		var grpcT *grpc.Transport
+		grpcT, err = grpc.NewWithProtocol(
 			config.ServerAddr,
 			config.ServerIP,
 			config.Token,
@@ -163,8 +178,13 @@ func (vm *VPNManager) Start(tunFD int, config *VPNConfig) error {
 			config.Path,
 			echMgr,
 		)
+		if err == nil && config.UserAgent != "" {
+			grpcT.SetUserAgent(config.UserAgent)
+		}
+		vm.transport = grpcT
 	case "xhttp":
-		vm.transport, err = xhttp.NewWithProtocol(
+		var xhttpT *xhttp.Transport
+		xhttpT, err = xhttp.NewWithProtocol(
 			config.ServerAddr,
 			config.ServerIP,
 			config.Token,
@@ -176,6 +196,33 @@ func (vm *VPNManager) Start(tunFD int, config *VPNConfig) error {
 			config.Path,
 			echMgr,
 		)
+		if err == nil && config.XhttpMode != "" {
+			xhttpT.SetMode(config.XhttpMode)
+		}
+		vm.transport = xhttpT
+	case "h3grpc":
+		var h3T *h3grpc.Transport
+		h3T, err = h3grpc.NewWithProtocol(
+			config.ServerAddr,
+			config.ServerIP,
+			config.Token,
+			config.Password,
+			config.EnableECH,
+			config.EnableFlow,
+			config.EnablePQC,
+			useTrojan,
+			config.Path,
+			echMgr,
+		)
+		if err == nil {
+			if config.UserAgent != "" {
+				h3T.SetUserAgent(config.UserAgent)
+			}
+			if config.ContentType != "" {
+				h3T.SetContentType(config.ContentType)
+			}
+		}
+		vm.transport = h3T
 	default:
 		cancel()
 		return fmt.Errorf("unsupported protocol: %s", config.Protocol)
@@ -186,11 +233,19 @@ func (vm *VPNManager) Start(tunFD int, config *VPNConfig) error {
 		return fmt.Errorf("failed to create transport: %w", err)
 	}
 
-	// 3. 创建 TUN 处理器
+	// 3. Android socket 保护：所有出站连接绑定到 VpnService.protect() 以避免 TUN 路由死循环
+	if IsSocketProtectorSet() {
+		vm.transport.SetBypassConfig(makeProtectedBypassConfig())
+		log.Printf("[VPNManager] Socket protection applied to transport")
+	} else {
+		log.Printf("[VPNManager] Warning: No socket protector - transport may loop through TUN")
+	}
+
+	// 4. 创建 TUN 处理器
 	log.Printf("[VPNManager] Creating TUN handler...")
 	vm.tunHandler = tun.NewHandler(ctx, vm.transport)
 
-	// 4. 配置 TUN 选项
+	// 5. 配置 TUN 选项
 	ip := config.TunIP
 	if ip == "" {
 		ip = "10.0.0.2"

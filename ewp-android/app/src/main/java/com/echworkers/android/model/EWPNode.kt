@@ -18,8 +18,16 @@ data class EWPNode(
     val wsPath: String = "/",
     val grpcServiceName: String = "ProxyService",
     val xhttpPath: String = "/xhttp",
+    val xhttpMode: String = "auto",
+    val userAgent: String = "",
+    val contentType: String = "",
     
     val serverIP: String = "",
+    val host: String = "",
+    val sni: String = "",
+    
+    val enableTLS: Boolean = true,
+    val minTLSVersion: String = "1.2",
     
     val enableECH: Boolean = true,
     val echDomain: String = "cloudflare-ech.com",
@@ -28,7 +36,7 @@ data class EWPNode(
     val enableFlow: Boolean = true,
     val enablePQC: Boolean = false,
     
-    var latency: Int = 0
+    val latency: Int = 0
 ) {
     @Serializable
     enum class AppProtocol {
@@ -37,7 +45,7 @@ data class EWPNode(
     
     @Serializable
     enum class TransportMode {
-        WS, GRPC, XHTTP
+        WS, GRPC, XHTTP, H3GRPC
     }
     
     fun isValid(): Boolean {
@@ -53,6 +61,7 @@ data class EWPNode(
             TransportMode.WS -> "WS"
             TransportMode.GRPC -> "gRPC"
             TransportMode.XHTTP -> "XHTTP"
+            TransportMode.H3GRPC -> "H3"
         }
         return "$prefix-$transport"
     }
