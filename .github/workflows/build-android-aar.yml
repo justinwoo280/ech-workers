@@ -1,0 +1,96 @@
+name: Build Android AAR
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+    paths:
+      - 'ewp-core/ewpmobile/**'
+      - 'ewp-core/transport/**'
+      - 'ewp-core/protocol/**'
+      - 'ewp-core/tun/**'
+      - 'ewp-core/common/**'
+      - 'ewp-core/go.mod'
+      - 'ewp-core/go.sum'
+  pull_request:
+    paths:
+      - 'ewp-core/ewpmobile/**'
+      - 'ewp-core/transport/**'
+      - 'ewp-core/protocol/**'
+      - 'ewp-core/tun/**'
+      - 'ewp-core/common/**'
+      - 'ewp-core/go.mod'
+  workflow_dispatch:
+
+jobs:
+  build-aar:
+    name: Build Android AAR
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ewp-core
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+          cache-dependency-path: ewp-core/go.sum
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        run: |
+          echo "y" | sdkmanager "ndk;25.2.9519653" --sdk_root="$ANDROID_HOME"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653" >> $GITHUB_ENV
+
+      - name: Install gomobile
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+
+      - name: Initialize gomobile
+        run: gomobile init
+
+      - name: Download Go modules
+        run: go mod download
+
+      - name: Build Android AAR
+        run: |
+          mkdir -p output/android
+          gomobile bind \
+            -v \
+            -target=android \
+            -androidapi=21 \
+            -ldflags="-s -w" \
+            -o output/android/ewp-core.aar \
+            ./ewpmobile
+
+      - name: Show AAR info
+        run: ls -lh output/android/
+
+      - name: Upload AAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ewp-core-aar
+          path: ewp-core/output/android/ewp-core.aar
+          retention-days: 30
+
+      - name: Upload to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ewp-core/output/android/ewp-core.aar
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
