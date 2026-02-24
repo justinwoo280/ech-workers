@@ -110,13 +110,15 @@ jobs:
           name: ewp-core-aar
           path: ewp-android/app/libs/
 
-      - name: Grant Gradle execute permission
-        run: chmod +x ewp-android/gradlew
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.5'
 
       - name: Build Debug APK (all ABIs)
         working-directory: ewp-android
         run: |
-          ./gradlew assembleDebug \
+          gradle assembleDebug \
             -Pandroid.injected.build.abi=arm64-v8a,armeabi-v7a,x86_64,x86
 
       - name: Collect APKs
