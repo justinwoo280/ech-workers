@@ -1,79 +1,63 @@
 #!/bin/bash
 
-# GoMobile 构建脚本
-# 用于生成 Android AAR 和 iOS Framework
+# GoMobile 构建脚本 - 生成 Android AAR
+# 用法: ./build_gomobile.sh [android|ios|all]
 
 set -e
 
-echo "🚀 开始构建 GoMobile 绑定..."
+TARGET=${1:-android}
 
-# 检查环境
+# 检查 gomobile
 if ! command -v gomobile &> /dev/null; then
-    echo "❌ gomobile 未安装，请先安装："
-    echo "go install golang.org/x/mobile/cmd/gomobile@latest"
-    exit 1
+    echo "[INFO] Installing gomobile..."
+    go install golang.org/x/mobile/cmd/gomobile@latest
+    go install golang.org/x/mobile/cmd/gobind@latest
 fi
 
-if ! command -v gomobile bind &> /dev/null; then
-    echo "❌ gomobile bind 未找到，正在初始化..."
-    gomobile init
+if [ -z "$ANDROID_NDK_HOME" ] && [ -n "$ANDROID_HOME" ]; then
+    NDK_DIR="$ANDROID_HOME/ndk"
+    if [ -d "$NDK_DIR" ]; then
+        LATEST_NDK=$(ls "$NDK_DIR" | sort -V | tail -1)
+        export ANDROID_NDK_HOME="$NDK_DIR/$LATEST_NDK"
+        echo "[INFO] Using NDK: $ANDROID_NDK_HOME"
+    fi
 fi
 
-# 设置环境变量
-export GOPATH="$HOME/go"
-export GOOS=android
-export GOARCH=arm64
+gomobile init
 
-# 创建输出目录
-mkdir -p output/android
-mkdir -p output/ios
+mkdir -p output/android output/ios
 
-echo "📦 构建 Android AAR..."
+ANDROID_OUT="../ewp-android/app/libs"
 
-# 构建 Android AAR (arm64)
-gomobile bind -target=android/arm64 -o output/android/ewp-core-arm64.aar ./ewpmobile
+if [ "$TARGET" = "android" ] || [ "$TARGET" = "all" ]; then
+    echo "[BUILD] Android AAR (all arch)..."
+    gomobile bind \
+        -v \
+        -target=android \
+        -androidapi=21 \
+        -ldflags="-s -w" \
+        -o output/android/ewp-core.aar \
+        ./ewpmobile
+    echo "[OK] output/android/ewp-core.aar"
 
-# 构建 Android AAR (arm)
-gomobile bind -target=android/arm -o output/android/ewp-core-arm.aar ./ewpmobile
+    if [ -d "$ANDROID_OUT" ]; then
+        cp output/android/ewp-core.aar "$ANDROID_OUT/ewp-core.aar"
+        echo "[OK] Copied to $ANDROID_OUT"
+    fi
+fi
 
-# 构建 Android AAR (x86_64)
-gomobile bind -target=android/amd64 -o output/android/ewp-core-x86_64.aar ./ewpmobile
-
-echo "📦 构建 iOS Framework..."
-
-# 构建 iOS Framework (arm64)
-gomobile bind -target=ios/arm64 -o output/ios/ewp-core-arm64.framework ./ewpmobile
-
-# 构建 iOS Framework (x86_64)
-gomobile bind -target=ios/amd64 -o output/ios/ewp-core-x86_64.framework ./ewpmobile
-
-# 构建 iOS Framework (模拟器)
-gomobile bind -target=ios -o output/ios/ewp-core.framework ./ewpmobile
-
-echo "✅ 构建完成！"
-
-# 复制到 Android 项目
-if [ -d "../ewp-NG/android/app/libs" ]; then
-    echo "📋 复制 AAR 到 Android 项目..."
-    cp output/android/ewp-core-arm64.aar ../ewp-NG/android/app/libs/
-    cp output/android/ewp-core-arm.aar ../ewp-NG/android/app/libs/
-    cp output/android/ewp-core-x86_64.aar ../ewp-NG/android/app/libs/
-    echo "✅ AAR 已复制到 Android 项目"
-else
-    echo "⚠️  Android 项目路径不存在，请手动复制 AAR 文件"
+if [ "$TARGET" = "ios" ] || [ "$TARGET" = "all" ]; then
+    echo "[BUILD] iOS xcframework..."
+    gomobile bind \
+        -v \
+        -target=ios \
+        -ldflags="-s -w" \
+        -o output/ios/EwpCore.xcframework \
+        ./ewpmobile
+    echo "[OK] output/ios/EwpCore.xcframework"
 fi
 
 echo ""
-echo "📊 构建结果："
-echo "Android AAR:"
-ls -la output/android/
-echo ""
-echo "iOS Framework:"
-ls -la output/ios/
-
-echo ""
-echo "🎯 下一步："
-echo "1. 将 AAR 文件添加到 Android 项目的 libs 目录"
-echo "2. 在 build.gradle 中添加依赖"
-echo "3. 更新 Android 项目中的 EWPClient 类"
-echo "4. 测试连接功能"
+echo "=== Build Complete ==="
+[ -d output/android ] && ls -lh output/android/ 2>/dev/null || true
+[ -d output/ios ]     && ls -lh output/ios/     2>/dev/null || true

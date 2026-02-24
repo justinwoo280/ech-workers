@@ -71,14 +71,14 @@ dir output\android\ewp-core.aar
 echo.
 
 REM 检查是否有 Android 项目
-if exist "..\ech-workers-NG\app\libs" (
+if exist "..\ewp-android\app\libs" (
     echo [可选] 发现 Android 项目，是否复制 AAR？
     echo 按任意键复制，Ctrl+C 取消...
     pause >nul
     
-    copy /Y output\android\ewp-core.aar ..\ech-workers-NG\app\libs\
+    copy /Y output\android\ewp-core.aar ..\ewp-android\app\libs\ewp-core.aar
     if %errorlevel% equ 0 (
-        echo [成功] AAR 已复制到 Android 项目
+        echo [成功] AAR 已复制到 ../ewp-android/app/libs/
     )
 )
 

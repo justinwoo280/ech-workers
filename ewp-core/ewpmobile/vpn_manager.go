@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,42 +18,7 @@ import (
 	"ewp-core/tun"
 
 	singtun "github.com/sagernet/sing-tun"
-	"github.com/sagernet/sing/common/logger"
 )
-
-// tunLogger implements logger.Logger for sing-tun
-type tunLogger struct{}
-
-func (l *tunLogger) Trace(args ...interface{}) { log.V("%s", fmt.Sprint(args...)) }
-func (l *tunLogger) Debug(args ...interface{}) { log.V("%s", fmt.Sprint(args...)) }
-func (l *tunLogger) Info(args ...interface{})  { log.Printf("%s", fmt.Sprint(args...)) }
-func (l *tunLogger) Warn(args ...interface{})  { log.Printf("%s", fmt.Sprint(args...)) }
-func (l *tunLogger) Error(args ...interface{}) { log.Printf("%s", fmt.Sprint(args...)) }
-func (l *tunLogger) Fatal(args ...interface{}) { log.Printf("%s", fmt.Sprint(args...)) }
-func (l *tunLogger) Panic(args ...interface{}) { log.Printf("%s", fmt.Sprint(args...)) }
-func (l *tunLogger) TraceContext(ctx context.Context, args ...interface{}) {
-	log.V("%s", fmt.Sprint(args...))
-}
-func (l *tunLogger) DebugContext(ctx context.Context, args ...interface{}) {
-	log.V("%s", fmt.Sprint(args...))
-}
-func (l *tunLogger) InfoContext(ctx context.Context, args ...interface{}) {
-	log.Printf("%s", fmt.Sprint(args...))
-}
-func (l *tunLogger) WarnContext(ctx context.Context, args ...interface{}) {
-	log.Printf("%s", fmt.Sprint(args...))
-}
-func (l *tunLogger) ErrorContext(ctx context.Context, args ...interface{}) {
-	log.Printf("%s", fmt.Sprint(args...))
-}
-func (l *tunLogger) FatalContext(ctx context.Context, args ...interface{}) {
-	log.Printf("%s", fmt.Sprint(args...))
-}
-func (l *tunLogger) PanicContext(ctx context.Context, args ...interface{}) {
-	log.Printf("%s", fmt.Sprint(args...))
-}
-
-var _ logger.Logger = (*tunLogger)(nil)
 
 // VPNManager 统一的 VPN 管理器，集成连接和 TUN 功能
 type VPNManager struct {
@@ -153,8 +119,9 @@ func (vm *VPNManager) Start(tunFD int, config *VPNConfig) error {
 		}
 		dnsServer := config.DNSServer
 		if dnsServer == "" {
-			// Use IP address to avoid DNS dependency (Alibaba Cloud DNS)
 			dnsServer = "https://223.5.5.5/dns-query"
+		} else if !strings.HasPrefix(dnsServer, "https://") && !strings.HasPrefix(dnsServer, "http://") {
+			dnsServer = "https://" + dnsServer
 		}
 
 		echMgr = tls.NewECHManager(echDomain, dnsServer)
@@ -219,28 +186,14 @@ func (vm *VPNManager) Start(tunFD int, config *VPNConfig) error {
 		return fmt.Errorf("failed to create transport: %w", err)
 	}
 
-	// 3. 测试连接
-	log.Printf("[VPNManager] Testing connection...")
-	testConn, err := vm.transport.Dial()
-	if err != nil {
-		cancel()
-		return fmt.Errorf("connection test failed: %w", err)
-	}
-	testConn.Close()
-	log.Printf("[VPNManager] Connection test successful")
-
-	// 4. 创建 TUN 处理器
+	// 3. 创建 TUN 处理器
 	log.Printf("[VPNManager] Creating TUN handler...")
 	vm.tunHandler = tun.NewHandler(ctx, vm.transport)
 
-	// 5. 配置 TUN 选项
+	// 4. 配置 TUN 选项
 	ip := config.TunIP
 	if ip == "" {
 		ip = "10.0.0.2"
-	}
-	gateway := config.TunGateway
-	if gateway == "" {
-		gateway = "10.0.0.1"
 	}
 	dns := config.TunDNS
 	if dns == "" {
@@ -266,7 +219,7 @@ func (vm *VPNManager) Start(tunFD int, config *VPNConfig) error {
 		AutoRoute:      false, // Android VPNService handles routing
 		DNSServers:     []netip.Addr{dnsAddr},
 		FileDescriptor: tunFD,
-		Logger:         &tunLogger{},
+		Logger:         &ewpLogger{},
 	}
 
 	// 6. 创建 TUN 设备
@@ -284,7 +237,7 @@ func (vm *VPNManager) Start(tunFD int, config *VPNConfig) error {
 		Tun:        vm.tunDevice,
 		TunOptions: tunOptions,
 		Handler:    vm.tunHandler,
-		Logger:     &tunLogger{},
+		Logger:     &ewpLogger{},
 		UDPTimeout: 5 * time.Minute,
 	}
 
@@ -295,7 +248,7 @@ func (vm *VPNManager) Start(tunFD int, config *VPNConfig) error {
 		return fmt.Errorf("create network stack failed: %w", err)
 	}
 
-	// 8. 启动网络栈
+	// 7. 启动网络栈
 	log.Printf("[VPNManager] Starting network stack...")
 	if err := vm.tunStack.Start(); err != nil {
 		vm.tunStack.Close()
@@ -369,17 +322,17 @@ func (vm *VPNManager) GetStats() string {
 	uptime := time.Since(vm.startTime).Seconds()
 
 	stats := map[string]interface{}{
-		"running":      true,
-		"uptime":       uptime,
-		"bytes_up":     vm.bytesUp,
-		"bytes_down":   vm.bytesDown,
-		"connections":  vm.connections,
-		"server_addr":  vm.config.ServerAddr,
-		"protocol":     vm.config.Protocol,
-		"app_protocol": vm.config.AppProtocol,
-		"enable_ech":   vm.config.EnableECH,
-		"enable_flow":  vm.config.EnableFlow,
-		"tun_mtu":      vm.tunMTU,
+		"running":     true,
+		"uptime":      uptime,
+		"bytesUp":     vm.bytesUp,
+		"bytesDown":   vm.bytesDown,
+		"connections": vm.connections,
+		"serverAddr":  vm.config.ServerAddr,
+		"protocol":    vm.config.Protocol,
+		"appProtocol": vm.config.AppProtocol,
+		"enableEch":   vm.config.EnableECH,
+		"enableFlow":  vm.config.EnableFlow,
+		"tunMtu":      vm.tunMTU,
 	}
 
 	// 传输层统计（暂未实现）

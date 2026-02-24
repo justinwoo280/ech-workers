@@ -14,42 +14,7 @@ import (
 	"ewp-core/tun"
 
 	singtun "github.com/sagernet/sing-tun"
-	"github.com/sagernet/sing/common/logger"
 )
-
-// tunLogger implements logger.Logger for sing-tun
-type simpleTunLogger struct{}
-
-func (l *simpleTunLogger) Trace(args ...interface{}) { log.V(fmt.Sprint(args...)) }
-func (l *simpleTunLogger) Debug(args ...interface{}) { log.V(fmt.Sprint(args...)) }
-func (l *simpleTunLogger) Info(args ...interface{})  { log.Printf(fmt.Sprint(args...)) }
-func (l *simpleTunLogger) Warn(args ...interface{})  { log.Printf(fmt.Sprint(args...)) }
-func (l *simpleTunLogger) Error(args ...interface{}) { log.Printf(fmt.Sprint(args...)) }
-func (l *simpleTunLogger) Fatal(args ...interface{}) { log.Printf(fmt.Sprint(args...)) }
-func (l *simpleTunLogger) Panic(args ...interface{}) { log.Printf(fmt.Sprint(args...)) }
-func (l *simpleTunLogger) TraceContext(ctx context.Context, args ...interface{}) {
-	log.V(fmt.Sprint(args...))
-}
-func (l *simpleTunLogger) DebugContext(ctx context.Context, args ...interface{}) {
-	log.V(fmt.Sprint(args...))
-}
-func (l *simpleTunLogger) InfoContext(ctx context.Context, args ...interface{}) {
-	log.Printf(fmt.Sprint(args...))
-}
-func (l *simpleTunLogger) WarnContext(ctx context.Context, args ...interface{}) {
-	log.Printf(fmt.Sprint(args...))
-}
-func (l *simpleTunLogger) ErrorContext(ctx context.Context, args ...interface{}) {
-	log.Printf(fmt.Sprint(args...))
-}
-func (l *simpleTunLogger) FatalContext(ctx context.Context, args ...interface{}) {
-	log.Printf(fmt.Sprint(args...))
-}
-func (l *simpleTunLogger) PanicContext(ctx context.Context, args ...interface{}) {
-	log.Printf(fmt.Sprint(args...))
-}
-
-var _ logger.Logger = (*simpleTunLogger)(nil)
 
 // SimpleTUN 简化的 TUN 管理器，专为 Android Kotlin VPNService 设计
 // 不使用 C 导出，而是提供 Go 原生接口供 GoMobile 绑定
@@ -144,7 +109,7 @@ func (st *SimpleTUN) Start(ip, gateway, mask, dns string) error {
 		AutoRoute:      false, // Android VPNService handles routing
 		DNSServers:     []netip.Addr{dnsAddr},
 		FileDescriptor: st.fd,
-		Logger:         &simpleTunLogger{},
+		Logger:         &ewpLogger{},
 	}
 
 	// 5. 创建 TUN 设备
@@ -160,7 +125,7 @@ func (st *SimpleTUN) Start(ip, gateway, mask, dns string) error {
 		Tun:        st.tunDevice,
 		TunOptions: tunOptions,
 		Handler:    st.tunHandler,
-		Logger:     &simpleTunLogger{},
+		Logger:     &ewpLogger{},
 		UDPTimeout: 5 * time.Minute,
 	}
 
