@@ -14,11 +14,13 @@ import com.echworkers.android.model.EWPNode
 import com.echworkers.android.model.ProxyConfig
 import com.echworkers.android.model.ProxyMode
 import ewpmobile.Ewpmobile
+import ewpmobile.SocketProtector
+import ewpmobile.VPNConfig
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.encodeToString
 
-class EWPVpnService : VpnService(), Ewpmobile.SocketProtector {
+class EWPVpnService : VpnService(), SocketProtector {
     
     companion object {
         private const val TAG = "EWPVpnService"
@@ -124,7 +126,7 @@ class EWPVpnService : VpnService(), Ewpmobile.SocketProtector {
         }
     }
     
-    private fun buildVPNConfig(node: EWPNode): Ewpmobile.VPNConfig {
+    private fun buildVPNConfig(node: EWPNode): VPNConfig {
         val protocol = when (node.transportMode) {
             EWPNode.TransportMode.WS -> "ws"
             EWPNode.TransportMode.GRPC -> "grpc"
