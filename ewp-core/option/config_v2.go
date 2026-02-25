@@ -76,9 +76,9 @@ type OutboundConfig struct {
 	Tag  string `json:"tag"`
 
 	// Server settings (for ewp/trojan)
-	Server     string `json:"server,omitempty"`
+	Server     string `json:"server,omitempty"`       // 连接目标（IP 或域名，直接进行 DNS 解析）
 	ServerPort int    `json:"server_port,omitempty"`
-	ServerIP   string `json:"server_ip,omitempty"`
+	Host       string `json:"host,omitempty"`         // HTTP Host 头 / gRPC authority（留空则同 server，CDN 场景使用）
 
 	// Authentication
 	UUID     string `json:"uuid,omitempty"`     // for ewp

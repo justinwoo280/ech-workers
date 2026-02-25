@@ -15,7 +15,7 @@ type LegacyFlags struct {
 	ConfigFile string
 	ListenAddr string
 	ServerAddr string
-	ServerIP   string
+	Host       string
 	Token      string
 	Password   string
 	Protocol   string
@@ -47,7 +47,7 @@ func ParseLegacyFlags() (*LegacyFlags, error) {
 	flag.StringVar(&flags.ConfigFile, "config", "", "配置文件路径 (JSON 格式)")
 	flag.StringVar(&flags.ListenAddr, "l", constant.DefaultListenAddr, "代理监听地址 (支持 SOCKS5 和 HTTP)")
 	flag.StringVar(&flags.ServerAddr, "f", "", "服务端地址 (支持: wss://host:port/path, grpcs://host:port, https://host:port/xhttp)")
-	flag.StringVar(&flags.ServerIP, "ip", "", "指定服务端 IP（绕过 DNS，TLS SNI 仍使用原 host）")
+	flag.StringVar(&flags.Host, "host", "", "HTTP Host 头 / gRPC authority（CDN 场景：留空则同 -f 中的地址）")
 	flag.StringVar(&flags.Token, "token", "", "身份验证令牌 (WebSocket) 或 UUID (gRPC)")
 	flag.StringVar(&flags.Password, "password", "", "Trojan 密码（启用 Trojan 协议时使用）")
 	flag.StringVar(&flags.Protocol, "protocol", "ewp", "应用层协议: ewp 或 trojan")
@@ -147,7 +147,7 @@ func (f *LegacyFlags) createOutbound() (*OutboundConfig, error) {
 	outbound := &OutboundConfig{
 		Server:     parsed.Host,
 		ServerPort: parsed.Port,
-		ServerIP:   f.ServerIP,
+		Host:       f.Host,
 	}
 
 	// Determine protocol type

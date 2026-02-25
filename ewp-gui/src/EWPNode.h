@@ -8,14 +8,14 @@ struct EWPNode {
     int id = -1;
     QString name;
 
-    // 连接目标：实际 TCP/UDP 连接的 IP 或域名（绕过 DNS 时填 IP）
+    // 连接目标：TCP 连接的 IP 或域名（直接 DNS 解析后建立连接）
     // UI 显示为"服务器地址"
-    QString serverIP;
+    QString server;
     int serverPort = 443;
 
-    // HTTP Host 头 / CDN 路由域名（留空则同 serverIP）
-    // UI 显示为"Host"（在传输配置中）
-    QString serverAddress;
+    // HTTP Host 头 / gRPC authority（留空则同 server，CDN 场景使用）
+    // UI 显示为"Host"
+    QString host;
 
     // 应用层协议: 0=EWP, 1=Trojan
     enum AppProtocol { EWP = 0, TROJAN = 1 };
@@ -45,7 +45,7 @@ struct EWPNode {
 
     // TLS 配置
     bool enableTLS = true;
-    QString sni;                       // 留空则同 Host（serverAddress 或 serverIP）
+    QString sni;                       // 留空则同 host，host 空则同 server
     QString minTLSVersion = "1.2";     // "1.2" 或 "1.3"
 
     // ECH 配置
@@ -67,9 +67,9 @@ struct EWPNode {
         QJsonObject obj;
         obj["id"] = id;
         obj["name"] = name;
-        obj["serverIP"] = serverIP;
+        obj["server"] = server;
         obj["serverPort"] = serverPort;
-        obj["serverAddress"] = serverAddress;
+        obj["host"] = host;
         obj["appProtocol"] = static_cast<int>(appProtocol);
         obj["uuid"] = uuid;
         obj["trojanPassword"] = trojanPassword;
@@ -115,17 +115,22 @@ struct EWPNode {
         node.enablePQC = obj["enablePQC"].toBool(false);
         node.enableFlow = obj["enableFlow"].toBool(true);
 
-        // 兼容旧版 nodes.json：旧版 serverAddress 是连接域名，serverIP 是优选IP
-        // 新版：serverIP=连接目标，serverAddress=Host
-        // 迁移：若旧版有 serverAddress 但无 serverIP，将 serverAddress 迁移到 serverIP
-        QString oldServerAddress = obj["serverAddress"].toString();
-        QString oldServerIP = obj["serverIP"].toString();
-        if (oldServerIP.isEmpty() && !oldServerAddress.isEmpty()) {
-            node.serverIP = oldServerAddress;
-            node.serverAddress = "";
-        } else {
-            node.serverIP = oldServerIP;
-            node.serverAddress = oldServerAddress;
+        // 新版 JSON 键：server / host
+        // 兼容旧版 nodes.json：旧版 serverIP=连接目标, serverAddress=Host
+        //                       更旧版 serverAddress=连接目标（无 serverIP）
+        node.server = obj["server"].toString();
+        node.host   = obj["host"].toString();
+        if (node.server.isEmpty()) {
+            // 迁移旧版格式
+            QString oldServerIP      = obj["serverIP"].toString();
+            QString oldServerAddress = obj["serverAddress"].toString();
+            if (!oldServerIP.isEmpty()) {
+                node.server = oldServerIP;
+                node.host   = oldServerAddress;
+            } else if (!oldServerAddress.isEmpty()) {
+                // 最旧版：serverAddress 即为连接目标
+                node.server = oldServerAddress;
+            }
         }
 
         return node;
@@ -143,7 +148,7 @@ struct EWPNode {
     }
 
     QString displayAddress() const {
-        return QString("%1:%2").arg(serverIP).arg(serverPort);
+        return QString("%1:%2").arg(server).arg(serverPort);
     }
 
     QString displayLatency() const {
@@ -153,7 +158,7 @@ struct EWPNode {
     }
 
     bool isValid() const {
-        if (serverIP.isEmpty()) return false;
+        if (server.isEmpty()) return false;
         if (appProtocol == TROJAN) return !trojanPassword.isEmpty();
         return !uuid.isEmpty();
     }
@@ -166,13 +171,11 @@ struct EWPNode {
         return uuid.left(8) + "...";
     }
 
-    // 返回实际用于连接的 host（server 字段）
-    QString effectiveHost() const {
-        return serverAddress.isEmpty() ? serverIP : serverAddress;
-    }
-
     // 返回实际用于 TLS SNI 的域名
+    // 回退链：sni → host → server
     QString effectiveSNI() const {
-        return sni.isEmpty() ? effectiveHost() : sni;
+        if (!sni.isEmpty()) return sni;
+        if (!host.isEmpty()) return host;
+        return server;
     }
 };

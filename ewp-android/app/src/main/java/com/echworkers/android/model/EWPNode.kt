@@ -22,7 +22,6 @@ data class EWPNode(
     val userAgent: String = "",
     val contentType: String = "",
     
-    val serverIP: String = "",
     val host: String = "",
     val sni: String = "",
     

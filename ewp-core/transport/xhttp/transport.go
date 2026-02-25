@@ -22,7 +22,6 @@ import (
 
 type Transport struct {
 	serverAddr string
-	serverIP   string
 	token      string
 	password   string // Trojan password
 	uuid       [16]byte
@@ -59,14 +58,15 @@ type Transport struct {
 	xmuxManager *XmuxManager
 	xmuxMu      sync.Mutex
 
+	sni       string
 	bypassCfg *transport.BypassConfig
 }
 
-func New(serverAddr, serverIP, token string, useECH, enableFlow bool, path string, echManager *commontls.ECHManager) (*Transport, error) {
-	return NewWithProtocol(serverAddr, serverIP, token, "", useECH, enableFlow, false, false, path, echManager)
+func New(serverAddr, token string, useECH, enableFlow bool, path string, echManager *commontls.ECHManager) (*Transport, error) {
+	return NewWithProtocol(serverAddr, token, "", useECH, enableFlow, false, false, path, echManager)
 }
 
-func NewWithProtocol(serverAddr, serverIP, token, password string, useECH, enableFlow, enablePQC, useTrojan bool, path string, echManager *commontls.ECHManager) (*Transport, error) {
+func NewWithProtocol(serverAddr, token, password string, useECH, enableFlow, enablePQC, useTrojan bool, path string, echManager *commontls.ECHManager) (*Transport, error) {
 	var uuid [16]byte
 	if !useTrojan {
 		var err error
@@ -95,7 +95,6 @@ func NewWithProtocol(serverAddr, serverIP, token, password string, useECH, enabl
 
 	return &Transport{
 		serverAddr: serverAddr,
-		serverIP:   serverIP,
 		token:      token,
 		password:   password,
 		uuid:       uuid,
@@ -138,6 +137,11 @@ func (t *Transport) SetMode(mode string) *Transport {
 // SetCustomHeader 设置自定义头部
 func (t *Transport) SetCustomHeader(key, value string) *Transport {
 	t.customHeaders[key] = value
+	return t
+}
+
+func (t *Transport) SetSNI(sni string) *Transport {
+	t.sni = sni
 	return t
 }
 
@@ -285,8 +289,13 @@ func (t *Transport) createHTTPClient(host, port string) (*http.Client, error) {
 		return nil, err
 	}
 
+	serverName := t.sni
+	if serverName == "" {
+		serverName = parsed.Host
+	}
+
 	tlsConfig, err := commontls.NewClient(commontls.ClientOptions{
-		ServerName: parsed.Host,
+		ServerName: serverName,
 		EnableECH:  t.useECH,
 		EnablePQC:  t.enablePQC,
 		ECHManager: t.echManager,
@@ -302,20 +311,9 @@ func (t *Transport) createHTTPClient(host, port string) (*http.Client, error) {
 
 	stdConfig.NextProtos = []string{"h2"}
 
-	// Resolve serverIP if it's a domain name
-	resolvedIP := t.serverIP
-	if resolvedIP != "" && !isIPAddress(resolvedIP) {
-		ip, err := transport.ResolveIP(t.bypassCfg, resolvedIP, port)
-		if err != nil {
-			log.Printf("[XHTTP] DNS resolution failed for serverIP %s: %v", resolvedIP, err)
-			return nil, fmt.Errorf("DNS resolution failed for serverIP: %w", err)
-		}
-		log.V("[XHTTP] Resolved serverIP %s -> %s", t.serverIP, ip)
-		resolvedIP = ip
-	}
-
-	// If no serverIP, resolve host (bypass DNS + optimal IP selection)
-	if resolvedIP == "" && !isIPAddress(host) {
+	// Resolve serverAddr host to IP
+	var resolvedIP string
+	if !isIPAddress(host) {
 		ip, err := transport.ResolveIP(t.bypassCfg, host, port)
 		if err != nil {
 			log.Printf("[XHTTP] DNS resolution failed for %s: %v", host, err)

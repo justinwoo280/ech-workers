@@ -24,7 +24,7 @@ void NodeTester::startTest()
 {
     timer.start();
     
-    socket->connectToHost(node.serverIP, node.serverPort);
+    socket->connectToHost(node.server, node.serverPort);
 }
 
 void NodeTester::onConnected()

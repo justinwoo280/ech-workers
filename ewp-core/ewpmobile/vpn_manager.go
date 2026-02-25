@@ -51,8 +51,7 @@ type VPNManager struct {
 // VPNConfig VPN 配置
 type VPNConfig struct {
 	// 服务器配置
-	ServerAddr string
-	ServerIP   string
+	ServerAddr string // 连接目标（IP 或域名，直接 DNS 解析后建立 TCP 连接）
 	Token      string
 	Password   string
 
@@ -155,7 +154,6 @@ func (vm *VPNManager) Start(tunFD int, config *VPNConfig) error {
 		var wsT *websocket.Transport
 		wsT, err = websocket.NewWithProtocol(
 			config.ServerAddr,
-			config.ServerIP,
 			config.Token,
 			config.Password,
 			config.EnableECH,
@@ -173,7 +171,6 @@ func (vm *VPNManager) Start(tunFD int, config *VPNConfig) error {
 		var grpcT *grpc.Transport
 		grpcT, err = grpc.NewWithProtocol(
 			config.ServerAddr,
-			config.ServerIP,
 			config.Token,
 			config.Password,
 			config.EnableECH,
@@ -196,7 +193,6 @@ func (vm *VPNManager) Start(tunFD int, config *VPNConfig) error {
 		var xhttpT *xhttp.Transport
 		xhttpT, err = xhttp.NewWithProtocol(
 			config.ServerAddr,
-			config.ServerIP,
 			config.Token,
 			config.Password,
 			config.EnableECH,
@@ -219,7 +215,6 @@ func (vm *VPNManager) Start(tunFD int, config *VPNConfig) error {
 		var h3T *h3grpc.Transport
 		h3T, err = h3grpc.NewWithProtocol(
 			config.ServerAddr,
-			config.ServerIP,
 			config.Token,
 			config.Password,
 			config.EnableECH,
@@ -249,6 +244,18 @@ func (vm *VPNManager) Start(tunFD int, config *VPNConfig) error {
 	if err != nil {
 		cancel()
 		return fmt.Errorf("failed to create transport: %w", err)
+	}
+
+	// Apply SNI override: config.SNI → config.Host → "" (transport falls back to parsed server host)
+	effectiveSNI := config.SNI
+	if effectiveSNI == "" {
+		effectiveSNI = config.Host
+	}
+	if effectiveSNI != "" {
+		switch t := vm.transport.(type) {
+		case interface{ SetSNI(string) }:
+			t.SetSNI(effectiveSNI)
+		}
 	}
 
 	// 3. Android socket 保护：所有出站连接绑定到 VpnService.protect() 以避免 TUN 路由死循环
