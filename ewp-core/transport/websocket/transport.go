@@ -19,7 +19,6 @@ import (
 // Transport implements WebSocket transport
 type Transport struct {
 	serverAddr string
-	serverIP   string
 	token      string
 	password   string // Trojan password
 	uuid       [16]byte
@@ -29,18 +28,19 @@ type Transport struct {
 	useTrojan  bool // Use Trojan protocol instead of EWP
 	path       string
 	host       string
+	sni        string
 	headers    map[string]string
 	echManager *commontls.ECHManager
 	bypassCfg  *transport.BypassConfig
 }
 
 // New creates a new WebSocket transport
-func New(serverAddr, serverIP, token string, useECH, enableFlow bool, path string, echMgr *commontls.ECHManager) (*Transport, error) {
-	return NewWithProtocol(serverAddr, serverIP, token, "", useECH, enableFlow, false, false, path, echMgr)
+func New(serverAddr, token string, useECH, enableFlow bool, path string, echMgr *commontls.ECHManager) (*Transport, error) {
+	return NewWithProtocol(serverAddr, token, "", useECH, enableFlow, false, false, path, echMgr)
 }
 
 // NewWithProtocol creates a new WebSocket transport with protocol selection
-func NewWithProtocol(serverAddr, serverIP, token, password string, useECH, enableFlow, enablePQC, useTrojan bool, path string, echMgr *commontls.ECHManager) (*Transport, error) {
+func NewWithProtocol(serverAddr, token, password string, useECH, enableFlow, enablePQC, useTrojan bool, path string, echMgr *commontls.ECHManager) (*Transport, error) {
 	var uuid [16]byte
 	if !useTrojan {
 		var err error
@@ -56,7 +56,6 @@ func NewWithProtocol(serverAddr, serverIP, token, password string, useECH, enabl
 
 	return &Transport{
 		serverAddr: serverAddr,
-		serverIP:   serverIP,
 		token:      token,
 		password:   password,
 		uuid:       uuid,
@@ -97,9 +96,15 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 
 	wsURL := fmt.Sprintf("wss://%s:%s%s", parsed.Host, parsed.Port, t.path)
 
+	// SNI: explicit override → server host fallback
+	serverName := t.sni
+	if serverName == "" {
+		serverName = parsed.Host
+	}
+
 	// Build TLS config using interface abstraction
 	tlsConfig, err := commontls.NewClient(commontls.ClientOptions{
-		ServerName: parsed.Host,
+		ServerName: serverName,
 		EnableECH:  t.useECH,
 		EnablePQC:  t.enablePQC,
 		ECHManager: t.echManager,
@@ -113,20 +118,9 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 		return nil, err
 	}
 
-	// Resolve serverIP if it's a domain name
-	resolvedIP := t.serverIP
-	if resolvedIP != "" && !isIPAddress(resolvedIP) {
-		ip, err := transport.ResolveIP(t.bypassCfg, resolvedIP, parsed.Port)
-		if err != nil {
-			log.Printf("[WebSocket] DNS resolution failed for serverIP %s: %v", resolvedIP, err)
-			return nil, fmt.Errorf("DNS resolution failed for serverIP: %w", err)
-		}
-		log.V("[WebSocket] Resolved serverIP %s -> %s", t.serverIP, ip)
-		resolvedIP = ip
-	}
-
-	// If no serverIP, resolve host (bypass DNS + optimal IP selection)
-	if resolvedIP == "" && !isIPAddress(parsed.Host) {
+	// Resolve serverAddr host to IP
+	var resolvedIP string
+	if !isIPAddress(parsed.Host) {
 		ip, err := transport.ResolveIP(t.bypassCfg, parsed.Host, parsed.Port)
 		if err != nil {
 			log.Printf("[WebSocket] DNS resolution failed for %s: %v", parsed.Host, err)
@@ -201,6 +195,11 @@ func (t *Transport) SetBypassConfig(cfg *transport.BypassConfig) {
 
 func (t *Transport) SetHost(host string) *Transport {
 	t.host = host
+	return t
+}
+
+func (t *Transport) SetSNI(sni string) *Transport {
+	t.sni = sni
 	return t
 }
 

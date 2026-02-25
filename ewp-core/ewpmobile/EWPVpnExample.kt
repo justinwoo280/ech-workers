@@ -109,7 +109,7 @@ class EWPVpnService : VpnService(), Ewpmobile.SocketProtector {
     private fun startVPNWithBuilder(
         serverAddr: String,
         token: String,
-        serverIP: String = "",
+        host: String = "",
         protocol: String = "ws",
         enableECH: Boolean = true,
         enableFlow: Boolean = true,
@@ -120,9 +120,8 @@ class EWPVpnService : VpnService(), Ewpmobile.SocketProtector {
                 val tunFD = establishVpnInterface()
                 if (tunFD < 0) return@launch
                 
-                // 使用配置构建器
                 val config = Ewpmobile.newVPNConfig(serverAddr, token)
-                    .setServerIP(serverIP)
+                    .apply { if (host.isNotEmpty()) setHost(host) }
                     .setProtocol(protocol)
                     .setEnableECH(enableECH)
                     .setEnableFlow(enableFlow)

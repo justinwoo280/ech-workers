@@ -155,9 +155,6 @@ class EWPVpnService : VpnService(), SocketProtector {
             setProtocol(protocol)
             setPath(path)
             
-            if (node.serverIP.isNotEmpty()) {
-                setServerIP(node.serverIP)
-            }
             if (node.host.isNotEmpty()) {
                 setHost(node.host)
             }

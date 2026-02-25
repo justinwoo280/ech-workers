@@ -17,7 +17,6 @@
       "tag": "proxy-h3",
       "server": "cdn.example.com",
       "server_port": 443,
-      "server_ip": "",
       "uuid": "d342d11e-d424-4583-b36e-524ab1f0afa4",
       "transport": {
         "type": "h3grpc",

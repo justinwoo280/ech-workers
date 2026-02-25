@@ -38,12 +38,6 @@ func NewVPNConfig(serverAddr, token string) *VPNConfigBuilder {
 	}
 }
 
-// SetServerIP 设置服务器 IP（优选 IP）
-func (b *VPNConfigBuilder) SetServerIP(ip string) *VPNConfigBuilder {
-	b.config.ServerIP = ip
-	return b
-}
-
 // SetPassword 设置密码（Trojan 协议需要）
 func (b *VPNConfigBuilder) SetPassword(password string) *VPNConfigBuilder {
 	b.config.Password = password
@@ -313,8 +307,7 @@ func StartVPNTrojan(tunFD int, serverAddr, password, protocol string) error {
 // StartVPNAdvanced 启动 VPN（完整配置）
 // 参数示例：
 //
-//	serverAddr: "xxx.workers.dev:443"
-//	serverIP: "104.16.1.2" (可选，优选 IP)
+//	serverAddr: "xxx.workers.dev:443" 或 "104.16.1.2:443"
 //	token: "your-uuid"
 //	password: "" (Trojan 协议需要)
 //	protocol: "ws" / "grpc" / "xhttp"
@@ -325,13 +318,12 @@ func StartVPNTrojan(tunFD int, serverAddr, password, protocol string) error {
 //	enablePQC: false
 func StartVPNAdvanced(
 	tunFD int,
-	serverAddr, serverIP, token, password string,
+	serverAddr, token, password string,
 	protocol, appProtocol, path string,
 	enableECH, enableFlow, enablePQC bool,
 ) error {
 	config := &VPNConfig{
 		ServerAddr:  serverAddr,
-		ServerIP:    serverIP,
 		Token:       token,
 		Password:    password,
 		Protocol:    protocol,

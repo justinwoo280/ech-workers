@@ -22,7 +22,6 @@ import (
 // Transport implements HTTP/3 transport for gRPC-Web
 type Transport struct {
 	serverAddr  string
-	serverIP    string
 	uuidStr     string
 	password    string
 	uuid        [16]byte
@@ -32,6 +31,7 @@ type Transport struct {
 	useTrojan   bool
 	serviceName string
 	authority   string
+	sni         string
 	idleTimeout time.Duration
 	concurrency int
 	echManager  *commontls.ECHManager
@@ -50,12 +50,12 @@ type Transport struct {
 }
 
 // New creates a new HTTP/3 transport
-func New(serverAddr, serverIP, uuidStr string, useECH, enableFlow bool, serviceName string, echManager *commontls.ECHManager) (*Transport, error) {
-	return NewWithProtocol(serverAddr, serverIP, uuidStr, "", useECH, enableFlow, false, false, serviceName, echManager)
+func New(serverAddr, uuidStr string, useECH, enableFlow bool, serviceName string, echManager *commontls.ECHManager) (*Transport, error) {
+	return NewWithProtocol(serverAddr, uuidStr, "", useECH, enableFlow, false, false, serviceName, echManager)
 }
 
 // NewWithProtocol creates a new HTTP/3 transport with full options
-func NewWithProtocol(serverAddr, serverIP, uuidStr, password string, useECH, enableFlow, enablePQC, useTrojan bool, serviceName string, echManager *commontls.ECHManager) (*Transport, error) {
+func NewWithProtocol(serverAddr, uuidStr, password string, useECH, enableFlow, enablePQC, useTrojan bool, serviceName string, echManager *commontls.ECHManager) (*Transport, error) {
 	var uuid [16]byte
 	if !useTrojan {
 		var err error
@@ -72,7 +72,6 @@ func NewWithProtocol(serverAddr, serverIP, uuidStr, password string, useECH, ena
 
 	t := &Transport{
 		serverAddr:  serverAddr,
-		serverIP:    serverIP,
 		uuidStr:     uuidStr,
 		password:    password,
 		uuid:        uuid,
@@ -105,8 +104,13 @@ func (t *Transport) initClient() error {
 		return fmt.Errorf("invalid server address: %w", err)
 	}
 
+	serverName := t.sni
+	if serverName == "" {
+		serverName = parsed.Host
+	}
+
 	tlsCfg, err := commontls.NewClient(commontls.ClientOptions{
-		ServerName: parsed.Host,
+		ServerName: serverName,
 		EnableECH:  t.useECH,
 		EnablePQC:  t.enablePQC,
 		ECHManager: t.echManager,
@@ -179,6 +183,11 @@ func (t *Transport) reinitClient() error {
 // SetAuthority sets the :authority pseudo-header
 func (t *Transport) SetAuthority(authority string) *Transport {
 	t.authority = authority
+	return t
+}
+
+func (t *Transport) SetSNI(sni string) *Transport {
+	t.sni = sni
 	return t
 }
 
@@ -284,31 +293,15 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 	host := parsed.Host
 	port := parsed.Port
 	addr := net.JoinHostPort(host, port)
-	resolvedIP := t.serverIP
 
-	// Resolve serverIP if it's a domain name
-	if resolvedIP != "" && !isIPAddress(resolvedIP) {
-		ip, err := transport.ResolveIP(t.bypassCfg, resolvedIP, port)
-		if err != nil {
-			log.Printf("[H3] DNS resolution failed for serverIP %s: %v", resolvedIP, err)
-			return nil, fmt.Errorf("DNS resolution failed for serverIP: %w", err)
-		}
-		log.V("[H3] Resolved serverIP %s -> %s", t.serverIP, ip)
-		resolvedIP = ip
-	}
-
-	// If no serverIP specified, resolve host (bypass DNS + optimal IP selection)
-	if resolvedIP == "" && !isIPAddress(host) {
+	// Resolve serverAddr host to IP
+	if !isIPAddress(host) {
 		ip, err := transport.ResolveIP(t.bypassCfg, host, port)
 		if err != nil {
 			log.Printf("[H3] DNS resolution failed for %s: %v", host, err)
 			return nil, fmt.Errorf("DNS resolution failed: %w", err)
 		}
-		resolvedIP = ip
-	}
-
-	if resolvedIP != "" {
-		addr = net.JoinHostPort(resolvedIP, port)
+		addr = net.JoinHostPort(ip, port)
 		log.Printf("[H3] Connecting to: %s (SNI: %s)", addr, host)
 	} else {
 		log.Printf("[H3] Connecting to: %s", addr)
@@ -334,10 +327,8 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 	req.Header.Set("Content-Type", t.contentType)
 	req.Header.Set("User-Agent", t.userAgent)
 
-	// Ensure SNI matches the domain (not the raw IP) for Host header and ECH routing
-	if t.serverIP != "" && t.authority == "" {
-		req.Host = host
-	} else if t.authority != "" {
+	// Set Host header: use authority override if set, otherwise use serverAddr host
+	if t.authority != "" {
 		req.Host = t.authority
 	}
 

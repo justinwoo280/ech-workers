@@ -41,13 +41,13 @@ EWPNode ShareLink::parseLink(const QString &link)
     }
     
     // 服务器地址（实际连接目标）和端口
-    node.serverIP = url.host();
+    node.server = url.host();
     node.serverPort = url.port(443);
     
     // 解析节点名称
     node.name = url.fragment();
     if (node.name.isEmpty()) {
-        node.name = node.serverIP;
+        node.name = node.server;
     }
     
     // 解析查询参数
@@ -87,8 +87,7 @@ EWPNode ShareLink::parseLink(const QString &link)
         node.grpcServiceName = grpcService;
     }
     
-    // Host 头（留空则同 serverIP）
-    node.serverAddress = query.queryItemValue("host");
+    node.host = query.queryItemValue("host");
 
     // TLS 配置
     node.enableTLS = query.queryItemValue("tls") != "0";
@@ -138,7 +137,7 @@ QString ShareLink::generateLink(const EWPNode &node)
         url.setUserName(node.uuid);
     }
     
-    url.setHost(node.serverIP);
+    url.setHost(node.server);
     url.setPort(node.serverPort);
     url.setFragment(node.name);
     
@@ -175,8 +174,8 @@ QString ShareLink::generateLink(const EWPNode &node)
     }
     
     // Host 头（非空且不同于连接目标时才写入）
-    if (!node.serverAddress.isEmpty()) {
-        query.addQueryItem("host", node.serverAddress);
+    if (!node.host.isEmpty()) {
+        query.addQueryItem("host", node.host);
     }
 
     // TLS 配置

@@ -90,11 +90,11 @@ QJsonObject ConfigGenerator::generateOutbound(const EWPNode &node)
     
     outbound["type"] = (node.appProtocol == EWPNode::TROJAN) ? "trojan" : "ewp";
     outbound["tag"] = "proxy-out";
-    outbound["server"] = node.effectiveHost();
+    outbound["server"] = node.server;
     outbound["server_port"] = node.serverPort;
 
-    if (!node.serverAddress.isEmpty() && node.serverIP != node.serverAddress) {
-        outbound["server_ip"] = node.serverIP;
+    if (!node.host.isEmpty()) {
+        outbound["host"] = node.host;
     }
     
     if (node.appProtocol == EWPNode::TROJAN) {
@@ -175,7 +175,11 @@ QJsonObject ConfigGenerator::generateTLS(const EWPNode &node)
     QJsonObject tls;
 
     tls["enabled"] = node.enableTLS;
-    tls["server_name"] = node.effectiveSNI();
+    // SNI 回退链：sni → host → server
+    QString sni = node.sni;
+    if (sni.isEmpty()) sni = node.host;
+    if (sni.isEmpty()) sni = node.server;
+    tls["server_name"] = sni;
     tls["insecure"] = false;
 
     if (node.minTLSVersion == "1.3") {

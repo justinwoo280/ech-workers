@@ -143,7 +143,7 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 			path = "/"
 		}
 		trans, err = websocket.NewWithProtocol(
-			serverAddr, outbound.ServerIP, uuid, password,
+			serverAddr, uuid, password,
 			useECH, enableFlow, enablePQC, useTrojan,
 			path, echMgr,
 		)
@@ -157,7 +157,7 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 			serviceName = "ProxyService"
 		}
 		grpcTrans, err := grpc.NewWithProtocol(
-			serverAddr, outbound.ServerIP, uuid, password,
+			serverAddr, uuid, password,
 			useECH, enableFlow, enablePQC, useTrojan,
 			serviceName, echMgr,
 		)
@@ -176,7 +176,7 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 			serviceName = "ProxyService"
 		}
 		h3Trans, err := h3grpc.NewWithProtocol(
-			serverAddr, outbound.ServerIP, uuid, password,
+			serverAddr, uuid, password,
 			useECH, enableFlow, enablePQC, useTrojan,
 			serviceName, echMgr,
 		)
@@ -184,7 +184,6 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 			return nil, err
 		}
 
-		// Apply anti-DPI settings from config
 		if outbound.Transport.UserAgent != "" {
 			h3Trans.SetUserAgent(outbound.Transport.UserAgent)
 		}
@@ -199,7 +198,7 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 			path = "/xhttp"
 		}
 		trans, err = xhttp.NewWithProtocol(
-			serverAddr, outbound.ServerIP, uuid, password,
+			serverAddr, uuid, password,
 			useECH, enableFlow, enablePQC, useTrojan,
 			path, echMgr,
 		)
@@ -209,6 +208,41 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 
 	default:
 		return nil, fmt.Errorf("unsupported transport type: %s", transportType)
+	}
+
+	// Apply Host override (HTTP Host header / gRPC authority)
+	if outbound.Host != "" {
+		switch t := trans.(type) {
+		case *websocket.Transport:
+			t.SetHost(outbound.Host)
+		case *grpc.Transport:
+			t.SetAuthority(outbound.Host)
+		case *h3grpc.Transport:
+			t.SetAuthority(outbound.Host)
+		case *xhttp.Transport:
+			t.SetCustomHeader("Host", outbound.Host)
+		}
+	}
+
+	// Apply SNI override: tls.server_name → host → "" (transport falls back to parsed server host)
+	effectiveSNI := ""
+	if outbound.TLS != nil {
+		effectiveSNI = outbound.TLS.ServerName
+	}
+	if effectiveSNI == "" {
+		effectiveSNI = outbound.Host
+	}
+	if effectiveSNI != "" {
+		switch t := trans.(type) {
+		case *websocket.Transport:
+			t.SetSNI(effectiveSNI)
+		case *grpc.Transport:
+			t.SetSNI(effectiveSNI)
+		case *h3grpc.Transport:
+			t.SetSNI(effectiveSNI)
+		case *xhttp.Transport:
+			t.SetSNI(effectiveSNI)
+		}
 	}
 
 	log.Info("Transport created: %s", trans.Name())
@@ -258,7 +292,7 @@ func startTunMode(inbound option.InboundConfig, trans transport.Transport, cfg *
 	// can be detected while the routing table is still unmodified.
 	// This prevents routing loops: the transport's outgoing TCP/UDP sockets
 	// will be bound to the physical interface and bypass the TUN device.
-	bypassDialer, bdErr := tun.NewBypassDialer(cfg.Outbounds[0].ServerIP)
+	bypassDialer, bdErr := tun.NewBypassDialer(cfg.Outbounds[0].Server)
 	if bdErr != nil {
 		log.Printf("[TUN] Warning: bypass dialer unavailable (%v) — routing loops may occur", bdErr)
 	} else {

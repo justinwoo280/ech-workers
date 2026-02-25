@@ -35,7 +35,7 @@ void EditNodeDialog::setNode(const EWPNode &node)
     currentNode = node;
 
     ui->editName->setText(node.name);
-    ui->editAddress->setText(node.serverIP);
+    ui->editAddress->setText(node.server);
     ui->spinPort->setValue(node.serverPort);
 
     ui->comboProtocol->setCurrentIndex(static_cast<int>(node.appProtocol));
@@ -44,7 +44,7 @@ void EditNodeDialog::setNode(const EWPNode &node)
     ui->editTrojanPassword->setText(node.trojanPassword);
 
     ui->comboTransport->setCurrentIndex(static_cast<int>(node.transportMode));
-    ui->editHost->setText(node.serverAddress);
+    ui->editHost->setText(node.host);
 
     ui->editWsPath->setText(node.wsPath);
 
@@ -78,9 +78,9 @@ EWPNode EditNodeDialog::getNode() const
     EWPNode node = currentNode;
 
     node.name = ui->editName->text().trimmed();
-    node.serverIP = ui->editAddress->text().trimmed();
+    node.server = ui->editAddress->text().trimmed();
     node.serverPort = ui->spinPort->value();
-    node.serverAddress = ui->editHost->text().trimmed();
+    node.host = ui->editHost->text().trimmed();
 
     node.appProtocol = static_cast<EWPNode::AppProtocol>(ui->comboProtocol->currentIndex());
 

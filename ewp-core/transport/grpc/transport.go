@@ -36,7 +36,6 @@ var (
 
 type Transport struct {
 	serverAddr          string
-	serverIP            string
 	uuidStr             string
 	password            string // Trojan password
 	uuid                [16]byte
@@ -46,6 +45,7 @@ type Transport struct {
 	useTrojan           bool // Use Trojan protocol
 	serviceName         string
 	authority           string
+	sni                 string
 	idleTimeout         time.Duration
 	healthCheckTimeout  time.Duration
 	permitWithoutStream bool
@@ -55,11 +55,11 @@ type Transport struct {
 	bypassCfg           *transport.BypassConfig
 }
 
-func New(serverAddr, serverIP, uuidStr string, useECH, enableFlow bool, serviceName string, echManager *commontls.ECHManager) (*Transport, error) {
-	return NewWithProtocol(serverAddr, serverIP, uuidStr, "", useECH, enableFlow, false, false, serviceName, echManager)
+func New(serverAddr, uuidStr string, useECH, enableFlow bool, serviceName string, echManager *commontls.ECHManager) (*Transport, error) {
+	return NewWithProtocol(serverAddr, uuidStr, "", useECH, enableFlow, false, false, serviceName, echManager)
 }
 
-func NewWithProtocol(serverAddr, serverIP, uuidStr, password string, useECH, enableFlow, enablePQC, useTrojan bool, serviceName string, echManager *commontls.ECHManager) (*Transport, error) {
+func NewWithProtocol(serverAddr, uuidStr, password string, useECH, enableFlow, enablePQC, useTrojan bool, serviceName string, echManager *commontls.ECHManager) (*Transport, error) {
 	var uuid [16]byte
 	if !useTrojan {
 		var err error
@@ -76,7 +76,6 @@ func NewWithProtocol(serverAddr, serverIP, uuidStr, password string, useECH, ena
 
 	return &Transport{
 		serverAddr:          serverAddr,
-		serverIP:            serverIP,
 		uuidStr:             uuidStr,
 		password:            password,
 		uuid:                uuid,
@@ -97,6 +96,11 @@ func NewWithProtocol(serverAddr, serverIP, uuidStr, password string, useECH, ena
 
 func (t *Transport) SetAuthority(authority string) *Transport {
 	t.authority = authority
+	return t
+}
+
+func (t *Transport) SetSNI(sni string) *Transport {
+	t.sni = sni
 	return t
 }
 
@@ -145,21 +149,10 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 	}
 
 	addr := net.JoinHostPort(parsed.Host, parsed.Port)
-	resolvedIP := t.serverIP
 
-	// Resolve serverIP if it's a domain name
-	if resolvedIP != "" && !isIPAddress(resolvedIP) {
-		ip, err := transport.ResolveIP(t.bypassCfg, resolvedIP, parsed.Port)
-		if err != nil {
-			log.Printf("[gRPC] DNS resolution failed for serverIP %s: %v", resolvedIP, err)
-			return nil, fmt.Errorf("DNS resolution failed for serverIP: %w", err)
-		}
-		log.V("[gRPC] Resolved serverIP %s -> %s", t.serverIP, ip)
-		resolvedIP = ip
-	}
-
-	// If no serverIP specified, resolve host (bypass DNS + optimal IP selection)
-	if resolvedIP == "" && !isIPAddress(parsed.Host) {
+	// Resolve serverAddr host to IP
+	var resolvedIP string
+	if !isIPAddress(parsed.Host) {
 		ip, err := transport.ResolveIP(t.bypassCfg, parsed.Host, parsed.Port)
 		if err != nil {
 			log.Printf("[gRPC] DNS resolution failed for %s: %v", parsed.Host, err)
@@ -175,14 +168,14 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 		log.Printf("[gRPC] Connecting to: %s", addr)
 	}
 
-	conn, err := t.getOrCreateConn(parsed.Host, addr)
+	conn, err := t.getOrCreateConn(parsed.Host, t.sni, addr)
 	if err != nil {
 		// Check for ECH rejection and retry with updated config
 		if t.useECH && t.echManager != nil {
 			if echErr := t.handleECHRejection(err); echErr == nil {
 				log.Printf("[gRPC] ECH rejected, retrying with updated config...")
 				// Retry connection with updated ECH config
-				conn, err = t.getOrCreateConn(parsed.Host, addr)
+				conn, err = t.getOrCreateConn(parsed.Host, t.sni, addr)
 				if err != nil {
 					return nil, fmt.Errorf("retry after ECH update failed: %w", err)
 				}
@@ -208,7 +201,10 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 	return NewConn(conn, stream, t.uuid, t.password, t.enableFlow, t.useTrojan), nil
 }
 
-func (t *Transport) getOrCreateConn(host, addr string) (*grpc.ClientConn, error) {
+func (t *Transport) getOrCreateConn(host, sniOverride, addr string) (*grpc.ClientConn, error) {
+	if sniOverride != "" {
+		host = sniOverride
+	}
 	key := grpcConnKey{
 		addr:      addr,
 		authority: t.authority,

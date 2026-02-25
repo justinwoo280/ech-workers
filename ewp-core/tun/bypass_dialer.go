@@ -29,16 +29,14 @@ type BypassDialer struct {
 
 // NewBypassDialer detects the physical outbound interface and returns a
 // BypassDialer that routes around the TUN device.
-func NewBypassDialer(serverIP string) (*BypassDialer, error) {
+func NewBypassDialer(serverAddr string) (*BypassDialer, error) {
 	probeIP := "8.8.8.8"
-	if serverIP != "" {
-		if ip := net.ParseIP(serverIP); ip != nil {
+	if serverAddr != "" {
+		if ip := net.ParseIP(serverAddr); ip != nil {
 			if ip.To4() == nil {
-				probeIP = "[2001:4860:4860::8888]" // Default IPv6 probe if server is IPv6
-				// Optionally, just use the server IP itself: probeIP = net.JoinHostPort(serverIP, "80")
-				probeIP = serverIP
+				probeIP = serverAddr // IPv6
 			} else {
-				probeIP = serverIP
+				probeIP = serverAddr
 			}
 		}
 	}
