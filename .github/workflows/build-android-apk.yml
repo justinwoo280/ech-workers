@@ -110,6 +110,15 @@ jobs:
           name: ewp-core-aar
           path: ewp-android/app/libs/
 
+      - name: Inspect AAR contents
+        run: |
+          echo "=== libs dir ==="
+          ls -la ewp-android/app/libs/
+          echo "=== AAR Java classes ==="
+          unzip -p ewp-android/app/libs/ewp-core.aar classes.jar | jar tf /dev/stdin | grep -E "Ewpmobile|SocketProtector|VPNConfig" || true
+          echo "=== all AAR entries ==="
+          unzip -l ewp-android/app/libs/ewp-core.aar | head -30
+
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
         with:
