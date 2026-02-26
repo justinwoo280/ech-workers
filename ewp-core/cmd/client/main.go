@@ -220,7 +220,7 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 		case *h3grpc.Transport:
 			t.SetAuthority(outbound.Host)
 		case *xhttp.Transport:
-			t.SetCustomHeader("Host", outbound.Host)
+			t.SetHost(outbound.Host)
 		}
 	}
 

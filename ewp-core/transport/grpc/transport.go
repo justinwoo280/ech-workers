@@ -163,7 +163,11 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 
 	if resolvedIP != "" {
 		addr = net.JoinHostPort(resolvedIP, parsed.Port)
-		log.Printf("[gRPC] Connecting to: %s (SNI: %s)", addr, parsed.Host)
+		effectiveSNI := parsed.Host
+		if t.sni != "" {
+			effectiveSNI = t.sni
+		}
+		log.Printf("[gRPC] Connecting to: %s (SNI: %s)", addr, effectiveSNI)
 	} else {
 		log.Printf("[gRPC] Connecting to: %s", addr)
 	}

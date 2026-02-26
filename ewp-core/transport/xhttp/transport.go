@@ -59,6 +59,7 @@ type Transport struct {
 	xmuxMu      sync.Mutex
 
 	sni       string
+	host      string
 	bypassCfg *transport.BypassConfig
 }
 
@@ -143,6 +144,15 @@ func (t *Transport) SetCustomHeader(key, value string) *Transport {
 func (t *Transport) SetSNI(sni string) *Transport {
 	t.sni = sni
 	return t
+}
+
+func (t *Transport) SetHost(host string) *Transport {
+	t.host = host
+	return t
+}
+
+func (t *Transport) GetHost() string {
+	return t.host
 }
 
 // SetPaddingConfig 设置 padding 配置
@@ -325,7 +335,7 @@ func (t *Transport) createHTTPClient(host, port string) (*http.Client, error) {
 	target := net.JoinHostPort(host, port)
 	if resolvedIP != "" {
 		target = net.JoinHostPort(resolvedIP, port)
-		log.Printf("[XHTTP] Connecting to: %s (SNI: %s)", target, host)
+		log.Printf("[XHTTP] Connecting to: %s (SNI: %s)", target, serverName)
 	}
 
 	// HTTP/2 Transport 配置 - 参考 Xray-core ChromeH2KeepAlivePeriod
@@ -387,7 +397,14 @@ func (t *Transport) createRequestWithContext(ctx context.Context, method, url st
 		},
 	})
 
-	return http.NewRequestWithContext(ctx, method, url, body)
+	req, err := http.NewRequestWithContext(ctx, method, url, body)
+	if err != nil {
+		return nil, err
+	}
+	if t.host != "" {
+		req.Host = t.host
+	}
+	return req, nil
 }
 
 // tlsVersionToString 转换 TLS 版本号为字符串

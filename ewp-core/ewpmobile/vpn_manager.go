@@ -207,7 +207,7 @@ func (vm *vpnManager) Start(tunFD int, config *VPNConfig) error {
 				xhttpT.SetMode(config.XhttpMode)
 			}
 			if config.Host != "" {
-				xhttpT.SetCustomHeader("Host", config.Host)
+				xhttpT.SetHost(config.Host)
 			}
 		}
 		vm.transport = xhttpT

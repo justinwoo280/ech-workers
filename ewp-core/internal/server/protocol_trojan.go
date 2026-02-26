@@ -19,13 +19,13 @@ func NewTrojanProtocolHandler() *TrojanProtocolHandler {
 
 func (h *TrojanProtocolHandler) Handshake(data []byte, clientIP string) (*HandshakeResult, error) {
 	if h.validKeys == nil {
-		return nil, fmt.Errorf("no valid Trojan keys configured")
+		return &HandshakeResult{}, fmt.Errorf("no valid Trojan keys configured")
 	}
 
 	reader := &byteReader{data: data, pos: 0}
 	pwd, command, addr, err := trojan.ReadHandshake(reader, h.validKeys)
 	if err != nil {
-		return nil, fmt.Errorf("Trojan handshake failed: %w", err)
+		return &HandshakeResult{}, fmt.Errorf("Trojan handshake failed: %w", err)
 	}
 
 	result := &HandshakeResult{

@@ -17,6 +17,8 @@ import (
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 )
@@ -91,16 +93,19 @@ func startFromConfig(configPath string) {
 		log.Fatalf("Failed to listen on %s: %v", addr, err)
 	}
 
-	httpServer := &http.Server{
-		Handler: mux,
-	}
-
 	log.Info("Server listening on %s (modes: %v)", addr, cfg.Listener.Modes)
 
 	if tlsConfig != nil {
-		httpServer.TLSConfig = tlsConfig
+		httpServer := &http.Server{
+			Handler:   mux,
+			TLSConfig: tlsConfig,
+		}
 		log.Fatal(httpServer.ServeTLS(lis, "", ""))
 	} else {
+		h2s := &http2.Server{}
+		httpServer := &http.Server{
+			Handler: h2c.NewHandler(mux, h2s),
+		}
 		log.Fatal(httpServer.Serve(lis))
 	}
 }

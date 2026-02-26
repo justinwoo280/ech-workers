@@ -188,6 +188,7 @@ func (t *Transport) SetAuthority(authority string) *Transport {
 
 func (t *Transport) SetSNI(sni string) *Transport {
 	t.sni = sni
+	t.reinitClient()
 	return t
 }
 
@@ -295,6 +296,10 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 	addr := net.JoinHostPort(host, port)
 
 	// Resolve serverAddr host to IP
+	effectiveSNI := t.sni
+	if effectiveSNI == "" {
+		effectiveSNI = host
+	}
 	if !isIPAddress(host) {
 		ip, err := transport.ResolveIP(t.bypassCfg, host, port)
 		if err != nil {
@@ -302,7 +307,7 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 			return nil, fmt.Errorf("DNS resolution failed: %w", err)
 		}
 		addr = net.JoinHostPort(ip, port)
-		log.Printf("[H3] Connecting to: %s (SNI: %s)", addr, host)
+		log.Printf("[H3] Connecting to: %s (SNI: %s)", addr, effectiveSNI)
 	} else {
 		log.Printf("[H3] Connecting to: %s", addr)
 	}

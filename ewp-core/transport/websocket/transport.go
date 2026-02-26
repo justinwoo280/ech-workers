@@ -140,7 +140,7 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 					return nil, err
 				}
 				address = net.JoinHostPort(resolvedIP, p)
-				log.Printf("[WebSocket] Connecting to: %s (SNI: %s)", address, parsed.Host)
+				log.Printf("[WebSocket] Connecting to: %s (SNI: %s)", address, serverName)
 			}
 			if t.bypassCfg != nil && t.bypassCfg.TCPDialer != nil {
 				return t.bypassCfg.TCPDialer.Dial(network, address)
