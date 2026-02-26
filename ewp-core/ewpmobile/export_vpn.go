@@ -12,7 +12,7 @@ import (
 // 提供简化的全局 VPN 管理功能
 
 var (
-	globalVPN *VPNManager
+	globalVPN *vpnManager
 	vpnMu     sync.Mutex
 )
 
@@ -185,7 +185,7 @@ func StartVPN(tunFD int, config *VPNConfig) error {
 	}
 
 	// 创建新的 VPN 管理器
-	globalVPN = NewVPNManager()
+	globalVPN = newVPNManager()
 
 	// 启动 VPN
 	return globalVPN.Start(tunFD, config)

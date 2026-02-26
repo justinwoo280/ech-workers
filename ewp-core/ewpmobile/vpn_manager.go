@@ -21,8 +21,8 @@ import (
 	singtun "github.com/sagernet/sing-tun"
 )
 
-// VPNManager 统一的 VPN 管理器，集成连接和 TUN 功能
-type VPNManager struct {
+// vpnManager 统一的 VPN 管理器，集成连接和 TUN 功能
+type vpnManager struct {
 	mu      sync.RWMutex
 	running bool
 	ctx     context.Context
@@ -88,15 +88,15 @@ type VPNConfig struct {
 	TunMTU     int
 }
 
-// NewVPNManager 创建 VPN 管理器
-func NewVPNManager() *VPNManager {
-	return &VPNManager{
+// newVPNManager 创建 VPN 管理器
+func newVPNManager() *vpnManager {
+	return &vpnManager{
 		running: false,
 	}
 }
 
 // Start 启动 VPN（连接 + TUN）
-func (vm *VPNManager) Start(tunFD int, config *VPNConfig) error {
+func (vm *vpnManager) Start(tunFD int, config *VPNConfig) error {
 	vm.mu.Lock()
 	defer vm.mu.Unlock()
 
@@ -345,7 +345,7 @@ func (vm *VPNManager) Start(tunFD int, config *VPNConfig) error {
 }
 
 // Stop 停止 VPN
-func (vm *VPNManager) Stop() error {
+func (vm *vpnManager) Stop() error {
 	vm.mu.Lock()
 	defer vm.mu.Unlock()
 
@@ -384,14 +384,14 @@ func (vm *VPNManager) Stop() error {
 }
 
 // IsRunning 检查运行状态
-func (vm *VPNManager) IsRunning() bool {
+func (vm *vpnManager) IsRunning() bool {
 	vm.mu.RLock()
 	defer vm.mu.RUnlock()
 	return vm.running
 }
 
 // GetStats 获取统计信息（返回 JSON 字符串）
-func (vm *VPNManager) GetStats() string {
+func (vm *vpnManager) GetStats() string {
 	vm.mu.RLock()
 	defer vm.mu.RUnlock()
 
@@ -421,16 +421,16 @@ func (vm *VPNManager) GetStats() string {
 	return string(jsonData)
 }
 
-// UpdateStats 更新统计信息（内部使用）
-func (vm *VPNManager) UpdateStats(bytesUp, bytesDown uint64) {
+// updateStats 更新统计信息（内部使用）
+func (vm *vpnManager) updateStats(bytesUp, bytesDown uint64) {
 	vm.mu.Lock()
 	defer vm.mu.Unlock()
 	vm.bytesUp += bytesUp
 	vm.bytesDown += bytesDown
 }
 
-// IncrementConnections 增加连接计数
-func (vm *VPNManager) IncrementConnections() {
+// incrementConnections 增加连接计数
+func (vm *vpnManager) incrementConnections() {
 	vm.mu.Lock()
 	defer vm.mu.Unlock()
 	vm.connections++
