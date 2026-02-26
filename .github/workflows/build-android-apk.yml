@@ -114,10 +114,11 @@ jobs:
         run: |
           echo "=== libs dir ==="
           ls -la ewp-android/app/libs/
-          echo "=== AAR Java classes ==="
-          unzip -p ewp-android/app/libs/ewp-core.aar classes.jar | jar tf /dev/stdin | grep -E "Ewpmobile|SocketProtector|VPNConfig" || true
           echo "=== all AAR entries ==="
-          unzip -l ewp-android/app/libs/ewp-core.aar | head -30
+          unzip -l ewp-android/app/libs/ewp-core.aar
+          echo "=== extract and inspect classes.jar ==="
+          unzip -o ewp-android/app/libs/ewp-core.aar classes.jar -d /tmp/aar-inspect/
+          jar tf /tmp/aar-inspect/classes.jar | head -50
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
