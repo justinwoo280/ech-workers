@@ -60,4 +60,14 @@ private:
     int retryCount = 0;
     EWPNode lastNode;
     bool lastTunMode = false;
+
+#ifdef Q_OS_WIN
+    bool startElevatedCore(const QStringList &args);
+    void pollElevatedExit();
+    void stopElevatedCore();
+
+    void *elevatedHandle = nullptr;
+    QTimer *exitPollTimer = nullptr;
+    bool usingElevation = false;
+#endif
 };

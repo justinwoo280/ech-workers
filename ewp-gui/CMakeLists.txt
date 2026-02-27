@@ -76,7 +76,7 @@ target_link_libraries(${PROJECT_NAME}
 
 # Windows 特定配置
 if(WIN32)
-    target_link_libraries(${PROJECT_NAME} wininet)
+    target_link_libraries(${PROJECT_NAME} wininet Shell32)
 endif()
 
 # 安装规则

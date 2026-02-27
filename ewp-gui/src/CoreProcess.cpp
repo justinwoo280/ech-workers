@@ -12,6 +12,12 @@
 #include <QJsonObject>
 #include <QFile>
 
+#ifdef Q_OS_WIN
+#include <Windows.h>
+#include <shellapi.h>
+#include <shlobj.h>
+#endif
+
 CoreProcess::CoreProcess(QObject *parent)
     : QObject(parent)
 {
@@ -97,7 +103,13 @@ bool CoreProcess::startCore(const EWPNode &node, bool tunMode)
     
     QStringList args;
     args << "-c" << configFilePath;
-    
+
+#ifdef Q_OS_WIN
+    if (tunMode && !IsUserAnAdmin()) {
+        return startElevatedCore(args);
+    }
+#endif
+
     process = new QProcess(this);
     
     connect(process, &QProcess::started, this, &CoreProcess::onProcessStarted);
@@ -127,14 +139,21 @@ bool CoreProcess::startCore(const EWPNode &node, bool tunMode)
 void CoreProcess::stop()
 {
     if (!isRunning() && !retryTimer->isActive()) return;
-    
+
     retryCount = 0;
     retryTimer->stop();
-    
+
     if (!isRunning()) return;
-    
+
+#ifdef Q_OS_WIN
+    if (usingElevation) {
+        stopElevatedCore();
+        return;
+    }
+#endif
+
     gracefulStop = true;
-    
+
     // 尝试通过控制服务器优雅退出
     if (!controlAddr.isEmpty()) {
         sendQuitRequest();
@@ -183,6 +202,13 @@ void CoreProcess::sendQuitRequest()
 
 bool CoreProcess::isRunning() const
 {
+#ifdef Q_OS_WIN
+    if (usingElevation && elevatedHandle) {
+        DWORD exitCode = STILL_ACTIVE;
+        return GetExitCodeProcess(static_cast<HANDLE>(elevatedHandle), &exitCode)
+               && exitCode == STILL_ACTIVE;
+    }
+#endif
     return process && process->state() == QProcess::Running;
 }
 
@@ -310,3 +336,110 @@ void CoreProcess::onReadyReadStandardError()
         }
     }
 }
+
+#ifdef Q_OS_WIN
+bool CoreProcess::startElevatedCore(const QStringList &args)
+{
+    QStringList quotedArgs;
+    for (const QString &arg : args) {
+        if (arg.contains(' ') || arg.contains('"')) {
+            quotedArgs << ("\"" + QString(arg).replace("\"", "\\\"") + "\"");
+        } else {
+            quotedArgs << arg;
+        }
+    }
+    QString params = quotedArgs.join(" ");
+
+    SHELLEXECUTEINFOW sei = {};
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NO_CONSOLE;
+    sei.hwnd = nullptr;
+    sei.lpVerb = L"runas";
+    sei.lpFile = reinterpret_cast<LPCWSTR>(coreExecutable.utf16());
+    sei.lpParameters = reinterpret_cast<LPCWSTR>(params.utf16());
+    sei.nShow = SW_HIDE;
+
+    if (!ShellExecuteExW(&sei)) {
+        DWORD err = GetLastError();
+        if (err == ERROR_CANCELLED) {
+            lastError = "用户取消了管理员权限提升";
+        } else {
+            lastError = QString("提升权限失败 (error=%1)").arg(err);
+        }
+        emit errorOccurred(lastError);
+        if (!configFilePath.isEmpty() && QFile::exists(configFilePath)) {
+            QFile::remove(configFilePath);
+        }
+        return false;
+    }
+
+    elevatedHandle = sei.hProcess;
+    usingElevation = true;
+
+    if (!exitPollTimer) {
+        exitPollTimer = new QTimer(this);
+        connect(exitPollTimer, &QTimer::timeout, this, &CoreProcess::pollElevatedExit);
+    }
+    exitPollTimer->start(1000);
+
+    emit started();
+    emit logReceived("[TUN] 已以管理员权限启动 (实时日志不可用)");
+    return true;
+}
+
+void CoreProcess::pollElevatedExit()
+{
+    if (!elevatedHandle) return;
+
+    DWORD exitCode = STILL_ACTIVE;
+    bool exited = !GetExitCodeProcess(static_cast<HANDLE>(elevatedHandle), &exitCode)
+                  || exitCode != STILL_ACTIVE;
+    if (!exited) return;
+
+    exitPollTimer->stop();
+    CloseHandle(static_cast<HANDLE>(elevatedHandle));
+    elevatedHandle = nullptr;
+    usingElevation = false;
+
+    if (!configFilePath.isEmpty() && QFile::exists(configFilePath)) {
+        QFile::remove(configFilePath);
+    }
+
+    emit stopped();
+
+    if (!gracefulStop && exitCode != 0) {
+        scheduleReconnect();
+    }
+    gracefulStop = false;
+}
+
+void CoreProcess::stopElevatedCore()
+{
+    if (!elevatedHandle) return;
+
+    if (exitPollTimer) exitPollTimer->stop();
+    gracefulStop = true;
+
+    if (!controlAddr.isEmpty()) {
+        sendQuitRequest();
+        Sleep(500);
+    }
+
+    DWORD exitCode = STILL_ACTIVE;
+    GetExitCodeProcess(static_cast<HANDLE>(elevatedHandle), &exitCode);
+    if (exitCode == STILL_ACTIVE) {
+        TerminateProcess(static_cast<HANDLE>(elevatedHandle), 0);
+    }
+
+    CloseHandle(static_cast<HANDLE>(elevatedHandle));
+    elevatedHandle = nullptr;
+    usingElevation = false;
+    gracefulStop = false;
+
+    if (!configFilePath.isEmpty() && QFile::exists(configFilePath)) {
+        QFile::remove(configFilePath);
+    }
+
+    emit stopped();
+}
+#endif
