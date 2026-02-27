@@ -353,6 +353,7 @@ func (i *InboundConfig) Validate() error {
 		if i.Stack == "" {
 			i.Stack = "system"
 		}
+		i.AutoRoute = true
 	}
 
 	return nil

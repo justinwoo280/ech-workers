@@ -11,6 +11,7 @@ import (
 	"ewp-core/transport"
 
 	tun "github.com/sagernet/sing-tun"
+	"github.com/sagernet/sing/common/control"
 	"github.com/sagernet/sing/common/logger"
 )
 
@@ -27,12 +28,14 @@ type Config struct {
 }
 
 type TUN struct {
-	device  tun.Tun
-	stack   tun.Stack
-	handler *Handler
-	config  *Config
-	ctx     context.Context
-	cancel  context.CancelFunc
+	device           tun.Tun
+	stack            tun.Stack
+	handler          *Handler
+	config           *Config
+	ctx              context.Context
+	cancel           context.CancelFunc
+	networkMonitor   tun.NetworkUpdateMonitor
+	interfaceMonitor tun.DefaultInterfaceMonitor
 }
 
 type tunLogger struct{}
@@ -117,46 +120,82 @@ func New(cfg *Config) (*TUN, error) {
 	}
 	cfg.Stack = stackName
 
+	tunLog := &tunLogger{}
+	interfaceFinder := control.NewDefaultInterfaceFinder()
+
+	networkMonitor, err := tun.NewNetworkUpdateMonitor(tunLog)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("create network monitor failed: %w", err)
+	}
+	if err := networkMonitor.Start(); err != nil {
+		cancel()
+		return nil, fmt.Errorf("start network monitor failed: %w", err)
+	}
+
+	interfaceMonitor, err := tun.NewDefaultInterfaceMonitor(networkMonitor, tunLog, tun.DefaultInterfaceMonitorOptions{
+		InterfaceFinder: interfaceFinder,
+	})
+	if err != nil {
+		networkMonitor.Close()
+		cancel()
+		return nil, fmt.Errorf("create interface monitor failed: %w", err)
+	}
+	if err := interfaceMonitor.Start(); err != nil {
+		networkMonitor.Close()
+		cancel()
+		return nil, fmt.Errorf("start interface monitor failed: %w", err)
+	}
+
 	tunOptions := tun.Options{
-		Name:         "ewp-tun",
-		Inet4Address: []netip.Prefix{inet4Addr},
-		Inet6Address: inet6Addrs,
-		MTU:          mtu,
-		AutoRoute:    cfg.AutoRoute,
-		StrictRoute:  cfg.StrictRoute,
-		DNSServers:   dnsAddrs,
-		Logger:       &tunLogger{},
+		Name:             "ewp-tun",
+		Inet4Address:     []netip.Prefix{inet4Addr},
+		Inet6Address:     inet6Addrs,
+		MTU:              mtu,
+		AutoRoute:        cfg.AutoRoute,
+		StrictRoute:      cfg.StrictRoute,
+		DNSServers:       dnsAddrs,
+		InterfaceFinder:  interfaceFinder,
+		InterfaceMonitor: interfaceMonitor,
+		Logger:           tunLog,
 	}
 
 	tunDevice, err := tun.New(tunOptions)
 	if err != nil {
+		interfaceMonitor.Close()
+		networkMonitor.Close()
 		cancel()
 		return nil, fmt.Errorf("create TUN device failed: %w", err)
 	}
 
 	stackOptions := tun.StackOptions{
-		Context:    ctx,
-		Tun:        tunDevice,
-		TunOptions: tunOptions,
-		Handler:    handler,
-		Logger:     &tunLogger{},
-		UDPTimeout: 5 * time.Minute,
+		Context:         ctx,
+		Tun:             tunDevice,
+		TunOptions:      tunOptions,
+		Handler:         handler,
+		Logger:          tunLog,
+		UDPTimeout:      5 * time.Minute,
+		InterfaceFinder: interfaceFinder,
 	}
 
 	stack, err := tun.NewStack(stackName, stackOptions)
 	if err != nil {
 		tunDevice.Close()
+		interfaceMonitor.Close()
+		networkMonitor.Close()
 		cancel()
 		return nil, fmt.Errorf("create stack failed: %w", err)
 	}
 
 	return &TUN{
-		device:  tunDevice,
-		stack:   stack,
-		handler: handler,
-		config:  cfg,
-		ctx:     ctx,
-		cancel:  cancel,
+		device:           tunDevice,
+		stack:            stack,
+		handler:          handler,
+		config:           cfg,
+		ctx:              ctx,
+		cancel:           cancel,
+		networkMonitor:   networkMonitor,
+		interfaceMonitor: interfaceMonitor,
 	}, nil
 }
 
@@ -190,6 +229,14 @@ func (t *TUN) Close() error {
 
 	if t.device != nil {
 		t.device.Close()
+	}
+
+	if t.interfaceMonitor != nil {
+		t.interfaceMonitor.Close()
+	}
+
+	if t.networkMonitor != nil {
+		t.networkMonitor.Close()
 	}
 
 	log.Printf("[TUN] TUN mode stopped")
