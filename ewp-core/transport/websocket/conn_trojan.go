@@ -161,13 +161,13 @@ func (c *TrojanConn) ReadUDPTo(buf []byte) (int, error) {
 
 // Read reads data from WebSocket
 func (c *TrojanConn) Read(buf []byte) (int, error) {
-	_, msg, err := c.conn.ReadMessage()
+	msgType, msg, err := c.conn.ReadMessage()
 	if err != nil {
 		return 0, err
 	}
 
 	// Check for control messages
-	if len(msg) > 0 {
+	if msgType == websocket.TextMessage {
 		str := string(msg)
 		if str == "CLOSE" {
 			return 0, io.EOF

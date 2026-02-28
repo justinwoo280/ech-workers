@@ -11,9 +11,20 @@ import (
 // BypassResolver resolves hostnames using a DNS connection that bypasses the TUN device.
 // When multiple IPs are returned, all are probed in parallel and the one with the lowest
 // TCP handshake latency is returned (optimal CDN edge-node selection).
+// Results are cached to avoid port exhaustion under high-concurrency TUN traffic.
 type BypassResolver struct {
 	resolver  *net.Resolver
 	tcpDialer *net.Dialer
+
+	// DNS result cache
+	mu       sync.Mutex
+	cache    map[string]*dnsEntry
+	cacheTTL time.Duration
+}
+
+type dnsEntry struct {
+	ip      string
+	expires time.Time
 }
 
 // NewBypassResolver creates a resolver whose DNS queries use the bypass TCP dialer,
@@ -30,13 +41,29 @@ func NewBypassResolver(cfg *BypassConfig, dnsServer string) *BypassResolver {
 			return cfg.TCPDialer.DialContext(ctx, "tcp", server)
 		},
 	}
-	return &BypassResolver{resolver: r, tcpDialer: cfg.TCPDialer}
+	return &BypassResolver{
+		resolver:  r,
+		tcpDialer: cfg.TCPDialer,
+		cache:     make(map[string]*dnsEntry),
+		cacheTTL:  60 * time.Second,
+	}
 }
 
 // ResolveBestIP resolves host and returns the IP with the lowest TCP latency on port.
-// All resolved IPs are probed concurrently; the fastest one is returned.
-// Falls back to the first resolved IP if all probes time out.
+// Results are cached for cacheTTL to prevent port exhaustion in TUN mode.
 func (r *BypassResolver) ResolveBestIP(host, port string) (string, error) {
+	cacheKey := host + ":" + port
+
+	// Fast path: check cache
+	r.mu.Lock()
+	if entry, ok := r.cache[cacheKey]; ok && time.Now().Before(entry.expires) {
+		ip := entry.ip
+		r.mu.Unlock()
+		return ip, nil
+	}
+	r.mu.Unlock()
+
+	// Slow path: resolve and probe
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -45,10 +72,23 @@ func (r *BypassResolver) ResolveBestIP(host, port string) (string, error) {
 		return "", fmt.Errorf("bypass DNS resolve %s: %w", host, err)
 	}
 
+	var bestIP string
 	if len(addrs) == 1 {
-		return addrs[0], nil
+		bestIP = addrs[0]
+	} else {
+		bestIP = r.probeBestIP(ctx, addrs, port)
 	}
 
+	// Store in cache
+	r.mu.Lock()
+	r.cache[cacheKey] = &dnsEntry{ip: bestIP, expires: time.Now().Add(r.cacheTTL)}
+	r.mu.Unlock()
+
+	return bestIP, nil
+}
+
+// probeBestIP probes all IPs and returns the one with lowest latency.
+func (r *BypassResolver) probeBestIP(ctx context.Context, addrs []string, port string) string {
 	type probeResult struct {
 		ip      string
 		latency time.Duration
@@ -82,16 +122,13 @@ func (r *BypassResolver) ResolveBestIP(host, port string) (string, error) {
 	}()
 
 	best := probeResult{ip: addrs[0], latency: time.Hour}
-	for r := range ch {
-		if r.latency < best.latency {
-			best = r
+	for result := range ch {
+		if result.latency < best.latency {
+			best = result
 		}
 	}
 
-	if best.latency == time.Hour {
-		return addrs[0], nil
-	}
-	return best.ip, nil
+	return best.ip
 }
 
 // ResolveIP resolves host to an IP address for the given port.
@@ -107,3 +144,4 @@ func ResolveIP(cfg *BypassConfig, host, port string) (string, error) {
 	}
 	return ips[0].String(), nil
 }
+

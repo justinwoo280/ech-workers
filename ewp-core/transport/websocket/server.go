@@ -19,12 +19,13 @@ func NewServerAdapter(conn *websocket.Conn) *ServerAdapter {
 }
 
 func (a *ServerAdapter) Read() ([]byte, error) {
-	_, msg, err := a.conn.ReadMessage()
+	msgType, msg, err := a.conn.ReadMessage()
 	if err != nil {
 		return nil, err
 	}
 
-	if string(msg) == "CLOSE" {
+	// Control messages are sent as TextMessage (see Close())
+	if msgType == websocket.TextMessage && string(msg) == "CLOSE" {
 		return nil, io.EOF
 	}
 

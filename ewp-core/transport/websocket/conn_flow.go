@@ -213,13 +213,14 @@ func (c *FlowConn) ReadUDPTo(buf []byte) (int, error) {
 
 // Read reads data from WebSocket with Flow protocol unpacking
 func (c *FlowConn) Read(buf []byte) (int, error) {
-	_, msg, err := c.conn.ReadMessage()
+	msgType, msg, err := c.conn.ReadMessage()
 	if err != nil {
 		return 0, err
 	}
 
-	// Check for control messages
-	if len(msg) > 0 {
+	// Control messages are sent as TextMessage (see Close())
+	// Data messages are sent as BinaryMessage
+	if msgType == websocket.TextMessage {
 		str := string(msg)
 		if str == "CLOSE" {
 			return 0, io.EOF
@@ -227,6 +228,7 @@ func (c *FlowConn) Read(buf []byte) (int, error) {
 		if strings.HasPrefix(str, "ERROR:") {
 			return 0, errors.New(str)
 		}
+		// Unknown text message — treat as data fallback
 	}
 
 	// Process Flow protocol unpacking (remove padding)
