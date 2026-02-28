@@ -18,10 +18,7 @@ var upgrader = websocket.Upgrader{
 }
 
 func wsHandler(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != wsPath {
-		disguiseHandler(w, r)
-		return
-	}
+	// Path routing is already handled by http.ServeMux — no need to re-check here.
 
 	proto := r.Header.Get("Sec-WebSocket-Protocol")
 	if trojanMode {
