@@ -1,8 +1,14 @@
 package dns
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
+	"net"
+	"net/url"
 	"sync"
 	"time"
 
@@ -10,182 +16,278 @@ import (
 	"ewp-core/transport"
 )
 
-// TunnelDNSTransport is the interface for DNS protocols through proxy tunnel
-// Unlike BootstrapTransport, this routes ALL traffic through the proxy
-type TunnelDNSTransport interface {
-	// QueryRaw performs a raw DNS query through the tunnel
-	QueryRaw(ctx context.Context, dnsQuery []byte) ([]byte, error)
-
-	// Type returns the transport type (e.g., "DoH", "DoT", "DoQ")
-	Type() string
-
-	// Server returns the server address
-	Server() string
-
-	// Close closes the transport and releases resources
-	Close() error
-}
-
-// TunnelDNSResolver manages multiple tunnel DNS transports with fallback support
-// This is used for TUN mode to route all DNS queries through the proxy
+// TunnelDNSResolver resolves DNS queries through the proxy tunnel using DoH.
+// All DNS traffic is encrypted end-to-end: client → tunnel → proxy → DoH server.
+//
+// Architecture (inspired by sing-box):
+//   - Queries are serialized through a semaphore to limit concurrent tunnel connections
+//   - Results are cached to avoid redundant tunnel dials
+//   - Only DoH is used (DoQ/DoT don't work through TCP CONNECT proxies)
 type TunnelDNSResolver struct {
-	transports []TunnelDNSTransport
-	cache      sync.Map // query hash -> *cachedTunnelResult
+	transport  transport.Transport
+	dohServer  string // e.g., "https://dns.google/dns-query"
+	cache      sync.Map
 	cacheTTL   time.Duration
 	timeout    time.Duration
+	semaphore  chan struct{} // limits concurrent tunnel connections
 }
 
-type cachedTunnelResult struct {
+type cachedDNSResult struct {
 	response  []byte
 	expiresAt time.Time
 }
 
 // TunnelDNSConfig configures the tunnel DNS resolver
 type TunnelDNSConfig struct {
-	Servers  []TunnelServerConfig
+	// DoH server URL (default: "https://dns.google/dns-query")
+	DoHServer string
+
+	// Maximum concurrent tunnel connections for DNS (default: 4)
+	MaxConcurrent int
+
+	// Cache TTL (default: 5 minutes)
 	CacheTTL time.Duration
-	Timeout  time.Duration
+
+	// Query timeout (default: 10 seconds)
+	Timeout time.Duration
 }
 
-// TunnelServerConfig defines a tunnel DNS server configuration
-type TunnelServerConfig struct {
-	Address string // e.g., "dns.google:853" or "https://dns.google/dns-query"
-	Type    string // "doh", "dot", "doq"
-}
-
-// NewTunnelDNSResolver creates a new tunnel DNS resolver with multiple transports
+// NewTunnelDNSResolver creates a new tunnel DNS resolver (DoH only)
 func NewTunnelDNSResolver(trans transport.Transport, config TunnelDNSConfig) (*TunnelDNSResolver, error) {
-	if len(config.Servers) == 0 {
-		// Default configuration: DoQ → DoH → DoT (Google DNS)
-		config.Servers = []TunnelServerConfig{
-			{Address: "dns.google:853", Type: "doq"},
-			{Address: "https://dns.google/dns-query", Type: "doh"},
-			{Address: "dns.google:853", Type: "dot"},
-		}
+	if trans == nil {
+		return nil, fmt.Errorf("transport is required")
 	}
 
-	if config.CacheTTL == 0 {
-		config.CacheTTL = 5 * time.Minute
+	dohServer := config.DoHServer
+	if dohServer == "" {
+		dohServer = "https://dns.google/dns-query"
 	}
-	if config.Timeout == 0 {
-		config.Timeout = 10 * time.Second
+
+	maxConcurrent := config.MaxConcurrent
+	if maxConcurrent <= 0 {
+		maxConcurrent = 4
+	}
+
+	cacheTTL := config.CacheTTL
+	if cacheTTL == 0 {
+		cacheTTL = 5 * time.Minute
+	}
+
+	timeout := config.Timeout
+	if timeout == 0 {
+		timeout = 10 * time.Second
 	}
 
 	resolver := &TunnelDNSResolver{
-		transports: make([]TunnelDNSTransport, 0, len(config.Servers)),
-		cacheTTL:   config.CacheTTL,
-		timeout:    config.Timeout,
+		transport:  trans,
+		dohServer:  dohServer,
+		cacheTTL:   cacheTTL,
+		timeout:    timeout,
+		semaphore:  make(chan struct{}, maxConcurrent),
 	}
 
-	// Create transports from config
-	for i, serverCfg := range config.Servers {
-		tunnelTransport, err := createTunnelTransport(trans, serverCfg)
-		if err != nil {
-			log.Printf("[TunnelDNS] Failed to create %s transport (#%d): %v", serverCfg.Type, i+1, err)
-			continue
-		}
-		resolver.transports = append(resolver.transports, tunnelTransport)
-		log.Printf("[TunnelDNS] Registered %s: %s (priority #%d)", tunnelTransport.Type(), tunnelTransport.Server(), i+1)
-	}
-
-	if len(resolver.transports) == 0 {
-		return nil, fmt.Errorf("no valid tunnel transports configured")
-	}
-
+	log.Printf("[TunnelDNS] Initialized: DoH=%s, maxConcurrent=%d", dohServer, maxConcurrent)
 	return resolver, nil
 }
 
-// createTunnelTransport creates a tunnel transport based on server config
-func createTunnelTransport(trans transport.Transport, config TunnelServerConfig) (TunnelDNSTransport, error) {
-	switch config.Type {
-	case "doh":
-		return NewTunnelDoHTransport(config.Address, trans), nil
-	case "dot":
-		return NewTunnelDoTTransport(config.Address, trans), nil
-	case "doq":
-		return NewTunnelDoQTransport(config.Address, trans), nil
-	default:
-		return nil, fmt.Errorf("unsupported tunnel transport type: %s", config.Type)
-	}
-}
-
-// QueryRaw performs a raw DNS query using fallback strategy
+// QueryRaw performs a raw DNS query through the proxy tunnel using DoH (RFC 8484).
+// Thread-safe: can be called concurrently from multiple goroutines.
 func (r *TunnelDNSResolver) QueryRaw(ctx context.Context, dnsQuery []byte) ([]byte, error) {
-	// Generate cache key from query
-	cacheKey := fmt.Sprintf("%x", dnsQuery[:min(len(dnsQuery), 32)])
+	if len(dnsQuery) < 12 {
+		return nil, fmt.Errorf("DNS query too short: %d bytes", len(dnsQuery))
+	}
 
-	// Check cache first
+	// Check cache first (no tunnel connection needed)
+	cacheKey := dnsCacheKey(dnsQuery)
 	if cached, ok := r.cache.Load(cacheKey); ok {
-		result := cached.(*cachedTunnelResult)
+		result := cached.(*cachedDNSResult)
 		if time.Now().Before(result.expiresAt) {
 			log.V("[TunnelDNS] Cache hit")
-			return result.response, nil
+			// Copy the cached response and update the transaction ID
+			resp := make([]byte, len(result.response))
+			copy(resp, result.response)
+			// Set transaction ID from query
+			resp[0] = dnsQuery[0]
+			resp[1] = dnsQuery[1]
+			return resp, nil
 		}
 		r.cache.Delete(cacheKey)
 	}
 
-	// Apply timeout to context
+	// Acquire semaphore (limits concurrent tunnel connections)
+	select {
+	case r.semaphore <- struct{}{}:
+		defer func() { <-r.semaphore }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
+	// Apply timeout
 	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 
-	// Try each transport in order (fallback strategy)
-	var lastErr error
-	for i, tunnelTransport := range r.transports {
-		log.V("[TunnelDNS] Trying %s (#%d): %s", tunnelTransport.Type(), i+1, tunnelTransport.Server())
+	// Perform DoH query through tunnel
+	response, err := r.doHTTPSQuery(ctx, dnsQuery)
+	if err != nil {
+		return nil, err
+	}
 
-		response, err := tunnelTransport.QueryRaw(ctx, dnsQuery)
-		if err != nil {
-			lastErr = err
-			log.V("[TunnelDNS] %s query failed: %v", tunnelTransport.Type(), err)
-			log.Printf("[TunnelDNS] ⚠️  %s failed, trying next transport...", tunnelTransport.Type())
-			continue
+	// Cache the response
+	r.cache.Store(cacheKey, &cachedDNSResult{
+		response:  response,
+		expiresAt: time.Now().Add(r.cacheTTL),
+	})
+
+	log.V("[TunnelDNS] ✅ DoH query successful: %d bytes", len(response))
+	return response, nil
+}
+
+// doHTTPSQuery performs a single DoH query through the proxy tunnel.
+func (r *TunnelDNSResolver) doHTTPSQuery(ctx context.Context, dnsQuery []byte) ([]byte, error) {
+	// Dial tunnel
+	conn, err := r.transport.Dial()
+	if err != nil {
+		return nil, fmt.Errorf("tunnel dial failed: %w", err)
+	}
+	defer conn.Close()
+
+	// Parse DoH URL
+	u, err := url.Parse(r.dohServer)
+	if err != nil {
+		return nil, fmt.Errorf("invalid DoH URL: %w", err)
+	}
+
+	// Connect tunnel to DoH server
+	targetHost := u.Hostname()
+	targetPort := u.Port()
+	if targetPort == "" {
+		targetPort = "443"
+	}
+	target := net.JoinHostPort(targetHost, targetPort)
+
+	if err := conn.Connect(target, nil); err != nil {
+		return nil, fmt.Errorf("tunnel connect to %s failed: %w", target, err)
+	}
+
+	// Build HTTP POST request (RFC 8484)
+	path := u.Path
+	if path == "" {
+		path = "/dns-query"
+	}
+	httpReq := fmt.Sprintf(
+		"POST %s HTTP/1.1\r\nHost: %s\r\nAccept: application/dns-message\r\nContent-Type: application/dns-message\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
+		path, u.Hostname(), len(dnsQuery),
+	)
+
+	// Send request
+	if err := conn.Write([]byte(httpReq)); err != nil {
+		return nil, fmt.Errorf("send request failed: %w", err)
+	}
+	if err := conn.Write(dnsQuery); err != nil {
+		return nil, fmt.Errorf("send query body failed: %w", err)
+	}
+
+	// Read full response (may come in multiple reads)
+	var responseBuf bytes.Buffer
+	readBuf := make([]byte, 4096)
+	for {
+		n, err := conn.Read(readBuf)
+		if n > 0 {
+			responseBuf.Write(readBuf[:n])
 		}
-
-		if len(response) > 0 {
-			// Success! Cache and return
-			r.cache.Store(cacheKey, &cachedTunnelResult{
-				response:  response,
-				expiresAt: time.Now().Add(r.cacheTTL),
-			})
-			log.Printf("[TunnelDNS] ✅ %s query successful: %d bytes", tunnelTransport.Type(), len(response))
-			return response, nil
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			// If we already have data, try to parse it
+			if responseBuf.Len() > 0 {
+				break
+			}
+			return nil, fmt.Errorf("read response failed: %w", err)
+		}
+		// Check if we have the complete HTTP response
+		if parseComplete(responseBuf.Bytes()) {
+			break
 		}
 	}
 
-	// All transports failed
-	return nil, fmt.Errorf("all tunnel DNS transports failed, last error: %w", lastErr)
+	if responseBuf.Len() == 0 {
+		return nil, fmt.Errorf("empty response from DoH server")
+	}
+
+	// Parse HTTP response to extract DNS message
+	return parseHTTPResponse(responseBuf.Bytes())
 }
 
-// ClearCache clears the resolver cache
+// parseComplete checks if the HTTP response is complete.
+func parseComplete(data []byte) bool {
+	headerEnd := bytes.Index(data, []byte("\r\n\r\n"))
+	if headerEnd == -1 {
+		return false
+	}
+
+	// Look for Content-Length
+	headers := string(data[:headerEnd])
+	body := data[headerEnd+4:]
+
+	// Simple Content-Length check
+	clIdx := bytes.Index([]byte(headers), []byte("Content-Length: "))
+	if clIdx != -1 {
+		clLine := headers[clIdx+16:]
+		endIdx := bytes.IndexByte([]byte(clLine), '\r')
+		if endIdx == -1 {
+			endIdx = len(clLine)
+		}
+		var cl int
+		fmt.Sscanf(clLine[:endIdx], "%d", &cl)
+		return len(body) >= cl
+	}
+
+	// For Connection: close responses, we'll rely on EOF
+	// But if we have body data, consider it potentially complete
+	return len(body) > 12 // DNS response is at least 12 bytes
+}
+
+// parseHTTPResponse extracts DNS message from HTTP response.
+func parseHTTPResponse(httpResponse []byte) ([]byte, error) {
+	headerEnd := bytes.Index(httpResponse, []byte("\r\n\r\n"))
+	if headerEnd == -1 {
+		return nil, fmt.Errorf("invalid HTTP response: no header end")
+	}
+
+	// Check status code
+	statusLine := bytes.SplitN(httpResponse[:headerEnd], []byte("\r\n"), 2)[0]
+	if !bytes.Contains(statusLine, []byte("200")) {
+		return nil, fmt.Errorf("DoH HTTP error: %s", statusLine)
+	}
+
+	// Extract body (DNS message)
+	body := httpResponse[headerEnd+4:]
+	if len(body) == 0 {
+		return nil, fmt.Errorf("empty response body")
+	}
+
+	return body, nil
+}
+
+// dnsCacheKey generates a collision-resistant cache key from a DNS query.
+// Uses sha256 of the full query (minus 2-byte transaction ID) truncated to 8 bytes.
+// 64-bit key = ~2^-64 collision probability, safe even with EDNS0 extensions.
+func dnsCacheKey(query []byte) string {
+	if len(query) < 12 {
+		return hex.EncodeToString(query)
+	}
+	h := sha256.Sum256(query[2:])
+	return hex.EncodeToString(h[:8])
+}
+
+// ClearCache clears the resolver cache.
 func (r *TunnelDNSResolver) ClearCache() {
 	r.cache = sync.Map{}
 	log.Printf("[TunnelDNS] Cache cleared")
 }
 
-// Close closes all transports and releases resources
+// Close releases resources.
 func (r *TunnelDNSResolver) Close() error {
-	var lastErr error
-	for _, tunnelTransport := range r.transports {
-		if err := tunnelTransport.Close(); err != nil {
-			lastErr = err
-			log.Printf("[TunnelDNS] Error closing %s: %v", tunnelTransport.Type(), err)
-		}
-	}
-	return lastErr
-}
-
-// Stats returns resolver statistics
-func (r *TunnelDNSResolver) Stats() map[string]interface{} {
-	return map[string]interface{}{
-		"transports": len(r.transports),
-		"cache_ttl":  r.cacheTTL.String(),
-		"timeout":    r.timeout.String(),
-	}
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
+	return nil
 }

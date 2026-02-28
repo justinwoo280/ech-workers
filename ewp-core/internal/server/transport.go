@@ -15,6 +15,7 @@ type HandshakeResult struct {
 	FlowState   *ewp.FlowState
 	InitialData []byte
 	IsUDP       bool
+	IsTrojan    bool // true when using Trojan protocol (different UDP framing)
 	UserID      string
 }
 

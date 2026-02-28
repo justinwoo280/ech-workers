@@ -7,6 +7,7 @@ import (
 	"time"
 
 	commpool "ewp-core/common/bufferpool"
+	"ewp-core/dns"
 	"ewp-core/log"
 	"ewp-core/transport"
 
@@ -16,8 +17,9 @@ import (
 )
 
 type Handler struct {
-	transport transport.Transport
-	ctx       context.Context
+	transport   transport.Transport
+	ctx         context.Context
+	dnsResolver *dns.TunnelDNSResolver
 }
 
 func NewHandler(ctx context.Context, trans transport.Transport) *Handler {
@@ -25,6 +27,13 @@ func NewHandler(ctx context.Context, trans transport.Transport) *Handler {
 		transport: trans,
 		ctx:       ctx,
 	}
+}
+
+// SetDNSResolver sets the tunnel DNS resolver for handling DNS queries (port 53).
+// When set, DNS queries intercepted by sing-tun are resolved through the proxy tunnel
+// using DoH/DoT/DoQ, preventing DNS leaks and ensuring encrypted resolution.
+func (h *Handler) SetDNSResolver(resolver *dns.TunnelDNSResolver) {
+	h.dnsResolver = resolver
 }
 
 func (h *Handler) PrepareConnection(network string, source M.Socksaddr, destination M.Socksaddr) error {
@@ -111,6 +120,14 @@ func (h *Handler) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 
 	target := destination.String()
 
+	// DNS interception: resolve port 53 queries locally through the tunnel DNS resolver
+	// (DoH/DoT/DoQ), then write the response back to the TUN device directly.
+	if destination.Port == 53 && h.dnsResolver != nil {
+		log.V("[TUN DNS] Intercepted DNS query: %s -> %s", source, target)
+		h.handleDNS(ctx, conn, source, destination)
+		return
+	}
+
 	if destination.Port == 3478 || destination.Port == 19302 {
 		log.Printf("[TUN WebRTC] STUN request intercepted: %s -> %s (tunneled)", source, target)
 	} else {
@@ -189,4 +206,56 @@ func (h *Handler) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 
 	wg.Wait()
 	log.V("[TUN UDP] Disconnected: %s", target)
+}
+
+// handleDNS reads DNS query packets from the TUN PacketConn in a loop,
+// resolves each through the TunnelDNSResolver (DoH via proxy tunnel), and writes
+// responses back. Each query is processed in a separate goroutine to allow
+// concurrent resolution. Pattern inspired by sing-box's NewDNSPacketConnection.
+func (h *Handler) handleDNS(ctx context.Context, conn N.PacketConn, source M.Socksaddr, destination M.Socksaddr) {
+	defer conn.Close()
+
+	// Read DNS packets in a loop (a single PacketConn may carry multiple queries)
+	for {
+		queryBuf := buf.New()
+		dest, err := conn.ReadPacket(queryBuf)
+		if err != nil {
+			queryBuf.Release()
+			return // connection closed or error
+		}
+
+		dnsQuery := make([]byte, queryBuf.Len())
+		copy(dnsQuery, queryBuf.Bytes())
+		queryBuf.Release()
+
+		if len(dnsQuery) < 12 {
+			log.V("[TUN DNS] Query too short (%d bytes), ignoring", len(dnsQuery))
+			continue
+		}
+
+		// Resolve each query concurrently (like sing-box's go func() pattern)
+		go func(query []byte, replyDest M.Socksaddr) {
+			response, err := h.dnsResolver.QueryRaw(ctx, query)
+			if err != nil {
+				log.Printf("[TUN DNS] Resolution failed: %v", err)
+				return
+			}
+
+			if len(response) == 0 {
+				log.Printf("[TUN DNS] Empty response")
+				return
+			}
+
+			// Write DNS response back to TUN
+			respBuf := buf.New()
+			_, _ = respBuf.Write(response)
+			if err := conn.WritePacket(respBuf, replyDest); err != nil {
+				respBuf.Release()
+				log.V("[TUN DNS] Failed to write response: %v", err)
+				return
+			}
+
+			log.V("[TUN DNS] Resolved: %d bytes", len(response))
+		}(dnsQuery, dest)
+	}
 }

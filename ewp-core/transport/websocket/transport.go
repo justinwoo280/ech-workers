@@ -1,6 +1,8 @@
 package websocket
 
 import (
+	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -129,23 +131,53 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 		resolvedIP = ip
 	}
 
-	// Configure dialer — use bypass dialer in TUN mode to avoid routing loops
+	// Configure dialer — use NetDialTLSContext for explicit TLS control.
+	// gorilla/websocket's HandshakeTimeout does NOT properly enforce deadlines
+	// when using custom NetDial, causing TLS handshake to hang indefinitely
+	// in TUN mode. By using NetDialTLSContext we manually control both TCP
+	// dial and TLS handshake with proper context-based timeouts.
 	dialer := websocket.Dialer{
-		TLSClientConfig:  stdConfig,
-		HandshakeTimeout: 10 * time.Second,
-		NetDial: func(network, address string) (net.Conn, error) {
+		// Do NOT set TLSClientConfig — we handle TLS manually in NetDialTLSContext.
+		// Do NOT set HandshakeTimeout — we use context timeout instead.
+		NetDialTLSContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 			if resolvedIP != "" {
 				_, p, err := net.SplitHostPort(address)
 				if err != nil {
 					return nil, err
 				}
 				address = net.JoinHostPort(resolvedIP, p)
-				log.Printf("[WebSocket] Connecting to: %s (SNI: %s)", address, serverName)
 			}
+			log.Printf("[WebSocket] Connecting to: %s (SNI: %s)", address, serverName)
+
+			// Phase 1: TCP connect (bypass dialer with timeout)
+			var rawConn net.Conn
+			var dialErr error
 			if t.bypassCfg != nil && t.bypassCfg.TCPDialer != nil {
-				return t.bypassCfg.TCPDialer.Dial(network, address)
+				t.bypassCfg.TCPDialer.Timeout = 10 * time.Second
+				rawConn, dialErr = t.bypassCfg.TCPDialer.DialContext(ctx, network, address)
+			} else {
+				rawConn, dialErr = commonnet.DialTFO(network, address, 10*time.Second)
 			}
-			return commonnet.DialTFO(network, address, 10*time.Second)
+			if dialErr != nil {
+				log.Printf("[WebSocket] TCP dial failed: %s -> %v", address, dialErr)
+				return nil, dialErr
+			}
+			log.Printf("[WebSocket] TCP connected: %s -> %s", rawConn.LocalAddr(), rawConn.RemoteAddr())
+
+			// Phase 2: TLS handshake (with context deadline enforcement)
+			tlsConn := tls.Client(rawConn, stdConfig)
+			if deadline, ok := ctx.Deadline(); ok {
+				tlsConn.SetDeadline(deadline)
+			}
+			if err := tlsConn.HandshakeContext(ctx); err != nil {
+				rawConn.Close()
+				log.Printf("[WebSocket] TLS handshake failed: %s -> %v", address, err)
+				return nil, err
+			}
+			// Clear deadline so it doesn't affect subsequent reads/writes
+			tlsConn.SetDeadline(time.Time{})
+			log.Printf("[WebSocket] TLS connected: %s (proto: %s)", address, tlsConn.ConnectionState().NegotiatedProtocol)
+			return tlsConn, nil
 		},
 	}
 
@@ -166,15 +198,24 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 		dialer.Subprotocols = []string{t.token}
 	}
 
-	// Connect
-	wsConn, _, err := dialer.Dial(wsURL, headers)
+	// Connect with hard context timeout (TCP + TLS + HTTP upgrade must all complete)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	wsConn, resp, err := dialer.DialContext(ctx, wsURL, headers)
 	if err != nil {
+		if resp != nil {
+			log.Printf("[WebSocket] Upgrade failed: %v (HTTP %d)", err, resp.StatusCode)
+		} else {
+			log.Printf("[WebSocket] Dial failed: %v", err)
+		}
 		// Check for ECH rejection and retry with updated config
 		if t.useECH && t.echManager != nil {
 			if echErr := t.handleECHRejection(err); echErr == nil {
 				log.Printf("[WebSocket] ECH rejected, retrying with updated config...")
-				// Retry connection with updated ECH config
-				wsConn, _, err = dialer.Dial(wsURL, headers)
+				ctx2, cancel2 := context.WithTimeout(context.Background(), 15*time.Second)
+				defer cancel2()
+				wsConn, _, err = dialer.DialContext(ctx2, wsURL, headers)
 				if err != nil {
 					return nil, fmt.Errorf("retry after ECH update failed: %w", err)
 				}
@@ -185,7 +226,7 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 		}
 	}
 
-	log.V("[WebSocket] Connected to %s", wsURL)
+	log.Printf("[WebSocket] Connected to %s", wsURL)
 
 	// Return connection based on protocol configuration
 	if t.useTrojan {

@@ -40,8 +40,12 @@ func EstablishTunnel(ctx context.Context, handshakeData []byte, opts TunnelOptio
 		// Create io.Reader/io.Writer adapter for TransportAdapter
 		rw := &transportReaderWriter{transport: opts.Transport}
 
-		// Handle UDP stream through tunnel
-		HandleUDPConnection(rw, rw)
+		// Route to protocol-specific UDP handler
+		if result.IsTrojan {
+			HandleTrojanUDPConnection(rw, rw)
+		} else {
+			HandleUDPConnection(rw, rw)
+		}
 
 		log.Info("[Tunnel] UDP closed: %s -> %s", opts.ClientIP, result.Target)
 		return nil

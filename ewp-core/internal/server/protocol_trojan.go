@@ -29,9 +29,10 @@ func (h *TrojanProtocolHandler) Handshake(data []byte, clientIP string) (*Handsh
 	}
 
 	result := &HandshakeResult{
-		Target: addr.String(),
-		IsUDP:  command == trojan.CommandUDP,
-		UserID: maskPassword(pwd),
+		Target:   addr.String(),
+		IsUDP:    command == trojan.CommandUDP,
+		IsTrojan: true,
+		UserID:   maskPassword(pwd),
 	}
 
 	if reader.pos < len(reader.data) {

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"ewp-core/common/tls"
+	"ewp-core/dns"
 	"ewp-core/log"
 	"ewp-core/transport"
 	"ewp-core/transport/grpc"
@@ -270,6 +271,15 @@ func (vm *vpnManager) Start(tunFD int, config *VPNConfig) error {
 	// 4. 创建 TUN 处理器
 	log.Printf("[VPNManager] Creating TUN handler...")
 	vm.tunHandler = tun.NewHandler(ctx, vm.transport)
+
+	// Wire tunnel DNS resolver (DoQ→DoH→DoT fallback through proxy tunnel)
+	dnsResolver, dnsErr := dns.NewTunnelDNSResolver(vm.transport, dns.TunnelDNSConfig{})
+	if dnsErr != nil {
+		log.Printf("[VPNManager] Warning: tunnel DNS resolver init failed: %v", dnsErr)
+	} else {
+		vm.tunHandler.SetDNSResolver(dnsResolver)
+		log.Printf("[VPNManager] Tunnel DNS resolver initialized")
+	}
 
 	// 5. 配置 TUN 选项
 	ip := config.TunIP

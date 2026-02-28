@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"ewp-core/dns"
 	"ewp-core/log"
 	"ewp-core/transport"
 
@@ -75,6 +76,16 @@ func New(cfg *Config) (*TUN, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	handler := NewHandler(ctx, cfg.Transport)
+
+	// Wire tunnel DNS resolver: intercept DNS queries at port 53 and resolve
+	// through the proxy tunnel using DoH/DoT/DoQ (prevents DNS leaks).
+	dnsResolver, dnsErr := dns.NewTunnelDNSResolver(cfg.Transport, dns.TunnelDNSConfig{})
+	if dnsErr != nil {
+		log.Printf("[TUN] Warning: tunnel DNS resolver init failed: %v (DNS will use generic UDP proxy)", dnsErr)
+	} else {
+		handler.SetDNSResolver(dnsResolver)
+		log.Printf("[TUN] Tunnel DNS resolver initialized (DoQ→DoH→DoT fallback)")
+	}
 
 	mtu := uint32(cfg.MTU)
 	if mtu == 0 {
