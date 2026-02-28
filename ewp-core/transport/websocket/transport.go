@@ -158,6 +158,14 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 		headers.Set(k, v)
 	}
 
+	// Sec-WebSocket-Protocol: server uses this for authentication.
+	// EWP mode: UUID string; Trojan mode: password string.
+	if t.useTrojan {
+		dialer.Subprotocols = []string{t.password}
+	} else {
+		dialer.Subprotocols = []string{t.token}
+	}
+
 	// Connect
 	wsConn, _, err := dialer.Dial(wsURL, headers)
 	if err != nil {
