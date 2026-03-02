@@ -21,9 +21,10 @@ func SetupTUN(ifName, ipCIDR, ipv6CIDR, dns, ipv6DNS string, mtu int) error {
 		}
 		ip := prefix.Addr().Unmap().String()
 		mask := prefixToMask(prefix)
+		gw := deriveGatewayV4(prefix)
 
 		if err := run("netsh", "interface", "ip", "set", "address",
-			fmt.Sprintf("name=%s", ifName), "static", ip, mask); err != nil {
+			"name="+ifName, "static", ip, mask); err != nil {
 			return fmt.Errorf("netsh set IPv4 address: %w", err)
 		}
 		if err := run("netsh", "interface", "ipv4", "set", "subinterface",
@@ -31,17 +32,14 @@ func SetupTUN(ifName, ipCIDR, ipv6CIDR, dns, ipv6DNS string, mtu int) error {
 			return fmt.Errorf("netsh set MTU: %w", err)
 		}
 		if err := run("netsh", "interface", "ipv4", "add", "route",
-			"0.0.0.0/0", ifName, "metric=1", "store=active"); err != nil {
+			"0.0.0.0/0", ifName, "nexthop="+gw, "metric=1", "store=active"); err != nil {
 			return fmt.Errorf("netsh add IPv4 default route: %w", err)
 		}
 	}
 
 	if dns != "" {
-		// Point the adapter's DNS to the configured server so that local-subnet
-		// DNS (e.g. 192.168.1.1) is not reached via the physical interface,
-		// bypassing TUN interception.
 		if err := run("netsh", "interface", "ip", "set", "dns",
-			fmt.Sprintf("name=%s", ifName), "static", dns, "primary"); err != nil {
+			"name="+ifName, "static", dns, "primary"); err != nil {
 			return fmt.Errorf("netsh set IPv4 DNS: %w", err)
 		}
 	}
@@ -54,12 +52,14 @@ func SetupTUN(ifName, ipCIDR, ipv6CIDR, dns, ipv6DNS string, mtu int) error {
 		if err != nil {
 			return fmt.Errorf("parse IPv6 CIDR: %w", err)
 		}
+		gw6 := deriveGatewayV6(prefix)
+
 		if err := run("netsh", "interface", "ipv6", "set", "address",
 			ifName, prefix.Addr().String()); err != nil {
 			return fmt.Errorf("netsh set IPv6 address: %w", err)
 		}
 		if err := run("netsh", "interface", "ipv6", "add", "route",
-			"::/0", ifName, "metric=1", "store=active"); err != nil {
+			"::/0", ifName, "nexthop="+gw6, "metric=1", "store=active"); err != nil {
 			return fmt.Errorf("netsh add IPv6 default route: %w", err)
 		}
 	}
@@ -78,6 +78,25 @@ func TeardownTUN(ifName string) error {
 	_ = run("netsh", "interface", "ipv4", "delete", "route", "0.0.0.0/0", ifName)
 	_ = run("netsh", "interface", "ipv6", "delete", "route", "::/0", ifName)
 	return nil
+}
+
+// deriveGatewayV4 returns the first usable host IP in the subnet as the virtual gateway.
+// If that address equals the TUN client IP, it advances by one more.
+func deriveGatewayV4(prefix netip.Prefix) string {
+	gw := prefix.Masked().Addr().Next()
+	if gw == prefix.Addr().Unmap() {
+		gw = gw.Next()
+	}
+	return gw.String()
+}
+
+// deriveGatewayV6 returns the first usable host IP in the IPv6 prefix as the virtual gateway.
+func deriveGatewayV6(prefix netip.Prefix) string {
+	gw := prefix.Masked().Addr().Next()
+	if gw == prefix.Addr() {
+		gw = gw.Next()
+	}
+	return gw.String()
 }
 
 func prefixToMask(prefix netip.Prefix) string {
