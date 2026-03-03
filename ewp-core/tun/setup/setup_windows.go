@@ -31,6 +31,12 @@ func SetupTUN(ifName, ipCIDR, ipv6CIDR, dns, ipv6DNS string, mtu int) error {
 			ifName, fmt.Sprintf("mtu=%d", mtu), "store=active"); err != nil {
 			return fmt.Errorf("netsh set MTU: %w", err)
 		}
+		// Set interface metric to 1 (lowest) so Windows DNS Client
+		// prefers this interface's DNS server over physical NIC DNS.
+		if err := run("netsh", "interface", "ipv4", "set", "interface",
+			ifName, "metric=1"); err != nil {
+			return fmt.Errorf("netsh set IPv4 interface metric: %w", err)
+		}
 		if err := run("netsh", "interface", "ipv4", "add", "route",
 			"0.0.0.0/1", ifName, "nexthop="+gw, "metric=1", "store=active"); err != nil {
 			return fmt.Errorf("netsh add IPv4 route 0.0.0.0/1: %w", err)
