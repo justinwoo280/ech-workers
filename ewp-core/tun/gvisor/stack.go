@@ -128,6 +128,12 @@ func tcpipAddrToNetipAddr(addr tcpip.Address) netip.Addr {
 func (s *Stack) setupTCPForwarder() {
 	tcpForwarder := tcp.NewForwarder(s.ipStack, 0, 10000, func(r *tcp.ForwarderRequest) {
 		var wq waiter.Queue
+		// Read the transport ID BEFORE Complete() — gVisor releases the
+		// internal segment after Complete(), making r.ID() panic.
+		id := r.ID()
+		src := netip.AddrPortFrom(tcpipAddrToNetipAddr(id.RemoteAddress), id.RemotePort)
+		dst := netip.AddrPortFrom(tcpipAddrToNetipAddr(id.LocalAddress), id.LocalPort)
+
 		ep, err := r.CreateEndpoint(&wq)
 		if err != nil {
 			log.V("[gVisor TCP] create endpoint failed: %v", err)
@@ -136,10 +142,6 @@ func (s *Stack) setupTCPForwarder() {
 		}
 
 		r.Complete(false)
-
-		id := r.ID()
-		src := netip.AddrPortFrom(tcpipAddrToNetipAddr(id.RemoteAddress), id.RemotePort)
-		dst := netip.AddrPortFrom(tcpipAddrToNetipAddr(id.LocalAddress), id.LocalPort)
 
 		log.V("[gVisor TCP] Connection request: %s -> %s", src, dst)
 
