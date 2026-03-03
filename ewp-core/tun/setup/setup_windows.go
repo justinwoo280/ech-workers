@@ -8,6 +8,8 @@ import (
 	"net/netip"
 	"os/exec"
 	"strings"
+
+	ewplog "ewp-core/log"
 )
 
 func SetupTUN(ifName, ipCIDR, ipv6CIDR, dns, ipv6DNS string, mtu int) error {
@@ -68,6 +70,11 @@ func SetupTUN(ifName, ipCIDR, ipv6CIDR, dns, ipv6DNS string, mtu int) error {
 			ifName, prefix.Addr().String()); err != nil {
 			return fmt.Errorf("netsh set IPv6 address: %w", err)
 		}
+		// Set IPv6 interface metric to 1 as well
+		if err := run("netsh", "interface", "ipv6", "set", "interface",
+			ifName, "metric=1"); err != nil {
+			return fmt.Errorf("netsh set IPv6 interface metric: %w", err)
+		}
 		if err := run("netsh", "interface", "ipv6", "add", "route",
 			"::/1", ifName, "nexthop="+gw6, "metric=1", "store=active"); err != nil {
 			return fmt.Errorf("netsh add IPv6 route ::/1: %w", err)
@@ -85,6 +92,13 @@ func SetupTUN(ifName, ipCIDR, ipv6CIDR, dns, ipv6DNS string, mtu int) error {
 		}
 	}
 
+	// Suppress DNS on all other interfaces to prevent Windows SMHNR
+	// (Smart Multi-Homed Name Resolution) from querying physical NIC DNS.
+	suppressOtherDNS(ifName)
+
+	// Flush DNS cache so stale entries from the physical NIC are discarded.
+	_ = run("ipconfig", "/flushdns")
+
 	return nil
 }
 
@@ -93,7 +107,59 @@ func TeardownTUN(ifName string) error {
 	_ = run("netsh", "interface", "ipv4", "delete", "route", "128.0.0.0/1", ifName)
 	_ = run("netsh", "interface", "ipv6", "delete", "route", "::/1", ifName)
 	_ = run("netsh", "interface", "ipv6", "delete", "route", "8000::/1", ifName)
+
+	// Restore DNS on other interfaces (set back to automatic metric)
+	restoreOtherDNS(ifName)
+	_ = run("ipconfig", "/flushdns")
+
 	return nil
+}
+
+// suppressOtherDNS raises the interface metric on all other interfaces to 9999
+// so Windows DNS Client will not use their DNS servers.
+func suppressOtherDNS(tunIfName string) {
+	out, err := exec.Command("netsh", "interface", "ipv4", "show", "interfaces").CombinedOutput()
+	if err != nil {
+		ewplog.Printf("[TUN] Warning: failed to list interfaces for DNS suppression: %v", err)
+		return
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		// Format: Idx  Met  MTU  State  Name
+		if len(fields) < 5 {
+			continue
+		}
+		// Skip header, loopback, and our TUN interface
+		name := strings.Join(fields[4:], " ")
+		if name == tunIfName || name == "Loopback" || name == "Name" {
+			continue
+		}
+		state := fields[3]
+		if state != "connected" {
+			continue
+		}
+		_ = run("netsh", "interface", "ipv4", "set", "interface", name, "metric=9999")
+		ewplog.Printf("[TUN] Suppressed DNS on interface: %s", name)
+	}
+}
+
+// restoreOtherDNS sets all non-TUN interfaces back to automatic metric.
+func restoreOtherDNS(tunIfName string) {
+	out, err := exec.Command("netsh", "interface", "ipv4", "show", "interfaces").CombinedOutput()
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 5 {
+			continue
+		}
+		name := strings.Join(fields[4:], " ")
+		if name == tunIfName || name == "Loopback" || name == "Name" {
+			continue
+		}
+		_ = run("netsh", "interface", "ipv4", "set", "interface", name, "metric=0")
+	}
 }
 
 // deriveGatewayV4 returns the first usable host IP in the subnet as the virtual gateway.
