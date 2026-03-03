@@ -3,6 +3,7 @@ package socks5
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -226,16 +227,16 @@ func relayUDPLoop(
 
 		atyp := buf[3]
 		var headerLen int
-		var dstHost string
-		var dstPort int
+		var endpoint transport.Endpoint
 
 		switch atyp {
 		case AddressTypeIPv4:
 			if n < 10 {
 				continue
 			}
-			dstHost = net.IP(buf[4:8]).String()
-			dstPort = int(buf[8])<<8 | int(buf[9])
+			ip, _ := netip.AddrFromSlice(buf[4:8])
+			port := uint16(buf[8])<<8 | uint16(buf[9])
+			endpoint = transport.Endpoint{Addr: netip.AddrPortFrom(ip, port)}
 			headerLen = 10
 
 		case AddressTypeDomain:
@@ -246,23 +247,25 @@ func relayUDPLoop(
 			if n < 7+domainLen {
 				continue
 			}
-			dstHost = string(buf[5 : 5+domainLen])
-			dstPort = int(buf[5+domainLen])<<8 | int(buf[6+domainLen])
+			host := string(buf[5 : 5+domainLen])
+			port := uint16(buf[5+domainLen])<<8 | uint16(buf[6+domainLen])
+			endpoint = transport.Endpoint{Domain: host, Port: port}
 			headerLen = 7 + domainLen
 
 		case AddressTypeIPv6:
 			if n < 22 {
 				continue
 			}
-			dstHost = net.IP(buf[4:20]).String()
-			dstPort = int(buf[20])<<8 | int(buf[21])
+			ip, _ := netip.AddrFromSlice(buf[4:20])
+			port := uint16(buf[20])<<8 | uint16(buf[21])
+			endpoint = transport.Endpoint{Addr: netip.AddrPortFrom(ip, port)}
 			headerLen = 22
 
 		default:
 			continue
 		}
 
-		target := fmt.Sprintf("%s:%d", dstHost, dstPort)
+		target := endpoint.String()
 
 		// Update last sender atomically so readTunnelResponses can read it race-free.
 		lastSender.Store(senderAddr)
@@ -272,24 +275,24 @@ func relayUDPLoop(
 		payloadCopy := make([]byte, n-headerLen)
 		copy(payloadCopy, buf[headerLen:n])
 
-		if dstPort == 53 && dnsHandler != nil {
+		if endpoint.Port == 53 && dnsHandler != nil {
 			log.V("[UDP-DNS] %s -> %s", clientAddr, target)
 			go handleDNSRelay(udpConn, senderAddr, payloadCopy, headerCopy, dnsHandler)
 		} else {
-			if dstPort == 3478 || dstPort == 19302 {
+			if endpoint.Port == 3478 || endpoint.Port == 19302 {
 				log.Printf("[UDP-STUN] %s -> %s (WebRTC STUN tunneled)", clientAddr, target)
 			} else {
 				log.V("[UDP] %s -> %s", clientAddr, target)
 			}
 			// Fast path: session already exists — write inline without spawning a goroutine.
 			if s, ok := sessions.get(target); ok {
-				if err := s.tunnelConn.WriteUDP(target, payloadCopy); err != nil {
+				if err := s.tunnelConn.WriteUDP(endpoint, payloadCopy); err != nil {
 					log.V("[UDP] %s WriteUDP failed for %s: %v", clientAddr, target, err)
 				}
 				s.touch()
 			} else {
 				// Slow path: new session — dial may block, run in goroutine.
-				go handleTunnelUDP(udpConn, payloadCopy, headerCopy, target, sessions, dialFn, lastSender)
+				go handleTunnelUDP(udpConn, payloadCopy, headerCopy, endpoint, sessions, dialFn, lastSender)
 			}
 		}
 	}
@@ -319,11 +322,12 @@ func handleTunnelUDP(
 	udpConn *net.UDPConn,
 	payload []byte,
 	socks5Header []byte,
-	target string,
+	endpoint transport.Endpoint,
 	sessions *sessionMap,
 	dialFn func() (transport.TunnelConn, error),
 	lastSender *atomic.Pointer[net.UDPAddr],
 ) {
+	target := endpoint.String()
 	session, isNew, err := sessions.getOrCreate(target, dialFn)
 	if err != nil {
 		log.Printf("[UDP] tunnel dial failed for %s: %v", target, err)
@@ -331,7 +335,7 @@ func handleTunnelUDP(
 	}
 
 	if isNew {
-		if err := session.tunnelConn.ConnectUDP(target, payload); err != nil {
+		if err := session.tunnelConn.ConnectUDP(endpoint, payload); err != nil {
 			log.Printf("[UDP] ConnectUDP failed for %s: %v", target, err)
 			sessions.mu.Lock()
 			delete(sessions.sessions, target)
@@ -342,7 +346,7 @@ func handleTunnelUDP(
 		go readTunnelResponses(udpConn, session, socks5Header, target, lastSender)
 	} else {
 		// Session was created by another goroutine between get() and getOrCreate() (rare).
-		if err := session.tunnelConn.WriteUDP(target, payload); err != nil {
+		if err := session.tunnelConn.WriteUDP(endpoint, payload); err != nil {
 			log.V("[UDP] WriteUDP failed for %s: %v", target, err)
 		}
 	}

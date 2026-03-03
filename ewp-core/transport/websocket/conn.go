@@ -1,15 +1,18 @@
 package websocket
 
 import (
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"sync"
 	"time"
 
 	"ewp-core/log"
 	"ewp-core/protocol/ewp"
 	"ewp-core/protocol/trojan"
+	"ewp-core/transport"
 
 	"github.com/lxzan/gws"
 )
@@ -241,18 +244,21 @@ func (c *Conn) connectTrojan(target string, initialData []byte) error {
 
 // --- ConnectUDP ---
 
-func (c *Conn) ConnectUDP(target string, initialData []byte) error {
+func (c *Conn) ConnectUDP(target transport.Endpoint, initialData []byte) error {
 	if c.useTrojan {
 		return c.connectTrojanUDP(target, initialData)
 	}
 	return c.connectEWPUDP(target, initialData)
 }
 
-func (c *Conn) connectEWPUDP(target string, initialData []byte) error {
-	addr, err := ewp.ParseAddress(target)
-	if err != nil {
-		return fmt.Errorf("parse address: %w", err)
+func (c *Conn) connectEWPUDP(target transport.Endpoint, initialData []byte) error {
+	var addr ewp.Address
+	if target.Domain != "" {
+		addr = ewp.Address{Type: ewp.AddressTypeDomain, Host: target.Domain, Port: target.Port}
+	} else {
+		addr = ewp.AddressFromAddrPort(target.Addr)
 	}
+	
 	req := ewp.NewHandshakeRequest(c.uuid, ewp.CommandUDP, addr)
 	c.version = req.Version
 	c.nonce = req.Nonce
@@ -288,75 +294,107 @@ func (c *Conn) connectEWPUDP(target string, initialData []byte) error {
 		copy(c.writeOnceUserUUID, c.uuid[:])
 	}
 
-	udpAddr, err := net.ResolveUDPAddr("udp", target)
-	if err != nil {
-		return fmt.Errorf("resolve UDP address: %w", err)
-	}
 	c.udpGlobalID = ewp.NewGlobalID()
-	pkt := &ewp.UDPPacket{
+
+	targetAddr := target.Addr
+	if target.Domain != "" && !targetAddr.IsValid() {
+		if ips, err := net.LookupIP(target.Domain); err == nil && len(ips) > 0 {
+			if ip4 := ips[0].To4(); ip4 != nil {
+				ip, _ := netip.AddrFromSlice(ip4)
+				targetAddr = netip.AddrPortFrom(ip, target.Port)
+			} else {
+				ip, _ := netip.AddrFromSlice(ips[0].To16())
+				targetAddr = netip.AddrPortFrom(ip, target.Port)
+			}
+		}
+	}
+
+	pkt := &ewp.UDPPacketAddr{
 		GlobalID: c.udpGlobalID,
 		Status:   ewp.UDPStatusNew,
-		Target:   udpAddr,
+		Target:   targetAddr,
 		Payload:  initialData,
 	}
-	encoded, err := ewp.EncodeUDPPacket(pkt)
+	encoded, err := ewp.EncodeUDPAddrPacket(pkt)
 	if err != nil {
 		return fmt.Errorf("encode UDP new packet: %w", err)
 	}
 	if err := c.Write(encoded); err != nil {
 		return fmt.Errorf("send UDP new packet: %w", err)
 	}
-	log.V("[EWP] WS UDP handshake ok: %s", target)
+	log.V("[EWP] WS UDP handshake ok: %v", target)
 	return nil
 }
 
-func (c *Conn) connectTrojanUDP(target string, initialData []byte) error {
-	addr, err := trojan.ParseAddress(target)
-	if err != nil {
-		return err
+func (c *Conn) connectTrojanUDP(target transport.Endpoint, initialData []byte) error {
+	addrLen := 7
+	if target.Domain != "" {
+		addrLen = 1 + 1 + len(target.Domain) + 2
+	} else if target.Addr.Addr().Is6() {
+		addrLen = 19
 	}
-	addrBytes, err := addr.Encode()
-	if err != nil {
-		return err
-	}
-	buf := make([]byte, 0, trojan.KeyLength+2+1+len(addrBytes)+2)
+	buf := make([]byte, 0, trojan.KeyLength+2+1+addrLen+2)
 	buf = append(buf, c.key[:]...)
 	buf = append(buf, trojan.CRLF...)
 	buf = append(buf, trojan.CommandUDP)
-	buf = append(buf, addrBytes...)
+	if target.Domain != "" {
+		buf = append(buf, trojan.AddressTypeDomain, byte(len(target.Domain)))
+		buf = append(buf, []byte(target.Domain)...)
+		buf = append(buf, byte(target.Port>>8), byte(target.Port))
+	} else {
+		buf = trojan.AppendAddrPort(buf, target.Addr)
+	}
 	buf = append(buf, trojan.CRLF...)
 	if err := c.socket.WriteMessage(gws.OpcodeBinary, buf); err != nil {
 		return err
 	}
-	log.V("[Trojan] WS UDP handshake sent: %s", target)
+	log.V("[Trojan] WS UDP handshake sent: %v", target)
 	return nil
 }
 
 // --- WriteUDP ---
 
-func (c *Conn) WriteUDP(target string, data []byte) error {
+func (c *Conn) WriteUDP(target transport.Endpoint, data []byte) error {
 	if c.useTrojan {
 		return c.writeTrojanUDP(target, data)
 	}
-	encoded, err := ewp.EncodeUDPKeepPacket(c.udpGlobalID, target, data)
+
+	targetAddr := target.Addr
+	if target.Domain != "" && !targetAddr.IsValid() {
+		if ips, err := net.LookupIP(target.Domain); err == nil && len(ips) > 0 {
+			if ip4 := ips[0].To4(); ip4 != nil {
+				ip, _ := netip.AddrFromSlice(ip4)
+				targetAddr = netip.AddrPortFrom(ip, target.Port)
+			} else {
+				ip, _ := netip.AddrFromSlice(ips[0].To16())
+				targetAddr = netip.AddrPortFrom(ip, target.Port)
+			}
+		}
+	}
+
+	encoded, err := ewp.EncodeUDPAddrKeepPacket(c.udpGlobalID, targetAddr, data)
 	if err != nil {
 		return fmt.Errorf("encode UDP keep packet: %w", err)
 	}
 	return c.Write(encoded)
 }
 
-func (c *Conn) writeTrojanUDP(target string, data []byte) error {
-	addr, err := trojan.ParseAddress(target)
-	if err != nil {
-		return fmt.Errorf("parse address: %w", err)
-	}
-	addrBytes, err := addr.Encode()
-	if err != nil {
-		return fmt.Errorf("encode address: %w", err)
-	}
+func (c *Conn) writeTrojanUDP(target transport.Endpoint, data []byte) error {
 	length := uint16(len(data))
-	buf := make([]byte, 0, len(addrBytes)+4+len(data))
-	buf = append(buf, addrBytes...)
+	addrLen := 7
+	if target.Domain != "" {
+		addrLen = 1 + 1 + len(target.Domain) + 2
+	} else if target.Addr.Addr().Is6() {
+		addrLen = 19
+	}
+	buf := make([]byte, 0, addrLen+4+len(data))
+	if target.Domain != "" {
+		buf = append(buf, trojan.AddressTypeDomain, byte(len(target.Domain)))
+		buf = append(buf, []byte(target.Domain)...)
+		buf = append(buf, byte(target.Port>>8), byte(target.Port))
+	} else {
+		buf = trojan.AppendAddrPort(buf, target.Addr)
+	}
 	buf = append(buf, byte(length>>8), byte(length))
 	buf = append(buf, trojan.CRLF...)
 	buf = append(buf, data...)
@@ -397,6 +435,35 @@ func (c *Conn) ReadUDPTo(buf []byte) (int, error) {
 	return copy(buf, payload), nil
 }
 
+func (c *Conn) ReadUDPFrom(buf []byte) (int, netip.AddrPort, error) {
+	select {
+	case msg, ok := <-c.msgCh:
+		if !ok {
+			return 0, netip.AddrPort{}, io.EOF
+		}
+		data := msg.Bytes()
+		var n int
+		var addr netip.AddrPort
+		var err error
+		if c.useTrojan {
+			var payload []byte
+			payload, addr, err = decodeTrojanUDPWithAddr(data)
+			if err == nil {
+				n = copy(buf, payload)
+			}
+		} else {
+			if c.enableFlow && c.flowState != nil {
+				data = c.flowState.ProcessDownlink(data)
+			}
+			n, addr, err = ewp.DecodeUDPAddrPayloadTo(data, buf)
+		}
+		msg.Close()
+		return n, addr, err
+	case <-c.closeCh:
+		return 0, netip.AddrPort{}, io.EOF
+	}
+}
+
 func decodeTrojanUDP(data []byte) ([]byte, error) {
 	if len(data) < 1 {
 		return nil, fmt.Errorf("empty trojan udp payload")
@@ -427,4 +494,51 @@ func decodeTrojanUDP(data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("truncated trojan udp payload")
 	}
 	return data[payloadStart : payloadStart+payloadLen], nil
+}
+
+func decodeTrojanUDPWithAddr(data []byte) ([]byte, netip.AddrPort, error) {
+	if len(data) < 1 {
+		return nil, netip.AddrPort{}, fmt.Errorf("empty trojan udp payload")
+	}
+	offset := 1
+	var addrLen int
+	var remoteAddr netip.AddrPort
+
+	switch data[0] {
+	case trojan.AddressTypeIPv4:
+		addrLen = 4
+		if len(data) >= offset+addrLen+2 {
+			ip := netip.AddrFrom4(*(*[4]byte)(data[offset : offset+addrLen]))
+			port := binary.BigEndian.Uint16(data[offset+addrLen : offset+addrLen+2])
+			remoteAddr = netip.AddrPortFrom(ip, port)
+		}
+	case trojan.AddressTypeIPv6:
+		addrLen = 16
+		if len(data) >= offset+addrLen+2 {
+			ip := netip.AddrFrom16(*(*[16]byte)(data[offset : offset+addrLen]))
+			port := binary.BigEndian.Uint16(data[offset+addrLen : offset+addrLen+2])
+			remoteAddr = netip.AddrPortFrom(ip, port)
+		}
+	case trojan.AddressTypeDomain:
+		if len(data) < 2 {
+			return nil, netip.AddrPort{}, fmt.Errorf("truncated trojan domain")
+		}
+		addrLen = int(data[1])
+		offset++
+	default:
+		return nil, netip.AddrPort{}, fmt.Errorf("unknown trojan address type: %d", data[0])
+	}
+	
+	headerLen := offset + addrLen + 2
+	if len(data) < headerLen+4 {
+		return nil, netip.AddrPort{}, fmt.Errorf("truncated trojan udp header")
+	}
+	
+	payloadLen := int(data[headerLen])<<8 | int(data[headerLen+1])
+	payloadStart := headerLen + 4
+	
+	if len(data) < payloadStart+payloadLen {
+		return nil, netip.AddrPort{}, fmt.Errorf("truncated trojan udp payload")
+	}
+	return data[payloadStart : payloadStart+payloadLen], remoteAddr, nil
 }
