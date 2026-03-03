@@ -96,6 +96,22 @@ func SetupTUN(ifName, ipCIDR, ipv6CIDR, dns, ipv6DNS string, mtu int) error {
 	// (Smart Multi-Homed Name Resolution) from querying physical NIC DNS.
 	suppressOtherDNS(ifName)
 
+	// Add NRPT (Name Resolution Policy Table) rule to force ALL domain
+	// lookups to use the TUN DNS server. This overrides SMHNR at the
+	// policy level so Windows cannot send queries to physical NIC DNS.
+	if dns != "" {
+		nrptCmd := fmt.Sprintf(
+			`Get-DnsClientNrptRule | Where-Object { $_.Comment -eq 'ewp-tun' } | Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue; `+
+				`Add-DnsClientNrptRule -Namespace '.' -NameServers '%s' -Comment 'ewp-tun'`,
+			dns,
+		)
+		if out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", nrptCmd).CombinedOutput(); err != nil {
+			ewplog.Printf("[TUN] Warning: NRPT rule failed: %v (output: %s)", err, strings.TrimSpace(string(out)))
+		} else {
+			ewplog.Printf("[TUN] NRPT rule added: all DNS -> %s", dns)
+		}
+	}
+
 	// Flush DNS cache so stale entries from the physical NIC are discarded.
 	_ = run("ipconfig", "/flushdns")
 
@@ -107,6 +123,11 @@ func TeardownTUN(ifName string) error {
 	_ = run("netsh", "interface", "ipv4", "delete", "route", "128.0.0.0/1", ifName)
 	_ = run("netsh", "interface", "ipv6", "delete", "route", "::/1", ifName)
 	_ = run("netsh", "interface", "ipv6", "delete", "route", "8000::/1", ifName)
+
+	// Remove NRPT rules
+	_ = exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
+		`Get-DnsClientNrptRule | Where-Object { $_.Comment -eq 'ewp-tun' } | Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue`,
+	).Run()
 
 	// Restore DNS on other interfaces (set back to automatic metric)
 	restoreOtherDNS(ifName)

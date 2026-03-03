@@ -7,12 +7,14 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"sync"
 	"time"
 
 	"ewp-core/log"
 	"ewp-core/protocol/ewp"
 	"ewp-core/protocol/trojan"
+	"ewp-core/transport"
 )
 
 type StreamOneConn struct {
@@ -304,14 +306,14 @@ func (c *StreamOneConn) connectEWP(target string, initialData []byte) error {
 	return nil
 }
 
-func (c *StreamOneConn) ConnectUDP(target string, initialData []byte) error {
+func (c *StreamOneConn) ConnectUDP(target transport.Endpoint, initialData []byte) error {
 	if c.useTrojan {
 		return c.connectTrojanUDP(target, initialData)
 	}
 	return c.connectEWPUDP(target, initialData)
 }
 
-func (c *StreamOneConn) connectEWPUDP(target string, initialData []byte) error {
+func (c *StreamOneConn) connectEWPUDP(target transport.Endpoint, initialData []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -340,9 +342,11 @@ func (c *StreamOneConn) connectEWPUDP(target string, initialData []byte) error {
 	req.Header.Set("X-Auth-Token", c.uuidStr)
 	req.Header.Set("Content-Type", "application/octet-stream")
 
-	addr, err := ewp.ParseAddress(target)
-	if err != nil {
-		return fmt.Errorf("parse address: %w", err)
+	var addr ewp.Address
+	if target.Domain != "" {
+		addr = ewp.Address{Type: ewp.AddressTypeDomain, Host: target.Domain, Port: target.Port}
+	} else {
+		addr = ewp.AddressFromAddrPort(target.Addr)
 	}
 
 	ewpReq := ewp.NewHandshakeRequest(c.uuid, ewp.CommandUDP, addr)
@@ -417,21 +421,29 @@ func (c *StreamOneConn) connectEWPUDP(target string, initialData []byte) error {
 		return fmt.Errorf("EWP UDP handshake failed with status: %d", resp.Status)
 	}
 
-	udpAddr, err := net.ResolveUDPAddr("udp", target)
-	if err != nil {
-		return fmt.Errorf("resolve UDP address: %w", err)
-	}
-
 	c.udpGlobalID = ewp.NewGlobalID()
 
-	pkt := &ewp.UDPPacket{
+	targetAddr := target.Addr
+	if target.Domain != "" && !targetAddr.IsValid() {
+		if ips, err := net.LookupIP(target.Domain); err == nil && len(ips) > 0 {
+			if ip4 := ips[0].To4(); ip4 != nil {
+				ip, _ := netip.AddrFromSlice(ip4)
+				targetAddr = netip.AddrPortFrom(ip, target.Port)
+			} else {
+				ip, _ := netip.AddrFromSlice(ips[0].To16())
+				targetAddr = netip.AddrPortFrom(ip, target.Port)
+			}
+		}
+	}
+
+	pkt := &ewp.UDPPacketAddr{
 		GlobalID: c.udpGlobalID,
 		Status:   ewp.UDPStatusNew,
-		Target:   udpAddr,
+		Target:   targetAddr,
 		Payload:  initialData,
 	}
 
-	encoded, err := ewp.EncodeUDPPacket(pkt)
+	encoded, err := ewp.EncodeUDPAddrPacket(pkt)
 	if err != nil {
 		return fmt.Errorf("encode UDP new packet: %w", err)
 	}
@@ -441,33 +453,50 @@ func (c *StreamOneConn) connectEWPUDP(target string, initialData []byte) error {
 	}
 
 	c.connected = true
-	log.V("[XHTTP] stream-one EWP UDP handshake success, target: %s", target)
+	log.V("[XHTTP] stream-one EWP UDP handshake success, target: %v", target)
 	return nil
 }
 
 // WriteUDP sends a subsequent UDP packet over the established UDP tunnel
-func (c *StreamOneConn) WriteUDP(target string, data []byte) error {
+func (c *StreamOneConn) WriteUDP(target transport.Endpoint, data []byte) error {
 	if c.useTrojan {
-		addr, err := trojan.ParseAddress(target)
-		if err != nil {
-			return fmt.Errorf("parse address: %w", err)
-		}
-		addrBytes, err := addr.Encode()
-		if err != nil {
-			return fmt.Errorf("encode address: %w", err)
-		}
 		length := uint16(len(data))
-		buf := make([]byte, 0, len(addrBytes)+4+len(data))
-		buf = append(buf, addrBytes...)
+		addrLen := 7
+		if target.Domain != "" {
+			addrLen = 1 + 1 + len(target.Domain) + 2
+		} else if target.Addr.Addr().Is6() {
+			addrLen = 19
+		}
+		buf := make([]byte, 0, addrLen+4+len(data))
+		if target.Domain != "" {
+			buf = append(buf, trojan.AddressTypeDomain, byte(len(target.Domain)))
+			buf = append(buf, []byte(target.Domain)...)
+			buf = append(buf, byte(target.Port>>8), byte(target.Port))
+		} else {
+			buf = trojan.AppendAddrPort(buf, target.Addr)
+		}
 		buf = append(buf, byte(length>>8), byte(length))
 		buf = append(buf, trojan.CRLF...)
 		buf = append(buf, data...)
 		
-		_, err = c.pipeWriter.Write(buf)
+		_, err := c.pipeWriter.Write(buf)
 		return err
 	}
 
-	encoded, err := ewp.EncodeUDPKeepPacket(c.udpGlobalID, target, data)
+	targetAddr := target.Addr
+	if target.Domain != "" && !targetAddr.IsValid() {
+		if ips, err := net.LookupIP(target.Domain); err == nil && len(ips) > 0 {
+			if ip4 := ips[0].To4(); ip4 != nil {
+				ip, _ := netip.AddrFromSlice(ip4)
+				targetAddr = netip.AddrPortFrom(ip, target.Port)
+			} else {
+				ip, _ := netip.AddrFromSlice(ips[0].To16())
+				targetAddr = netip.AddrPortFrom(ip, target.Port)
+			}
+		}
+	}
+
+	encoded, err := ewp.EncodeUDPAddrKeepPacket(c.udpGlobalID, targetAddr, data)
 	if err != nil {
 		return fmt.Errorf("encode UDP keep packet: %w", err)
 	}
@@ -514,6 +543,18 @@ func (c *StreamOneConn) ReadUDPTo(buf []byte) (int, error) {
 	return n, nil
 }
 
+func (c *StreamOneConn) ReadUDPFrom(buf []byte) (int, netip.AddrPort, error) {
+	if c.respBody == nil {
+		return 0, netip.AddrPort{}, errors.New("not connected")
+	}
+	
+	if c.useTrojan {
+		return readTrojanUDPWithAddrFromReader(c.respBody, buf)
+	}
+
+	return ewp.DecodeUDPAddrPacketTo(c.respBody, buf)
+}
+
 func (c *StreamOneConn) readTrojanUDP() ([]byte, error) {
 	addr, err := trojan.DecodeAddress(c.respBody)
 	if err != nil {
@@ -539,7 +580,7 @@ func (c *StreamOneConn) readTrojanUDP() ([]byte, error) {
 	return payload, nil
 }
 
-func (c *StreamOneConn) connectTrojanUDP(target string, initialData []byte) error {
+func (c *StreamOneConn) connectTrojanUDP(target transport.Endpoint, initialData []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -573,22 +614,19 @@ func (c *StreamOneConn) connectTrojanUDP(target string, initialData []byte) erro
 	req.Header.Set("Content-Type", "application/octet-stream")
 
 	// Build Trojan UDP handshake
-	addr, err := trojan.ParseAddress(target)
-	if err != nil {
-		return fmt.Errorf("parse address: %w", err)
-	}
-
 	key := trojan.GenerateKey(c.password)
 	var handshakeData []byte
 	handshakeData = append(handshakeData, key[:]...)
 	handshakeData = append(handshakeData, trojan.CRLF...)
 	handshakeData = append(handshakeData, trojan.CommandUDP)  // ← UDP command
 
-	addrBytes, err := addr.Encode()
-	if err != nil {
-		return fmt.Errorf("encode address: %w", err)
+	if target.Domain != "" {
+		handshakeData = append(handshakeData, trojan.AddressTypeDomain, byte(len(target.Domain)))
+		handshakeData = append(handshakeData, []byte(target.Domain)...)
+		handshakeData = append(handshakeData, byte(target.Port>>8), byte(target.Port))
+	} else {
+		handshakeData = trojan.AppendAddrPort(handshakeData, target.Addr)
 	}
-	handshakeData = append(handshakeData, addrBytes...)
 	handshakeData = append(handshakeData, trojan.CRLF...)
 
 	// 使用 WaitReadCloser 进行异步响应处理
@@ -646,7 +684,7 @@ func (c *StreamOneConn) connectTrojanUDP(target string, initialData []byte) erro
 	// The UDP handshake and target are already included in initial write.
 
 	c.connected = true
-	log.V("[XHTTP] Trojan UDP connected, target: %s", target)
+	log.V("[XHTTP] Trojan UDP connected, target: %v", target)
 	return nil
 }
 

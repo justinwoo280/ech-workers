@@ -5,19 +5,36 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"net/netip"
 	"strings"
 	"time"
 )
+
+// Endpoint represents a target destination for a tunnel connection.
+// It can contain either an IP+Port (Addr) or Domain+Port (Domain+Port).
+type Endpoint struct {
+	Addr   netip.AddrPort // Valid if Domain is empty
+	Domain string
+	Port   uint16
+}
+
+// String returns a string representation of the endpoint
+func (e Endpoint) String() string {
+	if e.Domain != "" {
+		return fmt.Sprintf("%s:%d", e.Domain, e.Port)
+	}
+	return e.Addr.String()
+}
 
 // TunnelConn represents a tunnel connection (abstraction interface)
 type TunnelConn interface {
 	// Connect sends TCP connection request and waits for response
 	Connect(target string, initialData []byte) error
 	// ConnectUDP sends UDP connection request (for UDP over TCP tunnel)
-	ConnectUDP(target string, initialData []byte) error
+	ConnectUDP(target Endpoint, initialData []byte) error
 	// WriteUDP sends a subsequent UDP packet over an established UDP tunnel
 	// Must be called after ConnectUDP. Frames data as EWP StatusKeep.
-	WriteUDP(target string, data []byte) error
+	WriteUDP(target Endpoint, data []byte) error
 	// ReadUDP reads and decodes an EWP-framed UDP response packet
 	// Returns the payload bytes. Must be called after ConnectUDP.
 	ReadUDP() ([]byte, error)
@@ -25,6 +42,9 @@ type TunnelConn interface {
 	// directly into the provided buffer (zero-copy optimization).
 	// Returns the number of bytes read. Must be called after ConnectUDP.
 	ReadUDPTo(buf []byte) (int, error)
+	// ReadUDPFrom reads a UDP response and returns the real remote address
+	// from the protocol frame header. Zero heap allocation.
+	ReadUDPFrom(buf []byte) (int, netip.AddrPort, error)
 	// Read reads data from tunnel to provided buffer (zero-copy optimization)
 	Read(buf []byte) (int, error)
 	// Write writes data to tunnel

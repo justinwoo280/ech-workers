@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"strconv"
 )
 
@@ -52,6 +53,19 @@ func ParseAddress(addr string) (Address, error) {
 	}
 
 	return a, nil
+}
+
+// AddressFromAddrPort converts a netip.AddrPort to an Address
+func AddressFromAddrPort(a netip.AddrPort) Address {
+	addr := Address{Port: a.Port()}
+	if a.Addr().Is4() {
+		addr.Type = AddressTypeIPv4
+		addr.Host = a.Addr().String()
+	} else if a.Addr().Is6() {
+		addr.Type = AddressTypeIPv6
+		addr.Host = a.Addr().String()
+	}
+	return addr
 }
 
 // normalizeIPv6Address 规范化 IPv6 地址格式

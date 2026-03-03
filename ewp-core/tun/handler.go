@@ -124,11 +124,9 @@ func (h *Handler) HandleTCP(conn *gonet.TCPConn) {
 }
 
 func (h *Handler) HandleUDP(payload []byte, src netip.AddrPort, dst netip.AddrPort) {
-	target := dst.String()
-
 	// DNS interception: resolve port 53 queries locally
 	if dst.Port() == 53 && h.dnsResolver != nil {
-		log.V("[TUN DNS] Intercepted DNS query: %s -> %s", src, target)
+		log.V("[TUN DNS] Intercepted DNS query: %s -> %s", src, dst)
 		h.handleDNS(payload, src, dst)
 		return
 	}
@@ -163,10 +161,10 @@ func (h *Handler) HandleUDP(payload []byte, src netip.AddrPort, dst netip.AddrPo
 
 			// We only `ConnectUDP` once per pseudo-socket to trick Trojan
 			// into maintaining a pseudo-socket. The destination passed here
-			// is completely arbitrary since UDP mapping sends the actual target string
+			// is completely arbitrary since UDP mapping sends the actual target
 			// inside every WebSocket/transport packet frame anyway.
 			// We just arbitrarily use the First Packet's target.
-			if err := tunnelConn.ConnectUDP(target, nil); err != nil {
+			if err := tunnelConn.ConnectUDP(transport.Endpoint{Addr: dst}, nil); err != nil {
 				log.Printf("[TUN UDP] ConnectUDP failed: %v", err)
 				tunnelConn.Close()
 				h.udpSessions.Delete(srcKey)
@@ -182,7 +180,7 @@ func (h *Handler) HandleUDP(payload []byte, src netip.AddrPort, dst netip.AddrPo
 	session.lastActive.Store(time.Now().UnixNano())
 
 	// Forward UDP payload to the target via the proxy tunnel
-	if err := session.tunnelConn.WriteUDP(target, payload); err != nil {
+	if err := session.tunnelConn.WriteUDP(transport.Endpoint{Addr: dst}, payload); err != nil {
 		log.V("[TUN UDP] Packet send failed: %v", err)
 	}
 }
@@ -204,7 +202,7 @@ func (h *Handler) udpReadLoop(srcKey string, session *udpSession, tunClientSrc n
 	defer commpool.PutLarge(buf)
 
 	for {
-		n, err := session.tunnelConn.ReadUDPTo(buf)
+		n, remoteAddr, err := session.tunnelConn.ReadUDPFrom(buf)
 		if err != nil {
 			log.V("[TUN UDP] Session read loop closed for %s: %v", srcKey, err)
 			return
@@ -214,15 +212,20 @@ func (h *Handler) udpReadLoop(srcKey string, session *udpSession, tunClientSrc n
 			return
 		}
 
+		actualRemote := remoteAddr
+		if !actualRemote.IsValid() {
+			actualRemote = session.remoteAddr
+		}
+
 		// Inject reply into gVisor:
-		//   src = remoteAddr  (packet appears to come FROM the remote server)
-		//   dst = tunClientSrc (packet is delivered TO the TUN client)
-		if session.remoteAddr.IsValid() {
-			if err := h.udpWriter.WriteTo(buf[:n], session.remoteAddr, tunClientSrc); err != nil {
+		//   src = actualRemote  (packet appears to come FROM the remote server)
+		//   dst = tunClientSrc   (packet is delivered TO the TUN client)
+		if actualRemote.IsValid() {
+			if err := h.udpWriter.WriteTo(buf[:n], actualRemote, tunClientSrc); err != nil {
 				log.V("[TUN UDP] Write to TUN failed: %v", err)
 			}
 		} else {
-			log.V("[TUN UDP] Dropping reply: remoteAddr not set for session %s", srcKey)
+			log.V("[TUN UDP] Dropping reply: actualRemote not valid for session %s", srcKey)
 		}
 	}
 }

@@ -3,10 +3,13 @@
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +17,7 @@ import (
 	"ewp-core/log"
 	"ewp-core/protocol/ewp"
 	"ewp-core/protocol/trojan"
+	"ewp-core/transport"
 )
 
 type StreamDownConn struct {
@@ -174,13 +178,15 @@ func (c *StreamDownConn) Connect(target string, initialData []byte) error {
 }
 
 // ConnectUDP sends UDP connection request using EWP native UDP protocol
-func (c *StreamDownConn) ConnectUDP(target string, initialData []byte) error {
+func (c *StreamDownConn) ConnectUDP(target transport.Endpoint, initialData []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	addr, err := ewp.ParseAddress(target)
-	if err != nil {
-		return fmt.Errorf("parse address: %w", err)
+	var addr ewp.Address
+	if target.Domain != "" {
+		addr = ewp.Address{Type: ewp.AddressTypeDomain, Host: target.Domain, Port: target.Port}
+	} else {
+		addr = ewp.AddressFromAddrPort(target.Addr)
 	}
 
 	// Use CommandUDP for UDP connections
@@ -284,31 +290,48 @@ func (c *StreamDownConn) ConnectUDP(target string, initialData []byte) error {
 	// The UDP handshake and target are already included in initial write.
 
 	c.connected = true
-	log.V("[XHTTP] stream-down Trojan UDP connected, target: %s, SessionID: %s", target, c.sessionID)
+	log.V("[XHTTP] stream-down Trojan UDP connected, target: %v, SessionID: %s", target, c.sessionID)
 	return nil
 }
 
 // WriteUDP sends a subsequent UDP packet over the established UDP tunnel
-func (c *StreamDownConn) WriteUDP(target string, data []byte) error {
+func (c *StreamDownConn) WriteUDP(target transport.Endpoint, data []byte) error {
 	if c.useTrojan {
-		addr, err := trojan.ParseAddress(target)
-		if err != nil {
-			return fmt.Errorf("parse address: %w", err)
-		}
-		addrBytes, err := addr.Encode()
-		if err != nil {
-			return fmt.Errorf("encode address: %w", err)
-		}
 		length := uint16(len(data))
-		buf := make([]byte, 0, len(addrBytes)+4+len(data))
-		buf = append(buf, addrBytes...)
+		addrLen := 7
+		if target.Domain != "" {
+			addrLen = 1 + 1 + len(target.Domain) + 2
+		} else if target.Addr.Addr().Is6() {
+			addrLen = 19
+		}
+		buf := make([]byte, 0, addrLen+4+len(data))
+		if target.Domain != "" {
+			buf = append(buf, trojan.AddressTypeDomain, byte(len(target.Domain)))
+			buf = append(buf, []byte(target.Domain)...)
+			buf = append(buf, byte(target.Port>>8), byte(target.Port))
+		} else {
+			buf = trojan.AppendAddrPort(buf, target.Addr)
+		}
 		buf = append(buf, byte(length>>8), byte(length))
 		buf = append(buf, trojan.CRLF...)
 		buf = append(buf, data...)
 		return c.Write(buf)
 	}
 
-	encoded, err := ewp.EncodeUDPKeepPacket(c.udpGlobalID, target, data)
+	targetAddr := target.Addr
+	if target.Domain != "" && !targetAddr.IsValid() {
+		if ips, err := net.LookupIP(target.Domain); err == nil && len(ips) > 0 {
+			if ip4 := ips[0].To4(); ip4 != nil {
+				ip, _ := netip.AddrFromSlice(ip4)
+				targetAddr = netip.AddrPortFrom(ip, target.Port)
+			} else {
+				ip, _ := netip.AddrFromSlice(ips[0].To16())
+				targetAddr = netip.AddrPortFrom(ip, target.Port)
+			}
+		}
+	}
+
+	encoded, err := ewp.EncodeUDPAddrKeepPacket(c.udpGlobalID, targetAddr, data)
 	if err != nil {
 		return fmt.Errorf("encode UDP keep packet: %w", err)
 	}
@@ -353,6 +376,89 @@ func (c *StreamDownConn) ReadUDPTo(buf []byte) (int, error) {
 	}
 	n := copy(buf, pkt.Payload)
 	return n, nil
+}
+
+func (c *StreamDownConn) ReadUDPFrom(buf []byte) (int, netip.AddrPort, error) {
+	if c.respBody == nil {
+		return 0, netip.AddrPort{}, errors.New("not connected")
+	}
+	
+	if c.useTrojan {
+		return readTrojanUDPWithAddrFromReader(c.respBody, buf)
+	}
+
+	return ewp.DecodeUDPAddrPacketTo(c.respBody, buf)
+}
+
+func readTrojanUDPWithAddrFromReader(r io.Reader, out []byte) (int, netip.AddrPort, error) {
+	var typeBuf [1]byte
+	if _, err := io.ReadFull(r, typeBuf[:]); err != nil {
+		return 0, netip.AddrPort{}, fmt.Errorf("read trojan type: %w", err)
+	}
+
+	var remoteAddr netip.AddrPort
+	switch typeBuf[0] {
+	case trojan.AddressTypeIPv4:
+		var buf [6]byte
+		if _, err := io.ReadFull(r, buf[:]); err != nil {
+			return 0, netip.AddrPort{}, fmt.Errorf("read ipv4 target: %w", err)
+		}
+		ip := netip.AddrFrom4(*(*[4]byte)(buf[0:4]))
+		port := binary.BigEndian.Uint16(buf[4:6])
+		remoteAddr = netip.AddrPortFrom(ip, port)
+	case trojan.AddressTypeIPv6:
+		var buf [18]byte
+		if _, err := io.ReadFull(r, buf[:]); err != nil {
+			return 0, netip.AddrPort{}, fmt.Errorf("read ipv6 target: %w", err)
+		}
+		ip := netip.AddrFrom16(*(*[16]byte)(buf[0:16]))
+		port := binary.BigEndian.Uint16(buf[16:18])
+		remoteAddr = netip.AddrPortFrom(ip, port)
+	case trojan.AddressTypeDomain:
+		var lenBuf [1]byte
+		if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
+			return 0, netip.AddrPort{}, fmt.Errorf("read domain length: %w", err)
+		}
+		domainLen := int(lenBuf[0])
+		if domainLen > 0 {
+			io.CopyN(io.Discard, r, int64(domainLen))
+		}
+		var portBuf [2]byte
+		if _, err := io.ReadFull(r, portBuf[:]); err != nil {
+			return 0, netip.AddrPort{}, fmt.Errorf("read domain port: %w", err)
+		}
+	default:
+		return 0, netip.AddrPort{}, fmt.Errorf("unknown trojan address type: %d", typeBuf[0])
+	}
+
+	var lengthBuf [2]byte
+	if _, err := io.ReadFull(r, lengthBuf[:]); err != nil {
+		return 0, netip.AddrPort{}, fmt.Errorf("read trojan length: %w", err)
+	}
+	length := int(binary.BigEndian.Uint16(lengthBuf[:]))
+
+	var crlf [2]byte
+	if _, err := io.ReadFull(r, crlf[:]); err != nil {
+		return 0, netip.AddrPort{}, fmt.Errorf("read trojan crlf: %w", err)
+	}
+
+	if length > 0 {
+		var n int
+		if length <= len(out) {
+			if _, err := io.ReadFull(r, out[:length]); err != nil {
+				return 0, netip.AddrPort{}, fmt.Errorf("read trojan payload: %w", err)
+			}
+			n = length
+		} else {
+			if _, err := io.ReadFull(r, out); err != nil {
+				return 0, netip.AddrPort{}, err
+			}
+			n = len(out)
+			io.CopyN(io.Discard, r, int64(length-len(out)))
+		}
+		return n, remoteAddr, nil
+	}
+	return 0, remoteAddr, nil
 }
 
 func (c *StreamDownConn) readTrojanUDP() ([]byte, error) {

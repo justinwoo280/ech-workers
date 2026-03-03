@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 )
 
 const (
@@ -80,6 +81,21 @@ func (a *Address) Encode() ([]byte, error) {
 
 	buf = append(buf, byte(a.Port>>8), byte(a.Port))
 	return buf, nil
+}
+
+// AppendAddrPort appends a netip.AddrPort in Trojan format to the given byte slice (zero-allocation)
+func AppendAddrPort(b []byte, a netip.AddrPort) []byte {
+	if a.Addr().Is4() {
+		b = append(b, AddressTypeIPv4)
+		ip := a.Addr().As4()
+		b = append(b, ip[:]...)
+	} else if a.Addr().Is6() {
+		b = append(b, AddressTypeIPv6)
+		ip := a.Addr().As16()
+		b = append(b, ip[:]...)
+	}
+	b = append(b, byte(a.Port()>>8), byte(a.Port()))
+	return b
 }
 
 func DecodeAddress(r io.Reader) (*Address, error) {
