@@ -209,14 +209,22 @@ func (r *TunnelDNSResolver) doHTTPSQuery(ctx context.Context, dnsQuery []byte) (
 	connClosed = true
 
 	// Custom HTTP Client using the established tunnel (and TLS)
-	transport := &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return netConn, nil
-		},
+	// When TLS is already handled, we use DialTLSContext so http.Transport
+	// does NOT add another TLS layer on top.
+	httpTransport := &http.Transport{
 		DisableKeepAlives: true,
 	}
+	if u.Scheme == "https" {
+		httpTransport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return netConn, nil
+		}
+	} else {
+		httpTransport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return netConn, nil
+		}
+	}
 	client := &http.Client{
-		Transport: transport,
+		Transport: httpTransport,
 		Timeout:   r.timeout,
 	}
 

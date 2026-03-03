@@ -112,6 +112,19 @@ func NewStack(tunDev tun.Device, config *StackConfig) (*Stack, error) {
 	return s, nil
 }
 
+// tcpipAddrToNetipAddr safely converts a gVisor tcpip.Address (4 or 16 bytes)
+// to a Go netip.Addr without panicking on length mismatch.
+func tcpipAddrToNetipAddr(addr tcpip.Address) netip.Addr {
+	switch addr.Len() {
+	case 4:
+		return netip.AddrFrom4(addr.As4())
+	case 16:
+		return netip.AddrFrom16(addr.As16())
+	default:
+		return netip.Addr{}
+	}
+}
+
 func (s *Stack) setupTCPForwarder() {
 	tcpForwarder := tcp.NewForwarder(s.ipStack, 0, 10000, func(r *tcp.ForwarderRequest) {
 		var wq waiter.Queue
@@ -125,8 +138,8 @@ func (s *Stack) setupTCPForwarder() {
 		r.Complete(false)
 
 		id := r.ID()
-		src := netip.AddrPortFrom(netip.AddrFrom16(id.RemoteAddress.As16()), id.RemotePort)
-		dst := netip.AddrPortFrom(netip.AddrFrom16(id.LocalAddress.As16()), id.LocalPort)
+		src := netip.AddrPortFrom(tcpipAddrToNetipAddr(id.RemoteAddress), id.RemotePort)
+		dst := netip.AddrPortFrom(tcpipAddrToNetipAddr(id.LocalAddress), id.LocalPort)
 
 		log.V("[gVisor TCP] Connection request: %s -> %s", src, dst)
 
@@ -151,8 +164,8 @@ func (s *Stack) setupUDPForwarder() {
 		}
 
 		id := r.ID()
-		src := netip.AddrPortFrom(netip.AddrFrom16(id.RemoteAddress.As16()), id.RemotePort)
-		dst := netip.AddrPortFrom(netip.AddrFrom16(id.LocalAddress.As16()), id.LocalPort)
+		src := netip.AddrPortFrom(tcpipAddrToNetipAddr(id.RemoteAddress), id.RemotePort)
+		dst := netip.AddrPortFrom(tcpipAddrToNetipAddr(id.LocalAddress), id.LocalPort)
 
 		conn := gonet.NewUDPConn(&wq, ep)
 		go s.udpReadLoop(conn, src, dst)
