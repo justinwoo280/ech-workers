@@ -115,51 +115,43 @@ func TeardownTUN(ifName string) error {
 	return nil
 }
 
-// suppressOtherDNS raises the interface metric on all other interfaces to 9999
-// so Windows DNS Client will not use their DNS servers.
+// suppressOtherDNS raises the interface metric on all other connected adapters
+// to 9999 so Windows DNS Client will not use their DNS servers.
+// Uses PowerShell Get-NetAdapter (locale-independent) instead of netsh text parsing.
 func suppressOtherDNS(tunIfName string) {
-	out, err := exec.Command("netsh", "interface", "ipv4", "show", "interfaces").CombinedOutput()
+	// PowerShell one-liner: get all connected adapters except our TUN,
+	// then set their IPv4 and IPv6 interface metrics to 9999.
+	psCmd := fmt.Sprintf(
+		`Get-NetAdapter | Where-Object { $_.Status -eq 'Up' -and $_.Name -ne '%s' } | ForEach-Object { `+
+			`Set-NetIPInterface -InterfaceIndex $_.ifIndex -AddressFamily IPv4 -InterfaceMetric 9999 -ErrorAction SilentlyContinue; `+
+			`Set-NetIPInterface -InterfaceIndex $_.ifIndex -AddressFamily IPv6 -InterfaceMetric 9999 -ErrorAction SilentlyContinue; `+
+			`Write-Host "Suppressed: $($_.Name)" `+
+			`}`,
+		tunIfName,
+	)
+	out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", psCmd).CombinedOutput()
 	if err != nil {
-		ewplog.Printf("[TUN] Warning: failed to list interfaces for DNS suppression: %v", err)
-		return
-	}
-	for _, line := range strings.Split(string(out), "\n") {
-		fields := strings.Fields(strings.TrimSpace(line))
-		// Format: Idx  Met  MTU  State  Name
-		if len(fields) < 5 {
-			continue
+		ewplog.Printf("[TUN] Warning: DNS suppression failed: %v (output: %s)", err, strings.TrimSpace(string(out)))
+	} else {
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			line = strings.TrimSpace(line)
+			if line != "" {
+				ewplog.Printf("[TUN] %s", line)
+			}
 		}
-		// Skip header, loopback, and our TUN interface
-		name := strings.Join(fields[4:], " ")
-		if name == tunIfName || name == "Loopback" || name == "Name" {
-			continue
-		}
-		state := fields[3]
-		if state != "connected" {
-			continue
-		}
-		_ = run("netsh", "interface", "ipv4", "set", "interface", name, "metric=9999")
-		ewplog.Printf("[TUN] Suppressed DNS on interface: %s", name)
 	}
 }
 
-// restoreOtherDNS sets all non-TUN interfaces back to automatic metric.
+// restoreOtherDNS sets all non-TUN interfaces back to automatic metric (0).
 func restoreOtherDNS(tunIfName string) {
-	out, err := exec.Command("netsh", "interface", "ipv4", "show", "interfaces").CombinedOutput()
-	if err != nil {
-		return
-	}
-	for _, line := range strings.Split(string(out), "\n") {
-		fields := strings.Fields(strings.TrimSpace(line))
-		if len(fields) < 5 {
-			continue
-		}
-		name := strings.Join(fields[4:], " ")
-		if name == tunIfName || name == "Loopback" || name == "Name" {
-			continue
-		}
-		_ = run("netsh", "interface", "ipv4", "set", "interface", name, "metric=0")
-	}
+	psCmd := fmt.Sprintf(
+		`Get-NetAdapter | Where-Object { $_.Status -eq 'Up' -and $_.Name -ne '%s' } | ForEach-Object { `+
+			`Set-NetIPInterface -InterfaceIndex $_.ifIndex -AddressFamily IPv4 -AutomaticMetric Enabled -ErrorAction SilentlyContinue; `+
+			`Set-NetIPInterface -InterfaceIndex $_.ifIndex -AddressFamily IPv6 -AutomaticMetric Enabled -ErrorAction SilentlyContinue `+
+			`}`,
+		tunIfName,
+	)
+	_ = exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", psCmd).Run()
 }
 
 // deriveGatewayV4 returns the first usable host IP in the subnet as the virtual gateway.
