@@ -241,6 +241,11 @@ func (r *TunnelDNSResolver) ensureConnected(ctx context.Context) (*http.Client, 
 	if r.useHTTPS {
 		tlsConfig := &tls.Config{
 			ServerName: r.targetHost,
+			// Force HTTP/1.1: Go's http.Transport does NOT support HTTP/2 when
+			// using custom DialTLSContext. Without this, dns.google negotiates h2
+			// via ALPN, then immediately closes the connection because our client
+			// sends HTTP/1.1 framing over an h2-negotiated connection → EOF.
+			NextProtos: []string{"http/1.1"},
 		}
 		tlsConn := tls.Client(netConn, tlsConfig)
 		if err := tlsConn.HandshakeContext(ctx); err != nil {
