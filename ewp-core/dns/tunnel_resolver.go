@@ -289,13 +289,20 @@ func (r *TunnelDNSResolver) ensureConnected(ctx context.Context) (*http.Client, 
 		return r.httpClient, nil
 	}
 
-	// Dial a new tunnel connection
+	// Use a generous timeout for connection setup (Dial + CONNECT + TLS).
+	// This is separate from the per-query timeout since first-time setup is slow.
+	connCtx, connCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer connCancel()
+
+	// Step 1: Dial tunnel
+	log.Printf("[TunnelDNS] Step 1/3: Dialing tunnel...")
 	tunnelConn, err := r.transport.Dial()
 	if err != nil {
 		return nil, fmt.Errorf("tunnel dial failed: %w", err)
 	}
 
-	// CONNECT proxy to DoH server
+	// Step 2: CONNECT proxy to DoH server
+	log.Printf("[TunnelDNS] Step 2/3: CONNECT to %s...", r.target)
 	if err := tunnelConn.Connect(r.target, nil); err != nil {
 		tunnelConn.Close()
 		return nil, fmt.Errorf("tunnel connect to %s failed: %w", r.target, err)
@@ -303,17 +310,17 @@ func (r *TunnelDNSResolver) ensureConnected(ctx context.Context) (*http.Client, 
 
 	var netConn net.Conn = &tunnelConnAdapter{TunnelConn: tunnelConn}
 
-	// If HTTPS, wrap with TLS
+	// Step 3: TLS handshake
 	if r.useHTTPS {
+		log.Printf("[TunnelDNS] Step 3/3: TLS handshake to %s...", r.targetHost)
 		tlsConfig := &tls.Config{
 			ServerName: r.targetHost,
 			// Force HTTP/1.1: Go's http.Transport does NOT support HTTP/2 when
-			// using custom DialTLSContext. Without this, dns.google negotiates h2
-			// via ALPN → protocol mismatch → EOF.
+			// using custom DialTLSContext.
 			NextProtos: []string{"http/1.1"},
 		}
 		tlsConn := tls.Client(netConn, tlsConfig)
-		if err := tlsConn.HandshakeContext(ctx); err != nil {
+		if err := tlsConn.HandshakeContext(connCtx); err != nil {
 			tunnelConn.Close()
 			return nil, fmt.Errorf("TLS handshake to DoH server failed: %w", err)
 		}
