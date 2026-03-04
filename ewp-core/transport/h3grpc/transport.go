@@ -308,9 +308,9 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 			return nil, fmt.Errorf("DNS resolution failed: %w", err)
 		}
 		addr = net.JoinHostPort(ip, port)
-		log.Printf("[H3] Connecting to: %s (SNI: %s)", addr, effectiveSNI)
+		log.V("[H3] Connecting to: %s (SNI: %s)", addr, effectiveSNI)
 	} else {
-		log.Printf("[H3] Connecting to: %s", addr)
+		log.V("[H3] Connecting to: %s", addr)
 	}
 
 	scheme := "https"

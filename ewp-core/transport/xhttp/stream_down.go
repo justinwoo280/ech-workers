@@ -331,11 +331,14 @@ func (c *StreamDownConn) WriteUDP(target transport.Endpoint, data []byte) error 
 		}
 	}
 
-	encoded, err := ewp.EncodeUDPAddrKeepPacket(c.udpGlobalID, targetAddr, data)
-	if err != nil {
-		return fmt.Errorf("encode UDP keep packet: %w", err)
+	addrLen := 7
+	if targetAddr.IsValid() && targetAddr.Addr().Is6() {
+		addrLen = 19
 	}
-	return c.Write(encoded)
+	totalCap := 2 + 8 + 1 + 1 + addrLen + 2 + len(data)
+	buf := make([]byte, 0, totalCap)
+	buf = ewp.AppendUDPAddrFrame(buf, c.udpGlobalID, ewp.UDPStatusKeep, targetAddr, data)
+	return c.Write(buf)
 }
 
 // ReadUDP reads and decodes a UDP response packet

@@ -169,7 +169,7 @@ func (s *Stack) setupUDPForwarder() {
 		src := netip.AddrPortFrom(tcpipAddrToNetipAddr(id.RemoteAddress), id.RemotePort)
 		dst := netip.AddrPortFrom(tcpipAddrToNetipAddr(id.LocalAddress), id.LocalPort)
 
-		log.Printf("[gVisor UDP] Packet: %s -> %s", src, dst)
+		log.V("[gVisor UDP] Packet: %s -> %s", src, dst)
 
 		conn := gonet.NewUDPConn(&wq, ep)
 		go s.udpReadLoop(conn, src, dst)

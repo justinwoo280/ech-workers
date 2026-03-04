@@ -284,6 +284,7 @@ func (c *Conn) WriteUDP(target transport.Endpoint, data []byte) error {
 		return err
 	}
 
+	// EWP path: use zero-allocation AppendUDPAddrFrame
 	targetAddr := target.Addr
 	if target.Domain != "" && !targetAddr.IsValid() {
 		if ips, err := net.LookupIP(target.Domain); err == nil && len(ips) > 0 {
@@ -297,11 +298,15 @@ func (c *Conn) WriteUDP(target transport.Endpoint, data []byte) error {
 		}
 	}
 
-	encoded, err := ewp.EncodeUDPAddrKeepPacket(c.udpGlobalID, targetAddr, data)
-	if err != nil {
-		return fmt.Errorf("encode UDP keep packet: %w", err)
+	// Pre-compute total size: FrameLen(2)+GlobalID(8)+Status(1)+AddrLen(1)+Addr(7|19)+PayloadLen(2)+Payload
+	addrLen := 7
+	if targetAddr.IsValid() && targetAddr.Addr().Is6() {
+		addrLen = 19
 	}
-	return c.Write(encoded)
+	totalCap := 2 + 8 + 1 + 1 + addrLen + 2 + len(data)
+	buf := make([]byte, 0, totalCap)
+	buf = ewp.AppendUDPAddrFrame(buf, c.udpGlobalID, ewp.UDPStatusKeep, targetAddr, data)
+	return c.Write(buf)
 }
 
 // ReadUDP reads and decodes an EWP-framed or Trojan-framed UDP response packet

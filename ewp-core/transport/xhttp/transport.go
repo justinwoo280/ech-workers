@@ -335,7 +335,7 @@ func (t *Transport) createHTTPClient(host, port string) (*http.Client, error) {
 	target := net.JoinHostPort(host, port)
 	if resolvedIP != "" {
 		target = net.JoinHostPort(resolvedIP, port)
-		log.Printf("[XHTTP] Connecting to: %s (SNI: %s)", target, serverName)
+		log.V("[XHTTP] Connecting to: %s (SNI: %s)", target, serverName)
 	}
 
 	// HTTP/2 Transport 配置 - 参考 Xray-core ChromeH2KeepAlivePeriod
