@@ -37,6 +37,13 @@ func (w *gvisorUDPWriter) WriteTo(p []byte, src netip.AddrPort, dst netip.AddrPo
 	return w.stack.WriteUDP(p, src, dst)
 }
 
+func (w *gvisorUDPWriter) InjectUDP(p []byte, src netip.AddrPort, dst netip.AddrPort) error {
+	if w.stack == nil {
+		return fmt.Errorf("stack is nil")
+	}
+	return w.stack.InjectUDP(p, src, dst)
+}
+
 func (w *gvisorUDPWriter) ReleaseConn(src netip.AddrPort, dst netip.AddrPort) {
 	if w.stack != nil {
 		w.stack.ReleaseWriteConn(src, dst)
@@ -302,15 +309,6 @@ func (vm *vpnManager) Start(tunFD int, config *VPNConfig) error {
 	fakeIPPool := dns.NewFakeIPPool()
 	vm.tunHandler.SetFakeIPPool(fakeIPPool)
 	log.Printf("[VPNManager] FakeIP DNS enabled")
-
-	// Wire tunnel DNS resolver as fallback
-	dnsResolver, dnsErr := dns.NewTunnelDNSResolver(vm.transport, dns.TunnelDNSConfig{})
-	if dnsErr != nil {
-		log.Printf("[VPNManager] Warning: tunnel DNS resolver init failed: %v (FakeIP handles DNS)", dnsErr)
-	} else {
-		vm.tunHandler.SetDNSResolver(dnsResolver)
-		log.Printf("[VPNManager] Tunnel DNS resolver ready as fallback")
-	}
 
 	// 6. 创建 TUN 设备 (Android FileDescriptor)
 	log.Printf("[VPNManager] Creating TUN device from FD=%d, MTU=%d", tunFD, vm.tunMTU)

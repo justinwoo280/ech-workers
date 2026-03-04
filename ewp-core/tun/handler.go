@@ -27,14 +27,14 @@ type udpSession struct {
 // UDPWriter allows the handler to write responses back to the TUN virtual device
 type UDPWriter interface {
 	WriteTo(p []byte, src netip.AddrPort, dst netip.AddrPort) error
+	InjectUDP(p []byte, src netip.AddrPort, dst netip.AddrPort) error
 	ReleaseConn(src netip.AddrPort, dst netip.AddrPort)
 }
 
 type Handler struct {
-	transport   transport.Transport
-	ctx         context.Context
-	dnsResolver *dns.TunnelDNSResolver
-	fakeIPPool  *dns.FakeIPPool
+	transport  transport.Transport
+	ctx        context.Context
+	fakeIPPool *dns.FakeIPPool
 
 	udpWriter   UDPWriter
 	udpSessions sync.Map // map[netip.AddrPort]*udpSession
@@ -51,11 +51,6 @@ func NewHandler(ctx context.Context, trans transport.Transport, udpWriter UDPWri
 	go h.cleanupUDPSessions()
 
 	return h
-}
-
-// SetDNSResolver sets the tunnel DNS resolver for handling DNS queries (port 53).
-func (h *Handler) SetDNSResolver(resolver *dns.TunnelDNSResolver) {
-	h.dnsResolver = resolver
 }
 
 // SetFakeIPPool sets the FakeIP pool for instant DNS responses.
@@ -145,17 +140,10 @@ func (h *Handler) HandleTCP(conn *gonet.TCPConn) {
 }
 
 func (h *Handler) HandleUDP(payload []byte, src netip.AddrPort, dst netip.AddrPort) {
-	// DNS interception: use FakeIP for instant response, or fall back to DoH resolver
-	if dst.Port() == 53 {
-		if h.fakeIPPool != nil {
-			h.handleDNSFakeIP(payload, src, dst)
-			return
-		}
-		if h.dnsResolver != nil {
-			log.V("[TUN DNS] Intercepted DNS query: %s -> %s", src, dst)
-			h.handleDNS(payload, src, dst)
-			return
-		}
+	// DNS interception: use FakeIP for instant response
+	if dst.Port() == 53 && h.fakeIPPool != nil {
+		h.handleDNSFakeIP(payload, src, dst)
+		return
 	}
 
 	// Reverse-lookup fake IP to domain for UDP endpoint
@@ -292,36 +280,7 @@ func (h *Handler) cleanupUDPSessions() {
 	}
 }
 
-func (h *Handler) handleDNS(query []byte, src netip.AddrPort, dst netip.AddrPort) {
-	if len(query) < 12 {
-		log.V("[TUN DNS] Query too short (%d bytes), ignoring", len(query))
-		return
-	}
 
-	go func(q []byte, tunClient netip.AddrPort, dnsServer netip.AddrPort) {
-		response, err := h.dnsResolver.QueryRaw(h.ctx, q)
-		if err != nil {
-			log.Printf("[TUN DNS] Resolution failed: %v", err)
-			return
-		}
-
-		if len(response) == 0 {
-			log.Printf("[TUN DNS] Empty response")
-			return
-		}
-
-		// Inject DNS reply into gVisor:
-		//   src = dnsServer  (packet appears to come FROM the DNS server)
-		//   dst = tunClient  (packet is delivered TO the TUN client app)
-		if h.udpWriter != nil && h.ctx.Err() == nil {
-			if err := h.udpWriter.WriteTo(response, dnsServer, tunClient); err != nil {
-				log.V("[TUN DNS] Failed to write response: %v", err)
-			} else {
-				log.V("[TUN DNS] Resolved: %d bytes", len(response))
-			}
-		}
-	}(query, src, dst)
-}
 
 // handleDNSFakeIP intercepts a DNS query and returns a fake IP instantly.
 // No tunnel connection is needed — pure memory operation, < 1ms response.
@@ -348,10 +307,10 @@ func (h *Handler) handleDNSFakeIP(query []byte, src netip.AddrPort, dst netip.Ad
 		return
 	}
 
-	// Write response back to TUN (src=DNS server, dst=querying app)
+	// Inject response directly into TUN (bypasses gVisor transport to avoid port conflict)
 	if h.udpWriter != nil && h.ctx.Err() == nil {
-		if err := h.udpWriter.WriteTo(response, dst, src); err != nil {
-			log.Printf("[TUN DNS] FakeIP: write response failed: %v", err)
+		if err := h.udpWriter.InjectUDP(response, dst, src); err != nil {
+			log.Printf("[TUN DNS] FakeIP: inject response failed: %v", err)
 		} else {
 			log.Printf("[TUN DNS] FakeIP: %s -> %s", domain, fakeIPv4)
 		}
