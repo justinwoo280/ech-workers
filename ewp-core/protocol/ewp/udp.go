@@ -118,7 +118,7 @@ func EncodeUDPPacket(pkt *UDPPacket) ([]byte, error) {
 	return out, nil
 }
 
-// EncodeUDPAddrPacket 编码 UDP 包为字节流 (零堆分配 netip.AddrPort 版本)
+// EncodeUDPAddrPacket 编码 UDP 包为字节流
 func EncodeUDPAddrPacket(pkt *UDPPacketAddr) ([]byte, error) {
 	addrLen := 0
 	addrType := byte(0)
@@ -429,6 +429,52 @@ func EncodeUDPAddrKeepPacket(globalID [8]byte, target netip.AddrPort, payload []
 		Payload:  payload,
 	}
 	return EncodeUDPAddrPacket(pkt)
+}
+
+// AppendUDPAddrFrame appends a complete EWP UDP frame to buf (zero-allocation hot path).
+// This avoids the make([]byte) in EncodeUDPAddrPacket by writing directly to the caller's buffer.
+func AppendUDPAddrFrame(buf []byte, globalID [8]byte, status byte, target netip.AddrPort, payload []byte) []byte {
+	addrLen := 0
+	if target.IsValid() {
+		if target.Addr().Is4() {
+			addrLen = 7
+		} else {
+			addrLen = 19
+		}
+	}
+
+	payloadLen := len(payload)
+	frameLen := 8 + 1 + 1 + addrLen + 2 + payloadLen
+
+	// Append FrameLen (2 bytes)
+	buf = append(buf, byte(frameLen>>8), byte(frameLen))
+	// Append GlobalID (8 bytes)
+	buf = append(buf, globalID[:]...)
+	// Append Status (1 byte)
+	buf = append(buf, status)
+	// Append AddrLen (1 byte)
+	buf = append(buf, byte(addrLen))
+
+	// Append Address
+	if addrLen > 0 {
+		if target.Addr().Is4() {
+			buf = append(buf, AddressTypeIPv4)
+			ip4 := target.Addr().As4()
+			buf = append(buf, ip4[:]...)
+		} else {
+			buf = append(buf, AddressTypeIPv6)
+			ip6 := target.Addr().As16()
+			buf = append(buf, ip6[:]...)
+		}
+		buf = append(buf, byte(target.Port()>>8), byte(target.Port()))
+	}
+
+	// Append PayloadLen (2 bytes) + Payload
+	buf = append(buf, byte(payloadLen>>8), byte(payloadLen))
+	if payloadLen > 0 {
+		buf = append(buf, payload...)
+	}
+	return buf
 }
 
 // DecodeUDPPayload 从 EWP UDP 帧字节中提取 payload (客户端收到服务端响应时使用)

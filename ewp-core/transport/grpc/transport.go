@@ -167,9 +167,9 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 		if t.sni != "" {
 			effectiveSNI = t.sni
 		}
-		log.Printf("[gRPC] Connecting to: %s (SNI: %s)", addr, effectiveSNI)
+		log.V("[gRPC] Connecting to: %s (SNI: %s)", addr, effectiveSNI)
 	} else {
-		log.Printf("[gRPC] Connecting to: %s", addr)
+		log.V("[gRPC] Connecting to: %s", addr)
 	}
 
 	conn, err := t.getOrCreateConn(parsed.Host, t.sni, addr)

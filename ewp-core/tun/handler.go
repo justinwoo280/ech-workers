@@ -61,7 +61,7 @@ func (h *Handler) HandleTCP(conn *gonet.TCPConn) {
 	srcAddr := conn.RemoteAddr().(*net.TCPAddr)
 
 	target := dstAddr.String()
-	log.Printf("[TUN TCP] New connection: %s -> %s", srcAddr, target)
+	log.V("[TUN TCP] New connection: %s -> %s", srcAddr, target)
 
 	tunnelConn, err := h.transport.Dial()
 	if err != nil {
@@ -80,7 +80,7 @@ func (h *Handler) HandleTCP(conn *gonet.TCPConn) {
 		return
 	}
 
-	log.Printf("[TUN TCP] Connected: %s", target)
+	log.V("[TUN TCP] Connected: %s", target)
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -120,7 +120,7 @@ func (h *Handler) HandleTCP(conn *gonet.TCPConn) {
 	}()
 
 	wg.Wait()
-	log.Printf("[TUN TCP] Disconnected: %s", target)
+	log.V("[TUN TCP] Disconnected: %s", target)
 }
 
 func (h *Handler) HandleUDP(payload []byte, src netip.AddrPort, dst netip.AddrPort) {
@@ -132,16 +132,15 @@ func (h *Handler) HandleUDP(payload []byte, src netip.AddrPort, dst netip.AddrPo
 	}
 
 	// Get or Create UDP tunnel session for the source IP:Port (NAT binding)
-	srcKey := src.String()
-
-	val, ok := h.udpSessions.Load(srcKey)
+	// Use netip.AddrPort directly as map key (comparable value type, zero allocation)
+	val, ok := h.udpSessions.Load(src)
 	var session *udpSession
 
 	if !ok {
 		// Create a new tunnel connection for this local UDP port
 		tunnelConn, err := h.transport.Dial()
 		if err != nil {
-			log.Printf("[TUN UDP] Tunnel dial failed for %s: %v", srcKey, err)
+			log.Printf("[TUN UDP] Tunnel dial failed for %s: %v", src, err)
 			return
 		}
 
@@ -151,13 +150,13 @@ func (h *Handler) HandleUDP(payload []byte, src netip.AddrPort, dst netip.AddrPo
 		}
 		session.lastActive.Store(time.Now().UnixNano())
 
-		actual, loaded := h.udpSessions.LoadOrStore(srcKey, session)
+		actual, loaded := h.udpSessions.LoadOrStore(src, session)
 		if loaded {
 			// Another goroutine beat us to it, close the one we just made
 			tunnelConn.Close()
 			session = actual.(*udpSession)
 		} else {
-			log.V("[TUN UDP] New session binding: %s -> %s", srcKey, dst)
+			log.V("[TUN UDP] New session binding: %s -> %s", src, dst)
 
 			// We only `ConnectUDP` once per pseudo-socket to trick Trojan
 			// into maintaining a pseudo-socket. The destination passed here
@@ -167,11 +166,11 @@ func (h *Handler) HandleUDP(payload []byte, src netip.AddrPort, dst netip.AddrPo
 			if err := tunnelConn.ConnectUDP(transport.Endpoint{Addr: dst}, nil); err != nil {
 				log.Printf("[TUN UDP] ConnectUDP failed: %v", err)
 				tunnelConn.Close()
-				h.udpSessions.Delete(srcKey)
+				h.udpSessions.Delete(src)
 				return
 			}
 
-			go h.udpReadLoop(srcKey, session, src)
+			go h.udpReadLoop(src, session)
 		}
 	} else {
 		session = val.(*udpSession)
@@ -186,8 +185,8 @@ func (h *Handler) HandleUDP(payload []byte, src netip.AddrPort, dst netip.AddrPo
 }
 
 // udpReadLoop continuously reads UDP responses from the proxy tunnel and writes them back to the TUN Stack.
-func (h *Handler) udpReadLoop(srcKey string, session *udpSession, tunClientSrc netip.AddrPort) {
-	defer h.udpSessions.Delete(srcKey)
+func (h *Handler) udpReadLoop(tunClientSrc netip.AddrPort, session *udpSession) {
+	defer h.udpSessions.Delete(tunClientSrc)
 	defer session.tunnelConn.Close()
 
 	// Eagerly release the cached write-side conn when the session ends.
@@ -204,7 +203,7 @@ func (h *Handler) udpReadLoop(srcKey string, session *udpSession, tunClientSrc n
 	for {
 		n, remoteAddr, err := session.tunnelConn.ReadUDPFrom(buf)
 		if err != nil {
-			log.V("[TUN UDP] Session read loop closed for %s: %v", srcKey, err)
+			log.V("[TUN UDP] Session read loop closed for %s: %v", tunClientSrc, err)
 			return
 		}
 
@@ -225,7 +224,7 @@ func (h *Handler) udpReadLoop(srcKey string, session *udpSession, tunClientSrc n
 				log.V("[TUN UDP] Write to TUN failed: %v", err)
 			}
 		} else {
-			log.V("[TUN UDP] Dropping reply: actualRemote not valid for session %s", srcKey)
+			log.V("[TUN UDP] Dropping reply: actualRemote not valid for session %s", tunClientSrc)
 		}
 	}
 }

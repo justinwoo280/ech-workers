@@ -132,7 +132,7 @@ func (t *Transport) dial() (transport.TunnelConn, error) {
 	if resolvedIP != "" {
 		connectAddr = net.JoinHostPort(resolvedIP, parsed.Port)
 	}
-	log.Printf("[WebSocket] Connecting to: %s (SNI: %s)", connectAddr, serverName)
+	log.V("[WebSocket] Connecting to: %s (SNI: %s)", connectAddr, serverName)
 
 	tlsConfig, err := commontls.NewClient(commontls.ClientOptions{
 		ServerName: serverName,
@@ -161,7 +161,7 @@ func (t *Transport) dial() (transport.TunnelConn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("TCP dial: %w", err)
 	}
-	log.Printf("[WebSocket] TCP connected: %s -> %s", rawConn.LocalAddr(), rawConn.RemoteAddr())
+	log.V("[WebSocket] TCP connected: %s -> %s", rawConn.LocalAddr(), rawConn.RemoteAddr())
 
 	tlsConn := tls.Client(rawConn, stdConfig)
 	if deadline, ok := dialCtx.Deadline(); ok {
@@ -172,7 +172,7 @@ func (t *Transport) dial() (transport.TunnelConn, error) {
 		return nil, fmt.Errorf("TLS handshake: %w", err)
 	}
 	tlsConn.SetDeadline(time.Time{})
-	log.Printf("[WebSocket] TLS connected: %s (proto: %s)", connectAddr, tlsConn.ConnectionState().NegotiatedProtocol)
+	log.V("[WebSocket] TLS connected: %s (proto: %s)", connectAddr, tlsConn.ConnectionState().NegotiatedProtocol)
 
 	wsURL := fmt.Sprintf("wss://%s:%s%s", httpHost, parsed.Port, t.path)
 
@@ -200,7 +200,7 @@ func (t *Transport) dial() (transport.TunnelConn, error) {
 	c.socket = socket
 	go socket.ReadLoop()
 
-	log.Printf("[WebSocket] Connected to %s", wsURL)
+	log.V("[WebSocket] Connected to %s", wsURL)
 	return c, nil
 }
 
