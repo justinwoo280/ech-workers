@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -24,8 +23,10 @@ import (
 // Architecture:
 //   - A persistent tunnel+TLS connection is maintained to the DoH server
 //   - HTTP/1.1 keep-alive is used for connection reuse (subsequent queries ~50ms)
+//   - Concurrent identical queries are deduplicated (singleflight pattern)
+//   - HTTP requests are serialized through a mutex (HTTP/1.1 limitation)
+//   - Results are cached with extended TTL (proxy handles real resolution)
 //   - Auto-reconnect on connection loss
-//   - Results are cached to avoid redundant queries
 type TunnelDNSResolver struct {
 	transport transport.Transport
 	dohServer string // e.g., "https://dns.google/dns-query"
@@ -34,17 +35,31 @@ type TunnelDNSResolver struct {
 	timeout   time.Duration
 
 	// Persistent connection management
-	mu         sync.Mutex
+	connMu     sync.Mutex
 	httpClient *http.Client         // reusable HTTP client with keep-alive
 	tunnelConn transport.TunnelConn // underlying tunnel connection
 	netConn    net.Conn             // TLS-wrapped connection
 	connected  bool
+
+	// Query serialization (HTTP/1.1 = one request at a time per connection)
+	queryMu sync.Mutex
+
+	// Inflight deduplication: identical concurrent queries share one HTTP request
+	inflight sync.Map // cacheKey → *inflightQuery
 
 	// Pre-parsed URL components (avoid re-parsing on every query)
 	targetHost string
 	targetPort string
 	target     string // host:port for tunnel CONNECT
 	useHTTPS   bool
+}
+
+// inflightQuery represents a DNS query currently being resolved.
+// Multiple goroutines waiting for the same query share this object.
+type inflightQuery struct {
+	done     chan struct{} // closed when the query completes
+	response []byte
+	err      error
 }
 
 type cachedDNSResult struct {
@@ -57,7 +72,7 @@ type TunnelDNSConfig struct {
 	// DoH server URL (default: "https://dns.google/dns-query")
 	DoHServer string
 
-	// Cache TTL (default: 5 minutes)
+	// Cache TTL (default: 30 minutes — long because the proxy resolves on the server side)
 	CacheTTL time.Duration
 
 	// Query timeout (default: 5 seconds)
@@ -79,7 +94,7 @@ func NewTunnelDNSResolver(trans transport.Transport, config TunnelDNSConfig) (*T
 
 	cacheTTL := config.CacheTTL
 	if cacheTTL == 0 {
-		cacheTTL = 5 * time.Minute
+		cacheTTL = 30 * time.Minute
 	}
 
 	timeout := config.Timeout
@@ -114,7 +129,7 @@ func NewTunnelDNSResolver(trans transport.Transport, config TunnelDNSConfig) (*T
 		useHTTPS:   u.Scheme == "https",
 	}
 
-	log.Printf("[TunnelDNS] Initialized: DoH=%s, timeout=%s", dohServer, timeout)
+	log.Printf("[TunnelDNS] Initialized: DoH=%s, cacheTTL=%s, timeout=%s", dohServer, cacheTTL, timeout)
 	return resolver, nil
 }
 
@@ -125,20 +140,21 @@ func (r *TunnelDNSResolver) DoHServer() string {
 
 // QueryRaw performs a raw DNS query through the proxy tunnel using DoH (RFC 8484).
 // Thread-safe: can be called concurrently from multiple goroutines.
+// Identical concurrent queries are automatically deduplicated.
 func (r *TunnelDNSResolver) QueryRaw(ctx context.Context, dnsQuery []byte) ([]byte, error) {
 	if len(dnsQuery) < 12 {
 		return nil, fmt.Errorf("DNS query too short: %d bytes", len(dnsQuery))
 	}
 
-	// Check cache first (no connection needed)
+	// 1. Check cache first (instant, no connection needed)
 	cacheKey := dnsCacheKey(dnsQuery)
 	if cached, ok := r.cache.Load(cacheKey); ok {
 		result := cached.(*cachedDNSResult)
 		if time.Now().Before(result.expiresAt) {
 			log.V("[TunnelDNS] Cache hit")
-			// Copy the cached response and update the transaction ID
 			resp := make([]byte, len(result.response))
 			copy(resp, result.response)
+			// Patch transaction ID from querier's original packet
 			resp[0] = dnsQuery[0]
 			resp[1] = dnsQuery[1]
 			return resp, nil
@@ -146,41 +162,94 @@ func (r *TunnelDNSResolver) QueryRaw(ctx context.Context, dnsQuery []byte) ([]by
 		r.cache.Delete(cacheKey)
 	}
 
-	// Apply timeout
+	// 2. Inflight deduplication: if same query is already in-flight, wait for it
+	if existing, ok := r.inflight.Load(cacheKey); ok {
+		q := existing.(*inflightQuery)
+		select {
+		case <-q.done:
+			if q.err != nil {
+				return nil, q.err
+			}
+			resp := make([]byte, len(q.response))
+			copy(resp, q.response)
+			resp[0] = dnsQuery[0]
+			resp[1] = dnsQuery[1]
+			return resp, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	// 3. We are the first goroutine for this query — register inflight entry
+	q := &inflightQuery{done: make(chan struct{})}
+	if existing, loaded := r.inflight.LoadOrStore(cacheKey, q); loaded {
+		// Race: another goroutine registered between our Load and LoadOrStore
+		q = existing.(*inflightQuery)
+		select {
+		case <-q.done:
+			if q.err != nil {
+				return nil, q.err
+			}
+			resp := make([]byte, len(q.response))
+			copy(resp, q.response)
+			resp[0] = dnsQuery[0]
+			resp[1] = dnsQuery[1]
+			return resp, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	// 4. We own this inflight entry — do the actual query
+	defer func() {
+		close(q.done)
+		r.inflight.Delete(cacheKey)
+	}()
+
 	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 
-	// Perform DoH query through persistent tunnel connection
-	response, err := r.doQuery(ctx, dnsQuery)
+	response, err := r.serialQuery(ctx, dnsQuery)
 	if err != nil {
-		// On failure, tear down connection so next query will reconnect
-		r.closeConn()
 		// Retry once with a fresh connection
-		response, err = r.doQuery(ctx, dnsQuery)
+		r.closeConn()
+		response, err = r.serialQuery(ctx, dnsQuery)
 		if err != nil {
 			r.closeConn()
+			q.err = err
 			return nil, err
 		}
 	}
 
-	// Cache the response
+	// Cache the result
 	r.cache.Store(cacheKey, &cachedDNSResult{
 		response:  response,
 		expiresAt: time.Now().Add(r.cacheTTL),
 	})
 
-	log.V("[TunnelDNS] ✅ DoH query successful: %d bytes", len(response))
-	return response, nil
+	q.response = response
+	log.V("[TunnelDNS] ✅ Resolved: %d bytes", len(response))
+
+	// Return a copy with the querier's transaction ID
+	resp := make([]byte, len(response))
+	copy(resp, response)
+	resp[0] = dnsQuery[0]
+	resp[1] = dnsQuery[1]
+	return resp, nil
 }
 
-// doQuery performs a single DoH HTTP POST using the persistent connection.
-func (r *TunnelDNSResolver) doQuery(ctx context.Context, dnsQuery []byte) ([]byte, error) {
+// serialQuery acquires the query mutex and sends a single DoH request.
+// HTTP/1.1 on a single connection only supports one request at a time,
+// so this mutex prevents concurrent HTTP requests from colliding.
+func (r *TunnelDNSResolver) serialQuery(ctx context.Context, dnsQuery []byte) ([]byte, error) {
+	r.queryMu.Lock()
+	defer r.queryMu.Unlock()
+
 	client, err := r.ensureConnected(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	// Build DoH POST request
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.dohServer, bytes.NewReader(dnsQuery))
 	if err != nil {
 		return nil, fmt.Errorf("create HTTP request failed: %w", err)
@@ -188,7 +257,6 @@ func (r *TunnelDNSResolver) doQuery(ctx context.Context, dnsQuery []byte) ([]byt
 	req.Header.Set("Accept", "application/dns-message")
 	req.Header.Set("Content-Type", "application/dns-message")
 
-	// Execute DoH request (reuses persistent connection via keep-alive)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("HTTP DoH request failed: %w", err)
@@ -196,7 +264,6 @@ func (r *TunnelDNSResolver) doQuery(ctx context.Context, dnsQuery []byte) ([]byt
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		// Drain body to allow connection reuse
 		io.Copy(io.Discard, resp.Body)
 		return nil, fmt.Errorf("DoH HTTP error: %s", resp.Status)
 	}
@@ -214,10 +281,9 @@ func (r *TunnelDNSResolver) doQuery(ctx context.Context, dnsQuery []byte) ([]byt
 }
 
 // ensureConnected returns a reusable HTTP client backed by a persistent tunnel.
-// Creates one on first call; subsequent calls return the same client.
 func (r *TunnelDNSResolver) ensureConnected(ctx context.Context) (*http.Client, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.connMu.Lock()
+	defer r.connMu.Unlock()
 
 	if r.connected && r.httpClient != nil {
 		return r.httpClient, nil
@@ -243,8 +309,7 @@ func (r *TunnelDNSResolver) ensureConnected(ctx context.Context) (*http.Client, 
 			ServerName: r.targetHost,
 			// Force HTTP/1.1: Go's http.Transport does NOT support HTTP/2 when
 			// using custom DialTLSContext. Without this, dns.google negotiates h2
-			// via ALPN, then immediately closes the connection because our client
-			// sends HTTP/1.1 framing over an h2-negotiated connection → EOF.
+			// via ALPN → protocol mismatch → EOF.
 			NextProtos: []string{"http/1.1"},
 		}
 		tlsConn := tls.Client(netConn, tlsConfig)
@@ -255,33 +320,29 @@ func (r *TunnelDNSResolver) ensureConnected(ctx context.Context) (*http.Client, 
 		netConn = tlsConn
 	}
 
-	// Create HTTP client that reuses this single persistent connection.
-	// connUsed tracks whether the DialXxxContext callback has been called;
-	// the first call returns our pre-established netConn, subsequent calls
-	// mean the connection was closed and we need to signal reconnect.
-	connUsed := false
+	// Build HTTP client that reuses this single persistent connection.
+	connReady := true
 	httpTransport := &http.Transport{
-		// Keep-alive enabled (default) — connection reuse!
 		MaxIdleConns:        1,
 		MaxIdleConnsPerHost: 1,
+		MaxConnsPerHost:     1,
 		IdleConnTimeout:     90 * time.Second,
 	}
 	if r.useHTTPS {
 		httpTransport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			if !connUsed {
-				connUsed = true
+			if connReady {
+				connReady = false
 				return netConn, nil
 			}
-			// Connection was recycled/closed; signal reconnect needed
-			return nil, errors.New("connection lost, reconnect required")
+			return nil, fmt.Errorf("connection lost")
 		}
 	} else {
 		httpTransport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			if !connUsed {
-				connUsed = true
+			if connReady {
+				connReady = false
 				return netConn, nil
 			}
-			return nil, errors.New("connection lost, reconnect required")
+			return nil, fmt.Errorf("connection lost")
 		}
 	}
 
@@ -299,10 +360,10 @@ func (r *TunnelDNSResolver) ensureConnected(ctx context.Context) (*http.Client, 
 	return client, nil
 }
 
-// closeConn tears down the persistent connection (called on error for reconnect).
+// closeConn tears down the persistent connection.
 func (r *TunnelDNSResolver) closeConn() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.connMu.Lock()
+	defer r.connMu.Unlock()
 
 	if r.httpClient != nil {
 		r.httpClient.CloseIdleConnections()
@@ -319,14 +380,12 @@ func (r *TunnelDNSResolver) closeConn() {
 	r.connected = false
 }
 
-// dnsCacheKey generates a fast cache key from a DNS query.
-// Extracts QNAME + QTYPE from the wire format (no hashing needed for typical queries).
+// dnsCacheKey returns the query body (minus 2-byte transaction ID) as the cache key.
+// Collision-free for distinct queries without any hashing overhead.
 func dnsCacheKey(query []byte) string {
 	if len(query) < 12 {
 		return string(query)
 	}
-	// Use the query body (everything after the 2-byte transaction ID) as key.
-	// This avoids SHA-256 overhead while being collision-free for distinct queries.
 	return string(query[2:])
 }
 
@@ -343,7 +402,6 @@ func (r *TunnelDNSResolver) Close() error {
 }
 
 // tunnelConnAdapter wraps a transport.TunnelConn to implement net.Conn
-// This is required to pass the tunnel connection to tls.Client and http.Transport
 type tunnelConnAdapter struct {
 	transport.TunnelConn
 }
