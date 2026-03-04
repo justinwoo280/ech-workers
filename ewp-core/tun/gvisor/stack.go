@@ -244,6 +244,69 @@ func (s *Stack) ReleaseWriteConn(src, dst netip.AddrPort) {
 	}
 }
 
+// InjectUDP writes a raw UDP packet directly into the TUN device, completely
+// bypassing gVisor's transport layer. This avoids port conflicts when the
+// gVisor stack already has an endpoint bound on the same (src, dst) pair.
+//
+// Used primarily for FakeIP DNS responses: the DNS query arrives through
+// gVisor's UDP forwarder (which binds the ports), and we need to send a
+// response back without fighting for those same ports.
+func (s *Stack) InjectUDP(payload []byte, src netip.AddrPort, dst netip.AddrPort) error {
+	srcIP := src.Addr().Unmap()
+	dstIP := dst.Addr().Unmap()
+
+	udpLen := 8 + len(payload) // UDP header(8) + payload
+
+	if srcIP.Is4() && dstIP.Is4() {
+		// IPv4 + UDP
+		ipLen := 20 + udpLen // IPv4 header(20) + UDP
+		pkt := make([]byte, ipLen)
+
+		// IPv4 header
+		pkt[0] = 0x45 // Version=4, IHL=5 (20 bytes)
+		// pkt[1] = 0 (DSCP/ECN)
+		pkt[2] = byte(ipLen >> 8)
+		pkt[3] = byte(ipLen)
+		// pkt[4:6] = 0 (ID)
+		// pkt[6:8] = 0 (Flags/FragOff)
+		pkt[8] = 64 // TTL
+		pkt[9] = 17 // Protocol = UDP
+
+		srcB := srcIP.As4()
+		dstB := dstIP.As4()
+		copy(pkt[12:16], srcB[:])
+		copy(pkt[16:20], dstB[:])
+
+		// IPv4 header checksum
+		var csum uint32
+		for i := 0; i < 20; i += 2 {
+			csum += uint32(pkt[i])<<8 | uint32(pkt[i+1])
+		}
+		for csum > 0xffff {
+			csum = (csum & 0xffff) + (csum >> 16)
+		}
+		pkt[10] = byte(^csum >> 8)
+		pkt[11] = byte(^csum)
+
+		// UDP header
+		pkt[20] = byte(src.Port() >> 8)
+		pkt[21] = byte(src.Port())
+		pkt[22] = byte(dst.Port() >> 8)
+		pkt[23] = byte(dst.Port())
+		pkt[24] = byte(udpLen >> 8)
+		pkt[25] = byte(udpLen)
+		// pkt[26:28] = 0 (UDP checksum optional for IPv4)
+
+		copy(pkt[28:], payload)
+
+		_, err := s.tunDev.Write([][]byte{pkt}, 0)
+		return err
+	}
+
+	// For IPv6, fall back to WriteUDP (shouldn't hit port conflict for AAAA)
+	return s.WriteUDP(payload, src, dst)
+}
+
 func (s *Stack) dialUDP(src, dst netip.AddrPort) (*gonet.UDPConn, error) {
 	var netProto tcpip.NetworkProtocolNumber
 	var laddr, raddr tcpip.FullAddress

@@ -30,6 +30,13 @@ func (w *gvisorUDPWriter) WriteTo(p []byte, src netip.AddrPort, dst netip.AddrPo
 	return w.stack.WriteUDP(p, src, dst)
 }
 
+func (w *gvisorUDPWriter) InjectUDP(p []byte, src netip.AddrPort, dst netip.AddrPort) error {
+	if w.stack == nil {
+		return fmt.Errorf("stack is nil")
+	}
+	return w.stack.InjectUDP(p, src, dst)
+}
+
 func (w *gvisorUDPWriter) ReleaseConn(src netip.AddrPort, dst netip.AddrPort) {
 	if w.stack != nil {
 		w.stack.ReleaseWriteConn(src, dst)
@@ -69,17 +76,6 @@ func New(cfg *Config) (*TUN, error) {
 	fakeIPPool := dns.NewFakeIPPool()
 	handler.SetFakeIPPool(fakeIPPool)
 	log.Printf("[TUN] FakeIP DNS enabled (IPv4: 198.18.0.0/15, IPv6: fc00::/112)")
-
-	// Keep DoH resolver as optional fallback (not used when FakeIP is active)
-	dnsResolver, dnsErr := dns.NewTunnelDNSResolver(cfg.Transport, dns.TunnelDNSConfig{
-		DoHServer: cfg.TunnelDoHServer,
-	})
-	if dnsErr != nil {
-		log.Printf("[TUN] Warning: tunnel DNS resolver init failed: %v (FakeIP will handle all DNS)", dnsErr)
-	} else {
-		handler.SetDNSResolver(dnsResolver)
-		log.Printf("[TUN] Tunnel DNS resolver ready as fallback (DoH server: %s)", dnsResolver.DoHServer())
-	}
 
 	mtu := uint32(cfg.MTU)
 	if mtu == 0 {
