@@ -9,96 +9,101 @@ on:
 
 jobs:
   build-core-client:
-    name: Build EWP-Core Client
+    name: Build Client (${{ matrix.goos }}/${{ matrix.goarch }})
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: ewp-core
-    
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: windows, goarch: amd64, suffix: .exe }
+          - { goos: windows, goarch: arm64, suffix: .exe }
+          - { goos: linux,   goarch: amd64, suffix: ""   }
+          - { goos: linux,   goarch: arm64, suffix: ""   }
+          - { goos: darwin,  goarch: amd64, suffix: ""   }
+          - { goos: darwin,  goarch: arm64, suffix: ""   }
+          - { goos: freebsd, goarch: amd64, suffix: ""   }
+          - { goos: freebsd, goarch: arm64, suffix: ""   }
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.25.6'
-      
-      - name: Build Client - Windows amd64
+          cache: true
+
+      - name: Build
         run: |
           cd cmd/client
-          GOOS=windows GOARCH=amd64 go build -tags with_gvisor -ldflags="-s -w" -o ../../ewp-core-client-windows-amd64.exe .
-      
-      - name: Build Client - Windows arm64
-        run: |
-          cd cmd/client
-          GOOS=windows GOARCH=arm64 go build -tags with_gvisor -ldflags="-s -w" -o ../../ewp-core-client-windows-arm64.exe .
-      
-      - name: Build Client - Linux amd64
-        run: |
-          cd cmd/client
-          GOOS=linux GOARCH=amd64 go build -tags with_gvisor -ldflags="-s -w" -o ../../ewp-core-client-linux-amd64 .
-      
-      - name: Build Client - Linux arm64
-        run: |
-          cd cmd/client
-          GOOS=linux GOARCH=arm64 go build -tags with_gvisor -ldflags="-s -w" -o ../../ewp-core-client-linux-arm64 .
-      
-      - name: Upload Client Artifacts
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+            go build -ldflags="-s -w" \
+            -o ../../ewp-core-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }} .
+
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ewp-core-client-binaries
-          path: ewp-core/ewp-core-client-*
+          name: client-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: ewp-core/ewp-core-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}
 
   build-core-server:
-    name: Build EWP-Core Server
+    name: Build Server (${{ matrix.goos }}/${{ matrix.goarch }})
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: ewp-core
-    
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux,   goarch: amd64, suffix: ""   }
+          - { goos: linux,   goarch: arm64, suffix: ""   }
+          - { goos: windows, goarch: amd64, suffix: .exe }
+          - { goos: windows, goarch: arm64, suffix: .exe }
+          - { goos: darwin,  goarch: amd64, suffix: ""   }
+          - { goos: darwin,  goarch: arm64, suffix: ""   }
+          - { goos: freebsd, goarch: amd64, suffix: ""   }
+          - { goos: freebsd, goarch: arm64, suffix: ""   }
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.25.6'
-      
-      - name: Build Server - Linux amd64
+          cache: true
+
+      - name: Build
         run: |
           cd cmd/server
-          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o ../../ewp-core-server-linux-amd64 .
-      
-      - name: Build Server - Linux arm64
-        run: |
-          cd cmd/server
-          GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o ../../ewp-core-server-linux-arm64 .
-      
-      - name: Build Server - Windows amd64
-        run: |
-          cd cmd/server
-          GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o ../../ewp-core-server-windows-amd64.exe .
-      
-      - name: Upload Server Artifacts
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+            go build -ldflags="-s -w" \
+            -o ../../ewp-core-server-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }} .
+
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ewp-core-server-binaries
-          path: ewp-core/ewp-core-server-*
+          name: server-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: ewp-core/ewp-core-server-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}
 
   build-gui-windows:
     name: Build EWP-GUI (Windows)
     needs: build-core-client
     runs-on: windows-latest
-    
+
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Download Core Client Binaries
+
+      - name: Download Core Client - Windows amd64
         uses: actions/download-artifact@v4
         with:
-          name: ewp-core-client-binaries
+          name: client-windows-amd64
           path: ./core-binaries
-      
+
       - name: Install Qt6
         uses: jurplel/install-qt-action@v3
         with:
@@ -107,10 +112,10 @@ jobs:
           target: 'desktop'
           arch: 'win64_msvc2019_64'
           cache: true
-      
+
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
-      
+
       - name: Build GUI - Windows x64
         run: |
           cd ewp-gui
@@ -118,20 +123,19 @@ jobs:
           cd build-x64
           cmake .. -DCMAKE_BUILD_TYPE=Release -G "NMake Makefiles"
           nmake
-      
+
       - name: Deploy Qt Dependencies
         run: |
           cd ewp-gui\build-x64
           windeployqt --release --no-translations --no-system-d3d-compiler --no-opengl-sw EWP-GUI.exe
-      
+
       - name: Package GUI with Core - Windows x64
         run: |
           mkdir ewp-gui-windows-amd64
           xcopy /E /I ewp-gui\build-x64 ewp-gui-windows-amd64
           copy core-binaries\ewp-core-client-windows-amd64.exe ewp-gui-windows-amd64\ewp-core.exe
           copy ewp-core\wintun.dll ewp-gui-windows-amd64\
-          echo Creating package...
-      
+
       - name: Upload GUI Windows Artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -142,16 +146,16 @@ jobs:
     name: Build EWP-GUI (Linux)
     needs: build-core-client
     runs-on: ubuntu-latest
-    
+
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Download Core Client Binaries
+
+      - name: Download Core Client - Linux amd64
         uses: actions/download-artifact@v4
         with:
-          name: ewp-core-client-binaries
+          name: client-linux-amd64
           path: ./core-binaries
-      
+
       - name: Install Qt6
         uses: jurplel/install-qt-action@v3
         with:
@@ -159,7 +163,7 @@ jobs:
           host: 'linux'
           target: 'desktop'
           cache: true
-      
+
       - name: Build GUI - Linux x64
         run: |
           cd ewp-gui
@@ -167,25 +171,19 @@ jobs:
           cd build
           cmake .. -DCMAKE_BUILD_TYPE=Release
           make -j$(nproc)
-      
+
       - name: Package GUI with Core - Linux x64
         run: |
           mkdir -p ewp-gui-linux-amd64/lib
-          
-          # Copy executable
+
           cp ewp-gui/build/EWP-GUI ewp-gui-linux-amd64/
-          
-          # Copy core
           cp core-binaries/ewp-core-client-linux-amd64 ewp-gui-linux-amd64/ewp-core
-          
-          # Copy Qt libraries
+
           ldd ewp-gui/build/EWP-GUI | grep Qt | awk '{print $3}' | xargs -I {} cp {} ewp-gui-linux-amd64/lib/
-          
-          # Copy Qt plugins
+
           mkdir -p ewp-gui-linux-amd64/plugins/platforms
           cp -r $Qt6_DIR/plugins/platforms/libqxcb.so ewp-gui-linux-amd64/plugins/platforms/ || true
-          
-          # Create launcher script
+
           cat > ewp-gui-linux-amd64/EWP-GUI.sh << 'EOF'
           #!/bin/bash
           DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -193,24 +191,23 @@ jobs:
           export QT_PLUGIN_PATH="$DIR/plugins"
           exec "$DIR/EWP-GUI" "$@"
           EOF
-          
+
           chmod +x ewp-gui-linux-amd64/EWP-GUI
           chmod +x ewp-gui-linux-amd64/EWP-GUI.sh
           chmod +x ewp-gui-linux-amd64/ewp-core
-          echo "Creating package..."
-      
+
       - name: Upload GUI Linux Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ewp-gui-linux-binaries
           path: ewp-gui-linux-amd64/
-  
+
   summary:
     name: Build Summary
     needs: [build-core-client, build-core-server, build-gui-windows, build-gui-linux]
     runs-on: ubuntu-latest
     if: always()
-    
+
     steps:
       - name: Check Build Status
         run: |
@@ -218,4 +215,4 @@ jobs:
           echo "Core Client: ${{ needs.build-core-client.result }}"
           echo "Core Server: ${{ needs.build-core-server.result }}"
           echo "GUI Windows: ${{ needs.build-gui-windows.result }}"
-          echo "GUI Linux: ${{ needs.build-gui-linux.result }}"
+          echo "GUI Linux:   ${{ needs.build-gui-linux.result }}"

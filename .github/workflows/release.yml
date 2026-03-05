@@ -18,13 +18,13 @@ permissions:
   actions: read
 
 jobs:
-  build-all:
-    name: Build All Components
+  prepare:
+    name: Validate & Tag
     runs-on: ubuntu-latest
-    
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Validate Version Tag
         run: |
           VERSION="${{ github.event.inputs.version }}"
@@ -33,7 +33,7 @@ jobs:
             exit 1
           fi
           echo "✅ Valid version: $VERSION"
-      
+
       - name: Create Git Tag
         run: |
           git config user.name "github-actions[bot]"
@@ -42,92 +42,109 @@ jobs:
           git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git "${{ github.event.inputs.version }}"
 
   build-core-client:
-    name: Build EWP-Core Client
-    needs: build-all
+    name: Build Client (${{ matrix.goos }}/${{ matrix.goarch }})
+    needs: prepare
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: ewp-core
-    
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: windows, goarch: amd64, suffix: .exe }
+          - { goos: windows, goarch: arm64, suffix: .exe }
+          - { goos: linux,   goarch: amd64, suffix: ""   }
+          - { goos: linux,   goarch: arm64, suffix: ""   }
+          - { goos: darwin,  goarch: amd64, suffix: ""   }
+          - { goos: darwin,  goarch: arm64, suffix: ""   }
+          - { goos: freebsd, goarch: amd64, suffix: ""   }
+          - { goos: freebsd, goarch: arm64, suffix: ""   }
+
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.version }}
-      
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.25.6'
-      
-      - name: Build Client - All Platforms
+          cache: true
+
+      - name: Build
         run: |
           cd cmd/client
-          
-          # Windows
-          GOOS=windows GOARCH=amd64 go build -tags with_gvisor -ldflags="-s -w -X main.Version=${{ github.event.inputs.version }}" -o ../../ewp-core-client-${{ github.event.inputs.version }}-windows-amd64.exe .
-          GOOS=windows GOARCH=arm64 go build -tags with_gvisor -ldflags="-s -w -X main.Version=${{ github.event.inputs.version }}" -o ../../ewp-core-client-${{ github.event.inputs.version }}-windows-arm64.exe .
-          
-          # Linux
-          GOOS=linux GOARCH=amd64 go build -tags with_gvisor -ldflags="-s -w -X main.Version=${{ github.event.inputs.version }}" -o ../../ewp-core-client-${{ github.event.inputs.version }}-linux-amd64 .
-          GOOS=linux GOARCH=arm64 go build -tags with_gvisor -ldflags="-s -w -X main.Version=${{ github.event.inputs.version }}" -o ../../ewp-core-client-${{ github.event.inputs.version }}-linux-arm64 .
-      
-      - name: Upload Client Artifacts
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+            go build -ldflags="-s -w -X main.Version=${{ github.event.inputs.version }}" \
+            -o ../../ewp-core-client-${{ github.event.inputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }} .
+
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ewp-core-client-release
-          path: ewp-core/ewp-core-client-*
+          name: client-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: ewp-core/ewp-core-client-${{ github.event.inputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}
 
   build-core-server:
-    name: Build EWP-Core Server
-    needs: build-all
+    name: Build Server (${{ matrix.goos }}/${{ matrix.goarch }})
+    needs: prepare
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: ewp-core
-    
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux,   goarch: amd64, suffix: ""   }
+          - { goos: linux,   goarch: arm64, suffix: ""   }
+          - { goos: windows, goarch: amd64, suffix: .exe }
+          - { goos: windows, goarch: arm64, suffix: .exe }
+          - { goos: darwin,  goarch: amd64, suffix: ""   }
+          - { goos: darwin,  goarch: arm64, suffix: ""   }
+          - { goos: freebsd, goarch: amd64, suffix: ""   }
+          - { goos: freebsd, goarch: arm64, suffix: ""   }
+
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.version }}
-      
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.25.6'
-      
-      - name: Build Server - All Platforms
+          cache: true
+
+      - name: Build
         run: |
           cd cmd/server
-          
-          # Linux (主要部署平台)
-          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X main.Version=${{ github.event.inputs.version }}" -o ../../ewp-core-server-${{ github.event.inputs.version }}-linux-amd64 .
-          GOOS=linux GOARCH=arm64 go build -ldflags="-s -w -X main.Version=${{ github.event.inputs.version }}" -o ../../ewp-core-server-${{ github.event.inputs.version }}-linux-arm64 .
-          
-          # Windows (测试用)
-          GOOS=windows GOARCH=amd64 go build -ldflags="-s -w -X main.Version=${{ github.event.inputs.version }}" -o ../../ewp-core-server-${{ github.event.inputs.version }}-windows-amd64.exe .
-      
-      - name: Upload Server Artifacts
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+            go build -ldflags="-s -w -X main.Version=${{ github.event.inputs.version }}" \
+            -o ../../ewp-core-server-${{ github.event.inputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }} .
+
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ewp-core-server-release
-          path: ewp-core/ewp-core-server-*
+          name: server-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: ewp-core/ewp-core-server-${{ github.event.inputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}
 
   build-gui-windows:
     name: Build EWP-GUI (Windows)
     needs: build-core-client
     runs-on: windows-latest
-    
+
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.version }}
-      
-      - name: Download Core Client Binaries
+
+      - name: Download Core Client - Windows amd64
         uses: actions/download-artifact@v4
         with:
-          name: ewp-core-client-release
+          name: client-windows-amd64
           path: ./core-binaries
-      
+
       - name: Install Qt6
         uses: jurplel/install-qt-action@v3
         with:
@@ -136,10 +153,10 @@ jobs:
           target: 'desktop'
           arch: 'win64_msvc2019_64'
           cache: true
-      
+
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
-      
+
       - name: Build GUI - Windows x64
         run: |
           cd ewp-gui
@@ -147,48 +164,46 @@ jobs:
           cd build
           cmake .. -DCMAKE_BUILD_TYPE=Release -G "NMake Makefiles"
           nmake
-      
+
       - name: Deploy Qt Dependencies
         run: |
           cd ewp-gui\build
           windeployqt --release --no-translations --no-system-d3d-compiler --no-opengl-sw EWP-GUI.exe
-      
+
       - name: Package GUI with Core - Windows x64
         run: |
           mkdir ewp-gui-${{ github.event.inputs.version }}-windows-amd64
           xcopy /E /I ewp-gui\build ewp-gui-${{ github.event.inputs.version }}-windows-amd64
           copy core-binaries\ewp-core-client-${{ github.event.inputs.version }}-windows-amd64.exe ewp-gui-${{ github.event.inputs.version }}-windows-amd64\ewp-core.exe
           copy ewp-core\wintun.dll ewp-gui-${{ github.event.inputs.version }}-windows-amd64\
-          echo Creating release package...
-      
+
       - name: Create Archive
         run: |
           cd ewp-gui-${{ github.event.inputs.version }}-windows-amd64
           tar -czf ../ewp-gui-${{ github.event.inputs.version }}-windows-amd64.tar.gz *
-          cd ..
-      
+
       - name: Upload GUI Windows Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ewp-gui-windows-release
+          name: gui-windows-amd64
           path: ewp-gui-${{ github.event.inputs.version }}-windows-amd64.tar.gz
 
   build-gui-linux:
     name: Build EWP-GUI (Linux)
     needs: build-core-client
     runs-on: ubuntu-latest
-    
+
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.version }}
-      
-      - name: Download Core Client Binaries
+
+      - name: Download Core Client - Linux amd64
         uses: actions/download-artifact@v4
         with:
-          name: ewp-core-client-release
+          name: client-linux-amd64
           path: ./core-binaries
-      
+
       - name: Install Qt6
         uses: jurplel/install-qt-action@v3
         with:
@@ -196,7 +211,7 @@ jobs:
           host: 'linux'
           target: 'desktop'
           cache: true
-      
+
       - name: Build GUI - Linux x64
         run: |
           cd ewp-gui
@@ -204,25 +219,19 @@ jobs:
           cd build
           cmake .. -DCMAKE_BUILD_TYPE=Release
           make -j$(nproc)
-      
+
       - name: Package GUI with Core - Linux x64
         run: |
           mkdir -p ewp-gui-${{ github.event.inputs.version }}-linux-amd64/lib
-          
-          # Copy executable
+
           cp ewp-gui/build/EWP-GUI ewp-gui-${{ github.event.inputs.version }}-linux-amd64/
-          
-          # Copy core
           cp core-binaries/ewp-core-client-${{ github.event.inputs.version }}-linux-amd64 ewp-gui-${{ github.event.inputs.version }}-linux-amd64/ewp-core
-          
-          # Copy Qt libraries
+
           ldd ewp-gui/build/EWP-GUI | grep Qt | awk '{print $3}' | xargs -I {} cp {} ewp-gui-${{ github.event.inputs.version }}-linux-amd64/lib/
-          
-          # Copy Qt plugins
+
           mkdir -p ewp-gui-${{ github.event.inputs.version }}-linux-amd64/plugins/platforms
           cp -r $Qt6_DIR/plugins/platforms/libqxcb.so ewp-gui-${{ github.event.inputs.version }}-linux-amd64/plugins/platforms/ || true
-          
-          # Create launcher script
+
           cat > ewp-gui-${{ github.event.inputs.version }}-linux-amd64/EWP-GUI.sh << 'EOF'
           #!/bin/bash
           DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -230,106 +239,111 @@ jobs:
           export QT_PLUGIN_PATH="$DIR/plugins"
           exec "$DIR/EWP-GUI" "$@"
           EOF
-          
+
           chmod +x ewp-gui-${{ github.event.inputs.version }}-linux-amd64/EWP-GUI
           chmod +x ewp-gui-${{ github.event.inputs.version }}-linux-amd64/EWP-GUI.sh
           chmod +x ewp-gui-${{ github.event.inputs.version }}-linux-amd64/ewp-core
-          echo "Creating release package..."
-      
+
       - name: Create Archive
         run: |
           tar -czf ewp-gui-${{ github.event.inputs.version }}-linux-amd64.tar.gz ewp-gui-${{ github.event.inputs.version }}-linux-amd64/
-      
+
       - name: Upload GUI Linux Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ewp-gui-linux-release
+          name: gui-linux-amd64
           path: ewp-gui-${{ github.event.inputs.version }}-linux-amd64.tar.gz
-  
+
   create-release:
     name: Create GitHub Release
     needs: [build-core-client, build-core-server, build-gui-windows, build-gui-linux]
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Download All Artifacts
         uses: actions/download-artifact@v4
         with:
           path: ./release-assets
-      
-      - name: Organize Release Files
-        run: |
-          mkdir -p ./release
-          find ./release-assets -type f -exec mv {} ./release/ \;
-          ls -lh ./release/
-      
-      - name: Generate Release Notes
-        run: |
-          cat > release-notes.md << EOF
-          # EWP-Workers ${{ github.event.inputs.version }}
-          
-          ## Components
-          
-          ### EWP-Core Client
-          - Multi-platform support (Windows, Linux, macOS)
-          - ECH (Encrypted Client Hello) support
-          - Multiple transport protocols (WebSocket, HTTP/3, gRPC, XHTTP)
-          - Vision flow control
-          - DNS over HTTPS/TLS/QUIC with fallback
-          
-          ### EWP-Core Server
-          - High-performance proxy server
-          - Support for multiple protocols
-          - Cloudflare Workers compatible
-          
-          ### EWP-GUI
-          - Cross-platform graphical interface
-          - Node management
-          - System proxy integration
-          
-          ## Download
-          
-          Choose the appropriate binary for your platform:
-          
-          **Client:**
-          - Windows: \`ewp-core-client-${{ github.event.inputs.version }}-windows-amd64.exe\`
-          - Linux: \`ewp-core-client-${{ github.event.inputs.version }}-linux-amd64\`
-          
-          **Server:**
-          - Linux: \`ewp-core-server-${{ github.event.inputs.version }}-linux-amd64\`
-          
-          **GUI (包含内核):**
-          - Windows: \`ewp-gui-${{ github.event.inputs.version }}-windows-amd64.tar.gz\`
-          - Linux: \`ewp-gui-${{ github.event.inputs.version }}-linux-amd64.tar.gz\`
-          
-          > GUI 包已包含 \`ewp-core\` 可执行文件，解压即可使用
-          
-          ## Checksums
-          
-          See \`checksums.txt\` for SHA256 checksums of all binaries.
-          EOF
-      
+          merge-multiple: true
+
       - name: Generate Checksums
         run: |
-          cd release
+          cd release-assets
           sha256sum * > checksums.txt
           cat checksums.txt
-      
+
+      - name: Generate Release Notes
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          cat > release-notes.md << EOF
+          # EWP-Workers ${VERSION}
+
+          ## Components
+
+          ### EWP-Core Client
+          - Multi-platform: Windows, Linux, macOS, FreeBSD (amd64 / arm64)
+          - ECH (Encrypted Client Hello) support
+          - Multiple transport protocols (WebSocket, HTTP/3, gRPC, XHTTP)
+          - DNS over HTTPS/TLS/QUIC with fallback
+
+          ### EWP-Core Server
+          - Multi-platform: Linux, Windows, macOS, FreeBSD (amd64 / arm64)
+          - High-performance proxy server
+          - Supports EWP and Trojan protocols
+
+          ### EWP-GUI
+          - Cross-platform graphical interface (Windows & Linux)
+          - Node management and system proxy integration
+
+          ## Downloads
+
+          **Client:**
+          | Platform | File |
+          |----------|------|
+          | Windows x64 | \`ewp-core-client-${VERSION}-windows-amd64.exe\` |
+          | Windows arm64 | \`ewp-core-client-${VERSION}-windows-arm64.exe\` |
+          | Linux x64 | \`ewp-core-client-${VERSION}-linux-amd64\` |
+          | Linux arm64 | \`ewp-core-client-${VERSION}-linux-arm64\` |
+          | macOS x64 | \`ewp-core-client-${VERSION}-darwin-amd64\` |
+          | macOS arm64 (Apple Silicon) | \`ewp-core-client-${VERSION}-darwin-arm64\` |
+          | FreeBSD x64 | \`ewp-core-client-${VERSION}-freebsd-amd64\` |
+          | FreeBSD arm64 | \`ewp-core-client-${VERSION}-freebsd-arm64\` |
+
+          **Server:**
+          | Platform | File |
+          |----------|------|
+          | Linux x64 | \`ewp-core-server-${VERSION}-linux-amd64\` |
+          | Linux arm64 | \`ewp-core-server-${VERSION}-linux-arm64\` |
+          | Windows x64 | \`ewp-core-server-${VERSION}-windows-amd64.exe\` |
+          | Windows arm64 | \`ewp-core-server-${VERSION}-windows-arm64.exe\` |
+          | macOS x64 | \`ewp-core-server-${VERSION}-darwin-amd64\` |
+          | macOS arm64 | \`ewp-core-server-${VERSION}-darwin-arm64\` |
+          | FreeBSD x64 | \`ewp-core-server-${VERSION}-freebsd-amd64\` |
+          | FreeBSD arm64 | \`ewp-core-server-${VERSION}-freebsd-arm64\` |
+
+          **GUI (内核已内置，解压即用):**
+          | Platform | File |
+          |----------|------|
+          | Windows x64 | \`ewp-gui-${VERSION}-windows-amd64.tar.gz\` |
+          | Linux x64 | \`ewp-gui-${VERSION}-linux-amd64.tar.gz\` |
+
+          See \`checksums.txt\` for SHA256 checksums.
+          EOF
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ github.event.inputs.version }}
           name: EWP-Workers ${{ github.event.inputs.version }}
           body_path: release-notes.md
-          files: release/*
+          files: |
+            release-assets/*
           draft: false
           prerelease: ${{ github.event.inputs.prerelease }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      
+
       - name: Release Summary
         run: |
           echo "✅ Release ${{ github.event.inputs.version }} created successfully!"
-          echo "📦 Artifacts uploaded:"
-          ls -1 release/ | wc -l
-          echo "files"
+          echo "📦 Artifacts uploaded: $(ls -1 release-assets/ | wc -l) files"

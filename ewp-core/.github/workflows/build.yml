@@ -7,97 +7,95 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-kernel:
-    name: Build Kernel
+  build-client:
+    name: Build Client (${{ matrix.goos }}/${{ matrix.goarch }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: windows, goarch: amd64, suffix: .exe }
+          - { goos: windows, goarch: arm64, suffix: .exe }
+          - { goos: linux,   goarch: amd64, suffix: ""   }
+          - { goos: linux,   goarch: arm64, suffix: ""   }
+          - { goos: darwin,  goarch: amd64, suffix: ""   }
+          - { goos: darwin,  goarch: arm64, suffix: ""   }
+          - { goos: freebsd, goarch: amd64, suffix: ""   }
+          - { goos: freebsd, goarch: arm64, suffix: ""   }
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
-      
-      - name: Build Windows amd64
+          go-version: '1.25.6'
+          cache: true
+
+      - name: Build
         run: |
-          GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o ech-workers-core-windows-amd64.exe .
-      
-      - name: Build Windows arm64
-        run: |
-          GOOS=windows GOARCH=arm64 go build -ldflags="-s -w" -o ech-workers-core-windows-arm64.exe .
-      
-      - name: Build Linux amd64
-        run: |
-          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o ech-workers-core-linux-amd64 .
-      
-      - name: Build Linux arm64
-        run: |
-          GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o ech-workers-core-linux-arm64 .
-      
-      - name: Build macOS amd64
-        run: |
-          GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o ech-workers-core-darwin-amd64 .
-      
-      - name: Build macOS arm64
-        run: |
-          GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o ech-workers-core-darwin-arm64 .
-      
-      - name: Upload Kernel Artifacts
+          cd cmd/client
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+            go build -ldflags="-s -w" \
+            -o ../../ewp-core-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }} .
+
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-binaries
-          path: ech-workers-core-*
+          name: client-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: ewp-core-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}
 
-  # build-gui:
-  #   name: Build GUI (Windows)
-  #   runs-on: windows-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     
-  #     - name: Setup .NET
-  #       uses: actions/setup-dotnet@v4
-  #       with:
-  #         dotnet-version: '8.0.x'
-  #     
-  #     - name: Build GUI Windows x64
-  #       run: |
-  #         cd gui/EchWorkersGui
-  #         dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o ../../build-x64
-  #     
-  #     - name: Build GUI Windows arm64
-  #       run: |
-  #         cd gui/EchWorkersGui
-  #         dotnet publish -c Release -r win-arm64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o ../../build-arm64
-  #     
-  #     - name: Rename GUI binaries
-  #       run: |
-  #         mv build-x64/EchWorkersGui.exe EchWorkersGui-x64.exe
-  #         mv build-arm64/EchWorkersGui.exe EchWorkersGui-arm64.exe
-  #     
-  #     - name: Upload GUI Artifacts
-  #       uses: actions/upload-artifact@v4
-  #       with:
-  #         name: gui-binaries
-  #         path: EchWorkersGui-*.exe
+  build-server:
+    name: Build Server (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux,   goarch: amd64, suffix: ""   }
+          - { goos: linux,   goarch: arm64, suffix: ""   }
+          - { goos: windows, goarch: amd64, suffix: .exe }
+          - { goos: windows, goarch: arm64, suffix: .exe }
+          - { goos: darwin,  goarch: amd64, suffix: ""   }
+          - { goos: darwin,  goarch: arm64, suffix: ""   }
+          - { goos: freebsd, goarch: amd64, suffix: ""   }
+          - { goos: freebsd, goarch: arm64, suffix: ""   }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.6'
+          cache: true
+
+      - name: Build
+        run: |
+          cd cmd/server
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+            go build -ldflags="-s -w" \
+            -o ../../ewp-core-server-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }} .
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: ewp-core-server-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}
 
   release:
     name: Create Release
-    needs: [build-kernel]
+    needs: [build-client, build-server]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
+
     steps:
-      - name: Download Kernel Artifacts
+      - name: Download All Artifacts
         uses: actions/download-artifact@v4
         with:
-          name: kernel-binaries
           path: ./release
-      
-      # - name: Download GUI Artifacts
-      #   uses: actions/download-artifact@v4
-      #   with:
-      #     name: gui-binaries
-      #     path: ./release
-      
+          merge-multiple: true
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
