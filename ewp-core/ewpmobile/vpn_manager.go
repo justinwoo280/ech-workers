@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"ewp-core/common/tls"
@@ -317,13 +318,16 @@ func (vm *vpnManager) Start(tunFD int, config *VPNConfig) error {
 
 	// 6. 创建 TUN 设备 (Android FileDescriptor)
 	log.Printf("[VPNManager] Creating TUN device from FD=%d, MTU=%d", tunFD, vm.tunMTU)
-	
-	// Create raw wireguard-tun device from the file descriptor handed to us by VpnService Builder
-	file := os.NewFile(uintptr(tunFD), "tun")
-	if file == nil {
+
+	// Dup the fd so Go and the Android ParcelFileDescriptor own independent handles.
+	// Without dup: both sides would close the same fd number → double-close → potential
+	// fd reuse corruption when the VPN is stopped.
+	dupFD, dupErr := syscall.Dup(tunFD)
+	if dupErr != nil {
 		cancel()
-		return fmt.Errorf("create os.File from TUN FD %d failed", tunFD)
+		return fmt.Errorf("dup TUN FD %d failed: %w", tunFD, dupErr)
 	}
+	file := os.NewFile(uintptr(dupFD), "tun")
 
 	tunDevice, err := wgtun.CreateTUNFromFile(file, vm.tunMTU)
 	if err != nil {

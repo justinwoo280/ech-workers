@@ -378,7 +378,8 @@ func (s *Stack) Close() {
 	if s.ipStack != nil {
 		s.ipStack.Close()
 	}
-	if s.tunDev != nil {
-		s.tunDev.Close()
-	}
+	// tunDev lifetime is owned by the caller (vpn_manager / TUN).
+	// Closing it here would double-close when the caller also calls tunDevice.Close().
+	// The dispatchLoop goroutine exits naturally when tunDev.Read() returns an error
+	// after the caller closes the device.
 }

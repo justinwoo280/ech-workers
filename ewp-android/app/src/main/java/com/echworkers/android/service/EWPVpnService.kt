@@ -203,6 +203,7 @@ class EWPVpnService : VpnService(), SocketProtector {
                 .setSession("EWP - ${node.name}")
                 .addAddress(VPN_ADDRESS, 24)
                 .addRoute(VPN_ROUTE, 0)
+                .addRoute("::", 0)
                 .addDnsServer(VPN_DNS)
                 .setMtu(VPN_MTU)
             
