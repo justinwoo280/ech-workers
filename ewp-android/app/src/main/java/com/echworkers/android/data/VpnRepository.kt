@@ -56,6 +56,7 @@ class VpnRepository(private val context: Context) {
     }
     
     fun connect(node: EWPNode, proxyConfig: ProxyConfig) {
+        _state.value = VpnState.Connecting
         try {
             val intent = Intent(context, EWPVpnService::class.java).apply {
                 action = EWPVpnService.ACTION_START
@@ -72,6 +73,7 @@ class VpnRepository(private val context: Context) {
     }
     
     fun disconnect() {
+        _state.value = VpnState.Disconnecting
         try {
             val intent = Intent(context, EWPVpnService::class.java).apply {
                 action = EWPVpnService.ACTION_STOP

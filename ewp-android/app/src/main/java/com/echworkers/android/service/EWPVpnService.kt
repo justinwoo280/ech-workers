@@ -226,13 +226,20 @@ class EWPVpnService : VpnService(), SocketProtector {
     }
     
     private fun configureProxyMode(builder: Builder) {
-        builder.addDisallowedApplication(packageName)
-        
         when (proxyConfig.mode) {
             ProxyMode.GLOBAL -> {
+                // System automatically excludes the VPN app itself.
+                // Socket-level ProtectSocket handles Go transport sockets.
             }
             
             ProxyMode.BYPASS -> {
+                // addDisallowedApplication is blacklist mode — cannot mix with addAllowedApplication.
+                // System auto-excludes own package; still add explicitly for clarity.
+                try {
+                    builder.addDisallowedApplication(packageName)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to exclude self: $e")
+                }
                 proxyConfig.selectedPackages.forEach { pkg ->
                     try {
                         builder.addDisallowedApplication(pkg)
@@ -244,6 +251,9 @@ class EWPVpnService : VpnService(), SocketProtector {
             }
             
             ProxyMode.PROXY_ONLY -> {
+                // addAllowedApplication is whitelist mode — cannot call addDisallowedApplication first.
+                // System automatically excludes the VPN app's own UID from its own VPN.
+                // Go transport sockets are additionally protected by socket-level ProtectSocket.
                 proxyConfig.selectedPackages.forEach { pkg ->
                     try {
                         builder.addAllowedApplication(pkg)
