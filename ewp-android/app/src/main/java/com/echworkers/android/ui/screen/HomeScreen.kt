@@ -218,9 +218,11 @@ private fun ConnectionCard(
                 Button(
                     onClick = if (vpnState.isActive()) onDisconnect else onConnect,
                     modifier = Modifier.weight(1f),
-                    enabled = selectedNode != null && 
-                             vpnState !is VpnState.Connecting && 
-                             vpnState !is VpnState.Disconnecting,
+                    enabled = when {
+                        vpnState.isActive() -> true
+                        vpnState is VpnState.Disconnecting -> false
+                        else -> selectedNode != null
+                    },
                     colors = if (vpnState.isActive()) {
                         ButtonDefaults.buttonColors(
                             containerColor = MaterialTheme.colorScheme.error
