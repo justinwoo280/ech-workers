@@ -23,8 +23,6 @@ import (
 	"ewp-core/transport/xhttp"
 	"ewp-core/tun"
 	ewpgvisor "ewp-core/tun/gvisor"
-
-	wgtun "golang.zx2c4.com/wireguard/tun"
 )
 
 type gvisorUDPWriter struct {
@@ -64,7 +62,7 @@ type vpnManager struct {
 	// TUN 相关
 	tunFD      int
 	tunMTU     int
-	tunDevice  wgtun.Device
+	tunDevice  *androidTunDevice
 	tunStack   *ewpgvisor.Stack
 	tunHandler *tun.Handler
 
@@ -329,11 +327,11 @@ func (vm *vpnManager) Start(tunFD int, config *VPNConfig) error {
 	}
 	file := os.NewFile(uintptr(dupFD), "tun")
 
-	tunDevice, err := wgtun.CreateTUNFromFile(file, vm.tunMTU)
-	if err != nil {
-		cancel()
-		return fmt.Errorf("create TUN device failed: %w", err)
-	}
+	// Use androidTunDevice instead of wgtun.CreateTUNFromFile.
+	// CreateTUNFromFile calls setMTU() which opens a NETLINK_ROUTE socket —
+	// Android SELinux denies this for untrusted apps (avc: denied { bind }
+	// for tclass=netlink_route_socket). The MTU is already set by VpnService.Builder.
+	tunDevice := newAndroidTunDevice(file, vm.tunMTU)
 	vm.tunDevice = tunDevice
 
 	// 7. 创建网络栈 (use gvisor stack)
