@@ -94,11 +94,7 @@ class VpnRepository(private val context: Context) {
         _state.value = when (VpnServiceState.valueOf(stateName)) {
             VpnServiceState.DISCONNECTED -> VpnState.Disconnected
             VpnServiceState.CONNECTING -> VpnState.Connecting
-            VpnServiceState.CONNECTED -> {
-                val statsJson = Ewpmobile.getVPNStats()
-                val stats = VpnStats.fromJson(statsJson)
-                VpnState.Connected(stats)
-            }
+            VpnServiceState.CONNECTED -> VpnState.Connected(VpnStats())
             VpnServiceState.DISCONNECTING -> VpnState.Disconnecting
         }
         Log.d(TAG, "State changed: $stateName")
