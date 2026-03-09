@@ -239,12 +239,11 @@ func (h *Handler) udpReadLoop(tunClientSrc netip.AddrPort, session *udpSession) 
 			return
 		}
 
-		// Use the FakeIP the app originally connected to (session.remoteAddr) as the
-		// response source. This ensures FakeIP transparency: the app sent to a fakeIP
-		// and expects responses from that same fakeIP, not the real remote IP.
-		actualRemote := session.remoteAddr
-		if !actualRemote.IsValid() {
-			actualRemote = remoteAddr
+		// We must use the REAL remoteAddr returned by the server to preserve Full Cone NAT responses.
+		// ONLY if the app originally sent to a FakeIP (transparent proxy) do we mask it back to ensure transparency.
+		actualRemote := remoteAddr
+		if !actualRemote.IsValid() || (session.remoteAddr.IsValid() && h.fakeIPPool != nil && h.fakeIPPool.IsFakeIP(session.remoteAddr.Addr())) {
+			actualRemote = session.remoteAddr
 		}
 
 		// Inject reply into gVisor:

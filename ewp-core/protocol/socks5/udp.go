@@ -285,14 +285,17 @@ func relayUDPLoop(
 				log.V("[UDP] %s -> %s", clientAddr, target)
 			}
 			// Fast path: session already exists — write inline without spawning a goroutine.
-			if s, ok := sessions.get(target); ok {
+			// Full Cone NAT: Session is keyed by the CLIENT's sender IP:Port to map 1 Local Port -> 1 Tunnel
+			senderKey := senderAddr.String()
+			
+			if s, ok := sessions.get(senderKey); ok {
 				if err := s.tunnelConn.WriteUDP(endpoint, payloadCopy); err != nil {
 					log.V("[UDP] %s WriteUDP failed for %s: %v", clientAddr, target, err)
 				}
 				s.touch()
 			} else {
 				// Slow path: new session — dial may block, run in goroutine.
-				go handleTunnelUDP(udpConn, payloadCopy, headerCopy, endpoint, sessions, dialFn, lastSender)
+				go handleTunnelUDP(udpConn, payloadCopy, headerCopy, endpoint, senderKey, sessions, dialFn, lastSender)
 			}
 		}
 	}
@@ -323,12 +326,13 @@ func handleTunnelUDP(
 	payload []byte,
 	socks5Header []byte,
 	endpoint transport.Endpoint,
+	senderKey string,
 	sessions *sessionMap,
 	dialFn func() (transport.TunnelConn, error),
 	lastSender *atomic.Pointer[net.UDPAddr],
 ) {
 	target := endpoint.String()
-	session, isNew, err := sessions.getOrCreate(target, dialFn)
+	session, isNew, err := sessions.getOrCreate(senderKey, dialFn)
 	if err != nil {
 		log.Printf("[UDP] tunnel dial failed for %s: %v", target, err)
 		return
@@ -338,7 +342,7 @@ func handleTunnelUDP(
 		if err := session.tunnelConn.ConnectUDP(endpoint, payload); err != nil {
 			log.Printf("[UDP] ConnectUDP failed for %s: %v", target, err)
 			sessions.mu.Lock()
-			delete(sessions.sessions, target)
+			delete(sessions.sessions, senderKey)
 			sessions.mu.Unlock()
 			session.close()
 			return
