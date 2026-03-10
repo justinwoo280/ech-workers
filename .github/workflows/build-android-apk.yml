@@ -135,7 +135,7 @@ jobs:
         run: |
           if [ -n "$SIGNING_KEYSTORE_B64" ]; then
             echo "Building signed Release APK"
-            echo "$SIGNING_KEYSTORE_B64" | base64 -d > /tmp/ewp-release.jks
+            echo "$SIGNING_KEYSTORE_B64" | base64 -di > /tmp/ewp-release.jks
             export SIGNING_KEYSTORE_PATH=/tmp/ewp-release.jks
             gradle assembleRelease
           else
