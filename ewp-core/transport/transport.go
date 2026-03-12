@@ -63,9 +63,14 @@ type BypassConfig struct {
 	// TCPDialer is used by TCP-based transports (grpc, websocket, xhttp).
 	// The Dialer.Control function binds each socket to the physical interface.
 	TCPDialer *net.Dialer
-	// UDPListenConfig is used by QUIC-based transports (h3grpc).
+	// UDPListenConfig is used by QUIC-based transports (h3grpc, webtransport).
 	// ListenPacket binds the UDP socket to the physical interface.
 	UDPListenConfig *net.ListenConfig
+	// LocalIP is the physical interface's local IPv4 address (e.g. 192.168.0.100).
+	// When set, QUIC UDP sockets are bound directly to this IP instead of 0.0.0.0,
+	// which guarantees packets are routed through the physical NIC on Windows where
+	// IP_UNICAST_IF alone is insufficient to bypass the TUN default route.
+	LocalIP net.IP
 	// Resolver performs DNS resolution via a bypass-protected socket and
 	// probes all returned IPs to select the lowest-latency edge node.
 	// When nil, transports fall back to net.LookupIP.

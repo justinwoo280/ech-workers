@@ -87,6 +87,7 @@ func DefaultServerConfig() *ServerConfig {
 			WSPath:      "/",
 			XHTTPPath:   "/xhttp",
 			GRPCService: "ProxyService",
+			WTPath:      "/wt",
 		},
 		Protocol: ProtocolConfig{
 			Type:       "ewp",
@@ -272,6 +273,10 @@ func LoadFromEnv() *ServerConfig {
 
 	if grpcService := os.Getenv("GRPC_SERVICE"); grpcService != "" {
 		cfg.Listener.GRPCService = grpcService
+	}
+
+	if wtPath := os.Getenv("WT_PATH"); wtPath != "" {
+		cfg.Listener.WTPath = wtPath
 	}
 
 	return cfg

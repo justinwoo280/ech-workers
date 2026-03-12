@@ -32,6 +32,15 @@ type Address struct {
 	Port uint16
 }
 
+// AddressFromAddrPort converts a netip.AddrPort to an Address.
+func AddressFromAddrPort(ap netip.AddrPort) Address {
+	addr := ap.Addr().Unmap()
+	if addr.Is4() {
+		return Address{Type: AddressTypeIPv4, Host: addr.String(), Port: ap.Port()}
+	}
+	return Address{Type: AddressTypeIPv6, Host: addr.String(), Port: ap.Port()}
+}
+
 func (a *Address) String() string {
 	if a.Type == AddressTypeIPv6 {
 		return fmt.Sprintf("[%s]:%d", a.Host, a.Port)

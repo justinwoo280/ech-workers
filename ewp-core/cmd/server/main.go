@@ -29,6 +29,7 @@ var (
 	xhttpMode    = false
 	enableFlow   = false
 	trojanMode   = false
+	altSvcHeader = ""
 )
 
 var largeBufferPool = sync.Pool{
@@ -147,6 +148,9 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 func disguiseHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Server", "nginx/1.18.0")
 	w.Header().Set("Content-Type", "text/html")
+	if altSvcHeader != "" {
+		w.Header().Set("Alt-Svc", altSvcHeader)
+	}
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(nginxHTML))
 }

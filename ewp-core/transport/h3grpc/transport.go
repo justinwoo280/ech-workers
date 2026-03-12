@@ -240,7 +240,7 @@ func (t *Transport) SetBypassConfig(cfg *transport.BypassConfig) {
 		return
 	}
 	if cfg != nil && cfg.UDPListenConfig != nil {
-		t.http3Transport.Dial = t.makeBypassQUICDial(cfg.UDPListenConfig)
+		t.http3Transport.Dial = t.makeBypassQUICDial(cfg.UDPListenConfig, cfg.LocalIP)
 	} else {
 		t.http3Transport.Dial = nil
 	}
@@ -248,14 +248,21 @@ func (t *Transport) SetBypassConfig(cfg *transport.BypassConfig) {
 
 // makeBypassQUICDial returns an http3.Transport.Dial function that uses a UDP
 // socket bound to the physical interface to avoid TUN routing loops.
-func (t *Transport) makeBypassQUICDial(lc *net.ListenConfig) func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
+// localIP is the physical interface's IPv4 address; when set the socket is bound
+// directly to that IP instead of 0.0.0.0, which is required on Windows where
+// IP_UNICAST_IF alone cannot override a TUN default route for unicast packets.
+func (t *Transport) makeBypassQUICDial(lc *net.ListenConfig, localIP net.IP) func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
 	return func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
 		udpAddr, err := net.ResolveUDPAddr("udp", addr)
 		if err != nil {
 			return nil, fmt.Errorf("bypass QUIC dial: resolve addr %s: %w", addr, err)
 		}
 
-		pconn, err := lc.ListenPacket(ctx, "udp", ":0")
+		bindAddr := ":0"
+		if localIP != nil && udpAddr.IP.To4() != nil {
+			bindAddr = net.JoinHostPort(localIP.String(), "0")
+		}
+		pconn, err := lc.ListenPacket(ctx, "udp", bindAddr)
 		if err != nil {
 			return nil, fmt.Errorf("bypass QUIC dial: bind UDP socket: %w", err)
 		}

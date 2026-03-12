@@ -71,8 +71,18 @@ func (h *Handler) SetFakeIPPool(pool *dns.FakeIPPool) {
 }
 
 func (h *Handler) HandleTCP(conn *gonet.TCPConn) {
-	dstAddr := conn.LocalAddr().(*net.TCPAddr)
-	srcAddr := conn.RemoteAddr().(*net.TCPAddr)
+	rawDst := conn.LocalAddr()
+	rawSrc := conn.RemoteAddr()
+	if rawDst == nil || rawSrc == nil {
+		conn.Close()
+		return
+	}
+	dstAddr, ok1 := rawDst.(*net.TCPAddr)
+	srcAddr, ok2 := rawSrc.(*net.TCPAddr)
+	if !ok1 || !ok2 || dstAddr == nil || srcAddr == nil {
+		conn.Close()
+		return
+	}
 
 	// If destination is a fake IP, reverse-lookup the domain for Connect
 	var target string

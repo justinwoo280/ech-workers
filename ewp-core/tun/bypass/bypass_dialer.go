@@ -29,6 +29,10 @@ type BypassDialer struct {
 
 // NewBypassDialer detects the physical outbound interface and returns a
 // BypassDialer that routes around the TUN device.
+//
+// On Linux, policy routing is configured via netlink so that all sockets
+// marked with bypassFWMark (SO_MARK) bypass the TUN default route.
+// Call Close() when the TUN device is torn down to remove the routing rules.
 func NewBypassDialer(serverAddr string) (*BypassDialer, error) {
 	probeIP := "8.8.8.8"
 	if serverAddr != "" {
@@ -62,12 +66,23 @@ func NewBypassDialer(serverAddr string) (*BypassDialer, error) {
 	log.Info("[TUN] Bypass dialer: interface=%s ip=%s", iface.Name, localAddr.IP)
 
 	controlFn := makeBypassControl(iface)
-	return &BypassDialer{
+	bd := &BypassDialer{
 		iface:        iface,
 		localIP:      localAddr.IP,
 		Dialer:       &net.Dialer{Control: controlFn},
 		ListenConfig: &net.ListenConfig{Control: controlFn},
-	}, nil
+	}
+
+	if err := bd.platformSetup(); err != nil {
+		log.Printf("[TUN] Bypass route setup: %v (non-fatal, bypass may not work correctly)", err)
+	}
+	return bd, nil
+}
+
+// Close removes any kernel routing rules and routes installed by NewBypassDialer.
+// Must be called when the TUN interface is torn down (e.g. on program exit).
+func (b *BypassDialer) Close() {
+	b.platformCleanup()
 }
 
 // ToBypassConfig converts to the transport.BypassConfig used by all transports.
@@ -77,6 +92,7 @@ func (b *BypassDialer) ToBypassConfig() *transport.BypassConfig {
 	cfg := &transport.BypassConfig{
 		TCPDialer:       b.Dialer,
 		UDPListenConfig: b.ListenConfig,
+		LocalIP:         b.localIP,
 	}
 	cfg.Resolver = transport.NewBypassResolver(cfg, "")
 	return cfg

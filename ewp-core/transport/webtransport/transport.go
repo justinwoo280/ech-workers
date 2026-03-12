@@ -32,6 +32,9 @@ type Transport struct {
 	serverAddr   string // "host:port"
 	path         string // HTTP path, e.g. "/wt"
 	uuid         [16]byte
+	password     string
+	enableFlow   bool
+	useTrojan    bool
 	sni          string
 	useECH       bool
 	enablePQC    bool
@@ -54,14 +57,19 @@ type Transport struct {
 }
 
 // New creates a WebTransport client transport.
-//
-// serverAddr is "host:port" or "https://host:port/path".
-// path is the WebTransport endpoint path (default "/wt").
-// echManager may be nil when ECH is disabled.
 func New(serverAddr, uuidStr string, useECH, useMozillaCA, enablePQC bool, path string, echManager *commontls.ECHManager) (*Transport, error) {
-	uuid, err := transport.ParseUUID(uuidStr)
-	if err != nil {
-		return nil, fmt.Errorf("invalid UUID: %w", err)
+	return NewWithProtocol(serverAddr, uuidStr, "", useECH, useMozillaCA, false, enablePQC, false, path, echManager)
+}
+
+// NewWithProtocol creates a WebTransport client transport with full protocol support.
+func NewWithProtocol(serverAddr, uuidStr, password string, useECH, useMozillaCA, enableFlow, enablePQC, useTrojan bool, path string, echManager *commontls.ECHManager) (*Transport, error) {
+	var uuid [16]byte
+	if !useTrojan {
+		var err error
+		uuid, err = transport.ParseUUID(uuidStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid UUID: %w", err)
+		}
 	}
 
 	parsed, err := transport.ParseAddress(serverAddr)
@@ -83,6 +91,9 @@ func New(serverAddr, uuidStr string, useECH, useMozillaCA, enablePQC bool, path 
 		serverAddr:   addr,
 		path:         path,
 		uuid:         uuid,
+		password:     password,
+		enableFlow:   enableFlow,
+		useTrojan:    useTrojan,
 		useECH:       useECH,
 		useMozillaCA: useMozillaCA,
 		enablePQC:    enablePQC,
@@ -148,7 +159,7 @@ func (t *Transport) initDialer() error {
 	}
 
 	if t.bypassCfg != nil && t.bypassCfg.UDPListenConfig != nil {
-		d.DialAddr = t.makeBypassDial(t.bypassCfg.UDPListenConfig)
+		d.DialAddr = t.makeBypassDial(t.bypassCfg.UDPListenConfig, t.bypassCfg.LocalIP)
 	}
 
 	t.dialer = d
@@ -157,13 +168,22 @@ func (t *Transport) initDialer() error {
 
 // makeBypassDial returns a DialAddr function that binds the QUIC UDP socket
 // to the physical network interface, bypassing the TUN routing table.
-func (t *Transport) makeBypassDial(lc *net.ListenConfig) func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
+//
+// On Windows, IP_UNICAST_IF alone is unreliable for unicast when the TUN
+// default route has a lower metric. Binding to the physical interface's
+// local IP (e.g. 192.168.0.100:0) guarantees the kernel routes the packet
+// through the NIC that owns that address, not through the TUN device.
+func (t *Transport) makeBypassDial(lc *net.ListenConfig, localIP net.IP) func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
 	return func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
 		udpAddr, err := net.ResolveUDPAddr("udp", addr)
 		if err != nil {
 			return nil, fmt.Errorf("bypass dial: resolve %s: %w", addr, err)
 		}
-		pconn, err := lc.ListenPacket(ctx, "udp", ":0")
+		bindAddr := ":0"
+		if localIP != nil && udpAddr.IP.To4() != nil {
+			bindAddr = net.JoinHostPort(localIP.String(), "0")
+		}
+		pconn, err := lc.ListenPacket(ctx, "udp", bindAddr)
 		if err != nil {
 			return nil, fmt.Errorf("bypass dial: bind UDP: %w", err)
 		}
@@ -179,7 +199,14 @@ func (t *Transport) makeBypassDial(lc *net.ListenConfig) func(ctx context.Contex
 
 // Name returns a descriptive transport name.
 func (t *Transport) Name() string {
-	name := "WebTransport+EWP"
+	name := "WebTransport"
+	if t.useTrojan {
+		name += "+Trojan"
+	} else if t.enableFlow {
+		name += "+Flow"
+	} else {
+		name += "+EWP"
+	}
 	if t.useECH {
 		name += "+ECH"
 	}
@@ -187,6 +214,15 @@ func (t *Transport) Name() string {
 		name += "+PQC"
 	}
 	return name
+}
+
+// SetAuthority sets the :authority pseudo-header and HTTP Host header override
+func (t *Transport) SetAuthority(authority string) *Transport {
+	t.mu.Lock()
+	t.sni = authority // In WebTransport, we use SNI to influence Host override as well.
+	t.reinitDialer()
+	t.mu.Unlock()
+	return t
 }
 
 // SetSNI overrides the TLS SNI (useful when connecting via IP with CDN domain).
@@ -233,7 +269,7 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newConn(stream, t.uuid), nil
+	return newConn(stream, t.uuid, t.password, t.enableFlow, t.useTrojan), nil
 }
 
 func (t *Transport) openStream() (*wtransport.Stream, error) {

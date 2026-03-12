@@ -2,36 +2,29 @@ package webtransport
 
 import (
 	"context"
-	"fmt"
-	"io"
-	"net"
 	"net/http"
-	"sync"
 	"time"
 
 	"ewp-core/log"
-	"ewp-core/protocol/ewp"
 	ewpserver "ewp-core/internal/server"
 
 	wtransport "github.com/quic-go/webtransport-go"
 )
 
 // Handler is an HTTP handler that upgrades WebTransport sessions and routes
-// each accepted bidi stream as an EWP tunnel connection.
-//
-// Usage:
-//
-//	wtServer := &webtransport.Server{H3: &http3.Server{...}}
-//	mux.Handle("/wt", webtransport.NewHandler(wtServer, enableFlow))
+// each accepted bidi stream as a protocol tunnel connection.
 type Handler struct {
-	wtServer  *wtransport.Server
-	enableFlow bool
+	wtServer           *wtransport.Server
+	newProtocolHandler func() ewpserver.ProtocolHandler
 }
 
 // NewHandler creates a Handler wrapping an existing webtransport.Server.
 // The handler must be registered at the path used by clients.
-func NewHandler(wtServer *wtransport.Server, enableFlow bool) *Handler {
-	return &Handler{wtServer: wtServer, enableFlow: enableFlow}
+func NewHandler(wtServer *wtransport.Server, newProtocolHandler func() ewpserver.ProtocolHandler) *Handler {
+	return &Handler{
+		wtServer:           wtServer,
+		newProtocolHandler: newProtocolHandler,
+	}
 }
 
 // ServeHTTP upgrades the HTTP/3 request to a WebTransport session,
@@ -56,71 +49,48 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleStream processes one bidi stream: EWP handshake → TCP relay or UDP relay.
+// handleStream processes one bidi stream using the unified ProtocolHandler.
 func (h *Handler) handleStream(stream *wtransport.Stream, clientIP string) {
-	defer stream.Close()
+	tr := &wtAdapter{stream: stream}
 
-	handshakeData, err := ewp.ReadHandshake(stream)
+	handshakeData, err := tr.Read()
 	if err != nil {
 		log.Warn("[WebTransport] Failed to read handshake from %s: %v", clientIP, err)
+		stream.Close()
 		return
 	}
 
-	req, respData, err := ewpserver.HandleEWPHandshakeBinary(handshakeData, clientIP)
+	opts := ewpserver.TunnelOptions{
+		Protocol:  h.newProtocolHandler(),
+		Transport: tr,
+		ClientIP:  clientIP,
+		Timeout:   10 * time.Second,
+	}
+
+	if err := ewpserver.EstablishTunnel(context.Background(), handshakeData, opts); err != nil {
+		log.Debug("[WebTransport] Tunnel closed for %s: %v", clientIP, err)
+	}
+}
+
+// wtAdapter wraps a WebTransport stream to implement ewpserver.TransportAdapter.
+type wtAdapter struct {
+	stream *wtransport.Stream
+}
+
+func (a *wtAdapter) Read() ([]byte, error) {
+	buf := make([]byte, 32*1024)
+	n, err := a.stream.Read(buf)
 	if err != nil {
-		log.Warn("[WebTransport] Handshake rejected from %s: %v", clientIP, err)
-		if len(respData) > 0 {
-			stream.Write(respData)
-		}
-		return
+		return nil, err
 	}
+	return buf[:n], nil
+}
 
-	if _, err := stream.Write(respData); err != nil {
-		log.Warn("[WebTransport] Failed to send response to %s: %v", clientIP, err)
-		return
-	}
+func (a *wtAdapter) Write(data []byte) error {
+	_, err := a.stream.Write(data)
+	return err
+}
 
-	target := req.TargetAddr.String()
-	userID := fmt.Sprintf("%x", req.UUID[:8])
-
-	if req.Command == ewp.CommandUDP {
-		log.Info("[WebTransport] UDP mode: %s (user: %s) -> %s", clientIP, userID, target)
-		ewpserver.HandleUDPConnection(stream, stream, target)
-		log.Info("[WebTransport] UDP closed: %s -> %s", clientIP, target)
-		return
-	}
-
-	// TCP relay
-	log.Info("[WebTransport] TCP: %s (user: %s) -> %s", clientIP, userID, target)
-
-	dialCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	remote, err := (&net.Dialer{}).DialContext(dialCtx, "tcp", target)
-	cancel()
-	if err != nil {
-		log.Warn("[WebTransport] Dial failed to %s: %v", target, err)
-		return
-	}
-	defer remote.Close()
-
-	log.Info("[WebTransport] Connected: %s -> %s", clientIP, target)
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	go func() {
-		defer wg.Done()
-		io.Copy(remote, stream)
-		if tc, ok := remote.(*net.TCPConn); ok {
-			tc.CloseWrite()
-		}
-	}()
-
-	go func() {
-		defer wg.Done()
-		io.Copy(stream, remote)
-		stream.CancelRead(0)
-	}()
-
-	wg.Wait()
-	log.Info("[WebTransport] Closed: %s -> %s", clientIP, target)
+func (a *wtAdapter) Close() error {
+	return a.stream.Close()
 }

@@ -214,9 +214,9 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 		if path == "" {
 			path = "/wt"
 		}
-		wtTrans, wtErr := webtransport.New(
-			serverAddr, uuid,
-			useECH, useMozillaCA, enablePQC,
+		wtTrans, wtErr := webtransport.NewWithProtocol(
+			serverAddr, uuid, password,
+			useECH, useMozillaCA, enableFlow, enablePQC, useTrojan,
 			path, echMgr,
 		)
 		if wtErr != nil {
@@ -239,6 +239,8 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 			t.SetAuthority(outbound.Host)
 		case *xhttp.Transport:
 			t.SetHost(outbound.Host)
+		case *webtransport.Transport:
+			t.SetAuthority(outbound.Host)
 		}
 	}
 

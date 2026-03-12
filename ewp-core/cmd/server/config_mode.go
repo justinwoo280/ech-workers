@@ -85,6 +85,10 @@ func startFromConfig(configPath string) {
 		}
 	}
 
+	if hasH3 || hasWT {
+		altSvcHeader = fmt.Sprintf(`h3=":%d"; ma=86400`, cfg.Listener.Port)
+	}
+
 	if hasH3 {
 		go startH3Listener(cfg, tlsConfig)
 	}
@@ -275,7 +279,7 @@ func startWebTransportListener(cfg *option.ServerConfig, tlsConfig *tls.Config) 
 
 	wtransport.ConfigureHTTP3Server(h3Server)
 
-	mux.Handle(wtPath, ewpwt.NewHandler(wtServer, enableFlow))
+	mux.Handle(wtPath, ewpwt.NewHandler(wtServer, newProtocolHandler))
 	log.Info("WebTransport handler registered (path: %s)", wtPath)
 	log.Info("WebTransport listening on %s (UDP/QUIC)", addr)
 
