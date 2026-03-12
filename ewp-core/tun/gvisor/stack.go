@@ -99,6 +99,8 @@ func NewStack(tunDev tun.Device, config *StackConfig) (*Stack, error) {
 		return nil, fmt.Errorf("set spoofing: %v", err)
 	}
 
+	tuneTCPStack(ipStack)
+
 	s := &Stack{
 		ipStack:   ipStack,
 		tunDev:    tunDev,
@@ -123,6 +125,38 @@ func tcpipAddrToNetipAddr(addr tcpip.Address) netip.Addr {
 	default:
 		return netip.Addr{}
 	}
+}
+
+// tuneTCPStack applies high-throughput TCP parameters to the gVisor stack.
+//
+// Default values in this gVisor version:
+//   DefaultSendBufferSize    = 1 MB
+//   DefaultReceiveBufferSize = 1 MB
+//   MaxBufferSize            = 4 MB
+//
+// For cross-continental proxy workloads (70-200 ms RTT) those caps throttle
+// throughput to ~50 Mbps.  We raise them to 16 MB and disable Nagle for
+// interactive latency, and enable SACK to recover from packet loss quickly.
+func tuneTCPStack(ipStack *stack.Stack) {
+	sackOn := tcpip.TCPSACKEnabled(true)
+	_ = ipStack.SetTransportProtocolOption(tcp.ProtocolNumber, &sackOn)
+
+	delayOff := tcpip.TCPDelayEnabled(false)
+	_ = ipStack.SetTransportProtocolOption(tcp.ProtocolNumber, &delayOff)
+
+	sendBuf := tcpip.TCPSendBufferSizeRangeOption{
+		Min:     4 * 1024,
+		Default: 4 * 1024 * 1024,
+		Max:     16 * 1024 * 1024,
+	}
+	_ = ipStack.SetTransportProtocolOption(tcp.ProtocolNumber, &sendBuf)
+
+	recvBuf := tcpip.TCPReceiveBufferSizeRangeOption{
+		Min:     4 * 1024,
+		Default: 4 * 1024 * 1024,
+		Max:     16 * 1024 * 1024,
+	}
+	_ = ipStack.SetTransportProtocolOption(tcp.ProtocolNumber, &recvBuf)
 }
 
 func (s *Stack) setupTCPForwarder() {
