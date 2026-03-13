@@ -14,6 +14,7 @@ import (
 	"ewp-core/log"
 	"ewp-core/transport"
 
+	"golang.org/x/sync/singleflight"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 )
 
@@ -66,7 +67,8 @@ type Handler struct {
 	fakeIPPool *dns.FakeIPPool
 
 	udpWriter   UDPWriter
-	udpSessions sync.Map // map[udpSessionKey]*udpSession
+	udpSessions sync.Map           // map[udpSessionKey]*udpSession
+	udpSF       singleflight.Group // deduplicates concurrent ConnectUDP for same 5-tuple
 }
 
 func NewHandler(ctx context.Context, trans transport.Transport, udpWriter UDPWriter) *Handler {
@@ -187,66 +189,67 @@ func (h *Handler) HandleUDP(payload []byte, src netip.AddrPort, dst netip.AddrPo
 		return
 	}
 
-	// Reverse-lookup fake IP to domain or peer IP for UDP endpoint
+	// Reverse-lookup fake IP to domain or peer IP for UDP endpoint.
+	// Logs are emitted only on new session creation (inside the singleflight below)
+	// to keep the per-packet hot path allocation-free.
 	var endpoint transport.Endpoint
 	if h.fakeIPPool != nil {
 		unmapped := dst.Addr().Unmap()
 		if domain, ok := h.fakeIPPool.LookupByIP(unmapped); ok {
 			endpoint = transport.Endpoint{Domain: domain, Port: dst.Port()}
-			log.Printf("[TUN UDP] FakeIP reverse: %s -> %s:%d", dst, domain, dst.Port())
 		} else if realIP, ok := h.fakeIPPool.LookupPeerByFakeIP(unmapped); ok {
 			endpoint = transport.Endpoint{Addr: netip.AddrPortFrom(realIP, dst.Port())}
-			log.Printf("[TUN UDP] Peer FakeIP reverse: %s -> %s:%d", dst, realIP, dst.Port())
 		}
 	}
 	if endpoint.Domain == "" && !endpoint.Addr.IsValid() {
 		endpoint = transport.Endpoint{Addr: dst}
 	}
 
-	// Get or create a UDP tunnel session keyed by (src, dst).
-	// Each unique flow (5-tuple) gets its own tunnel connection so that:
-	//   - MASQUE: each ConnectUDP binds to exactly one target (RFC 9298 semantics)
-	//   - EWP/Trojan: independent streams per flow (better isolation, no change in correctness)
-	//
-	// ConnectUDP is completed BEFORE LoadOrStore to guarantee that any goroutine
-	// that observes the session via Load can safely call WriteUDP immediately
-	// (C-2: eliminates the TOCTOU race between LoadOrStore and ConnectUDP).
-	// In the rare case two goroutines race, both do ConnectUDP and only one wins
-	// the LoadOrStore; the loser's stream is closed immediately — safe and correct.
+	// Fast path: session already exists — zero allocation.
 	key := udpSessionKey{src: src, dst: dst}
-	val, ok := h.udpSessions.Load(key)
 	var session *udpSession
 
-	if !ok {
-		tunnelConn, err := h.transport.Dial()
-		if err != nil {
-			log.Printf("[TUN UDP] Tunnel dial failed for %s: %v", src, err)
-			return
-		}
-
-		log.V("[TUN UDP] New session: %s -> %s", src, dst)
-
-		if err := tunnelConn.ConnectUDP(endpoint, nil); err != nil {
-			log.Printf("[TUN UDP] ConnectUDP failed: %v", err)
-			tunnelConn.Close()
-			return
-		}
-
-		session = &udpSession{
-			tunnelConn: tunnelConn,
-			remoteAddr: dst,
-		}
-		session.lastActive.Store(time.Now().UnixNano())
-
-		actual, loaded := h.udpSessions.LoadOrStore(key, session)
-		if loaded {
-			tunnelConn.Close()
-			session = actual.(*udpSession)
-		} else {
-			go h.udpReadLoop(key, session)
-		}
-	} else {
+	if val, ok := h.udpSessions.Load(key); ok {
 		session = val.(*udpSession)
+	} else {
+		// Slow path: new flow. singleflight ensures that concurrent bursts of packets
+		// for the same 5-tuple result in exactly ONE ConnectUDP call. All waiters share
+		// the returned session. This eliminates both the TOCTOU race (C-2) and the
+		// wasted stream-open overhead under burst traffic.
+		sfKey := src.String() + "|" + dst.String()
+		v, err, _ := h.udpSF.Do(sfKey, func() (interface{}, error) {
+			tunnelConn, err := h.transport.Dial()
+			if err != nil {
+				return nil, fmt.Errorf("tunnel dial: %w", err)
+			}
+
+			if endpoint.Domain != "" {
+				log.V("[TUN UDP] New session: %s -> %s:%d", src, endpoint.Domain, dst.Port())
+			} else {
+				log.V("[TUN UDP] New session: %s -> %s", src, dst)
+			}
+
+			if err := tunnelConn.ConnectUDP(endpoint, nil); err != nil {
+				tunnelConn.Close()
+				return nil, fmt.Errorf("ConnectUDP: %w", err)
+			}
+
+			s := &udpSession{tunnelConn: tunnelConn, remoteAddr: dst}
+			s.lastActive.Store(time.Now().UnixNano())
+
+			actual, loaded := h.udpSessions.LoadOrStore(key, s)
+			if loaded {
+				tunnelConn.Close()
+				return actual, nil
+			}
+			go h.udpReadLoop(key, s)
+			return s, nil
+		})
+		if err != nil {
+			log.Printf("[TUN UDP] Session setup failed %s->%s: %v", src, dst, err)
+			return
+		}
+		session = v.(*udpSession)
 	}
 
 	session.lastActive.Store(time.Now().UnixNano())

@@ -312,13 +312,15 @@ func startMasqueListener(cfg *option.ServerConfig, tlsConfig *tls.Config) {
 	quicConfig := &quic.Config{
 		MaxIdleTimeout:                 90 * time.Second,
 		KeepAlivePeriod:                10 * time.Second,
-		MaxIncomingStreams:              512,
-		MaxIncomingUniStreams:           16,
-		InitialStreamReceiveWindow:     8 * 1024 * 1024,
-		MaxStreamReceiveWindow:         32 * 1024 * 1024,
-		InitialConnectionReceiveWindow: 32 * 1024 * 1024,
-		MaxConnectionReceiveWindow:     200 * 1024 * 1024,
+		MaxIncomingStreams:              1024,
+		MaxIncomingUniStreams:           32,
+		InitialStreamReceiveWindow:     16 * 1024 * 1024,
+		MaxStreamReceiveWindow:         64 * 1024 * 1024,
+		InitialConnectionReceiveWindow: 64 * 1024 * 1024,
+		MaxConnectionReceiveWindow:     512 * 1024 * 1024,
 		EnableDatagrams:                true,
+		Allow0RTT:                      true,
+		InitialPacketSize:              1350,
 	}
 
 	h3Server := &http3.Server{

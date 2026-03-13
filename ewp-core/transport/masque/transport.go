@@ -129,12 +129,12 @@ func (t *Transport) initConfigs() error {
 	t.tlsConfig = stdTLS
 
 	t.quicConfig = &quic.Config{
-		MaxIncomingStreams:              512,
-		MaxIncomingUniStreams:           16,
-		InitialStreamReceiveWindow:     8 * 1024 * 1024,
-		MaxStreamReceiveWindow:         32 * 1024 * 1024,
-		InitialConnectionReceiveWindow: 32 * 1024 * 1024,
-		MaxConnectionReceiveWindow:     200 * 1024 * 1024,
+		MaxIncomingStreams:              1024,
+		MaxIncomingUniStreams:           32,
+		InitialStreamReceiveWindow:     16 * 1024 * 1024,
+		MaxStreamReceiveWindow:         64 * 1024 * 1024,
+		InitialConnectionReceiveWindow: 64 * 1024 * 1024,
+		MaxConnectionReceiveWindow:     512 * 1024 * 1024,
 		MaxIdleTimeout:                 90 * time.Second,
 		KeepAlivePeriod:                10 * time.Second,
 		EnableDatagrams:                true,

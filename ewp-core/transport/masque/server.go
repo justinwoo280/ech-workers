@@ -19,6 +19,16 @@ import (
 	"github.com/yosida95/uritemplate/v3"
 )
 
+// tcpBufPool provides 64 KiB reusable buffers for TCP tunnel relay goroutines.
+// io.CopyBuffer with a pooled buffer eliminates per-connection heap allocations
+// and cuts GC pressure significantly under high concurrent TCP load.
+var tcpBufPool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, 64*1024)
+		return &b
+	},
+}
+
 // Handler is an HTTP/3 request handler that serves the MASQUE protocol.
 //
 // It handles two request types on the same HTTP/3 server:
@@ -30,6 +40,7 @@ type Handler struct {
 	validUUIDs  [][16]byte
 	udpTemplate *uritemplate.Template
 	udpProxy    masquego.Proxy
+	dialer      net.Dialer // shared, zero-value is valid; avoids per-request alloc
 
 	newProtocolHandler func() ewpserver.ProtocolHandler
 }
@@ -97,7 +108,7 @@ func (h *Handler) handleTCP(w http.ResponseWriter, r *http.Request) {
 	dialCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	remote, err := (&net.Dialer{}).DialContext(dialCtx, "tcp", target)
+	remote, err := h.dialer.DialContext(dialCtx, "tcp", target)
 	if err != nil {
 		log.Warn("[MASQUE] TCP dial %s: %v", target, err)
 		http.Error(w, "bad gateway", http.StatusBadGateway)
@@ -105,9 +116,7 @@ func (h *Handler) handleTCP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
-	if f, ok := w.(http.Flusher); ok {
-		f.Flush()
-	}
+	w.(http.Flusher).Flush()
 
 	str := w.(http3.HTTPStreamer).HTTPStream()
 
@@ -117,14 +126,18 @@ func (h *Handler) handleTCP(w http.ResponseWriter, r *http.Request) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		io.Copy(remote, str)
+		bufp := tcpBufPool.Get().(*[]byte)
+		io.CopyBuffer(remote, str, *bufp)
+		tcpBufPool.Put(bufp)
 		if tc, ok := remote.(*net.TCPConn); ok {
 			tc.CloseWrite()
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		io.Copy(str, remote)
+		bufp := tcpBufPool.Get().(*[]byte)
+		io.CopyBuffer(str, remote, *bufp)
+		tcpBufPool.Put(bufp)
 		str.Close()
 	}()
 	wg.Wait()
