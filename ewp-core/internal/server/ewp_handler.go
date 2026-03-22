@@ -12,6 +12,7 @@ import (
 
 var (
 	ValidUUIDs  [][16]byte
+	uuidCache   ewp.UUIDKeyCache
 	NonceCache  *ewp.NonceCache
 	RateLimiter *ewp.RateLimiter
 )
@@ -39,6 +40,7 @@ func InitEWPHandler(uuidStr string) error {
 		return fmt.Errorf("no valid UUIDs configured")
 	}
 
+	uuidCache = ewp.NewUUIDKeyCache(ValidUUIDs)
 	NonceCache = ewp.NewNonceCache()
 	RateLimiter = ewp.NewRateLimiter(300, 5*time.Second)
 
@@ -70,7 +72,7 @@ func HandleEWPHandshakeBinary(data []byte, clientIP string) (*ewp.HandshakeReque
 		return nil, ewp.GenerateFakeResponse(), fmt.Errorf("rate limit exceeded")
 	}
 
-	req, err := ewp.DecodeHandshakeRequest(data, ValidUUIDs)
+	req, err := ewp.DecodeHandshakeRequestCached(data, uuidCache)
 	if err != nil {
 		log.Warn("[EWP] Handshake failed from %s: %v", clientIP, err)
 		RateLimiter.RecordFailure(clientIP)

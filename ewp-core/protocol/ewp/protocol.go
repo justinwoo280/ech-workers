@@ -312,21 +312,121 @@ func computeResponseHMAC(uuid [16]byte, msg []byte) []byte {
 }
 
 func ReadHandshake(r io.Reader) ([]byte, error) {
-	header := make([]byte, 15)
-	if _, err := io.ReadFull(r, header); err != nil {
+	var hdr [15]byte
+	if _, err := io.ReadFull(r, hdr[:]); err != nil {
 		return nil, err
 	}
 
-	payloadLen := binary.BigEndian.Uint16(header[13:15])
+	payloadLen := binary.BigEndian.Uint16(hdr[13:15])
 	if payloadLen < MinPayloadLength || payloadLen > MaxPayloadLength {
 		return nil, ErrInvalidLength
 	}
 
-	rest := make([]byte, int(payloadLen)+16)
-	if _, err := io.ReadFull(r, rest); err != nil {
+	buf := make([]byte, 15+int(payloadLen)+16)
+	copy(buf, hdr[:])
+	if _, err := io.ReadFull(r, buf[15:]); err != nil {
 		return nil, err
 	}
-
-	fullData := append(header, rest...)
-	return fullData, nil
+	return buf, nil
 }
+
+// UUIDKeyCache holds pre-computed SHA-256(uuid) HMAC keys for all registered UUIDs.
+// Eliminates N×SHA-256 key derivations on the hot auth path in DecodeHandshakeRequestCached.
+// Encryption key derivation still requires the nonce (per-request), so it cannot be pre-computed.
+type UUIDKeyCache struct {
+	uuids    [][16]byte
+	hmacKeys [][32]byte
+}
+
+// NewUUIDKeyCache pre-computes HMAC keys for all UUIDs at startup.
+// Cost: 1×SHA-256 per UUID, paid once.
+func NewUUIDKeyCache(uuids [][16]byte) UUIDKeyCache {
+	hmacKeys := make([][32]byte, len(uuids))
+	for i, u := range uuids {
+		hmacKeys[i] = sha256.Sum256(u[:])
+	}
+	return UUIDKeyCache{uuids: uuids, hmacKeys: hmacKeys}
+}
+
+// DecodeHandshakeRequestCached validates and decodes a raw handshake frame
+// using pre-computed HMAC keys. Eliminates per-request sha256.Sum256 calls.
+func DecodeHandshakeRequestCached(data []byte, cache UUIDKeyCache) (*HandshakeRequest, error) {
+	if len(data) < 15+MinPayloadLength+16 {
+		return nil, ErrInvalidLength
+	}
+
+	version := data[0]
+	if version == 0 {
+		return nil, ErrInvalidVersion
+	}
+
+	var nonce [12]byte
+	copy(nonce[:], data[1:13])
+
+	payloadLen := binary.BigEndian.Uint16(data[13:15])
+	if payloadLen < MinPayloadLength || payloadLen > MaxPayloadLength {
+		return nil, ErrInvalidLength
+	}
+	if len(data) < 15+int(payloadLen)+16 {
+		return nil, ErrInvalidLength
+	}
+
+	ad := data[0:15]
+	ciphertext := data[15 : 15+payloadLen]
+	authTag := data[15+payloadLen : 15+payloadLen+16]
+
+	for i := range cache.uuids {
+		h := hmac.New(sha256.New, cache.hmacKeys[i][:])
+		h.Write(ad)
+		h.Write(ciphertext)
+		expectedTag := h.Sum(nil)[:16]
+		if !hmac.Equal(authTag, expectedTag) {
+			continue
+		}
+
+		key := deriveEncryptionKey(cache.uuids[i], nonce)
+		aead, err := chacha20poly1305.New(key)
+		if err != nil {
+			continue
+		}
+
+		plaintext, err := aead.Open(nil, nonce[:], ciphertext, ad)
+		if err != nil {
+			continue
+		}
+
+		req := &HandshakeRequest{Version: version, Nonce: nonce}
+
+		if len(plaintext) < 4+16+1+1+1+1 {
+			continue
+		}
+
+		req.Timestamp = binary.BigEndian.Uint32(plaintext[0:4])
+		copy(req.UUID[:], plaintext[4:20])
+		req.Command = plaintext[20]
+
+		now := time.Now().Unix()
+		if math.Abs(float64(int64(req.Timestamp)-now)) > TimeWindow {
+			return nil, ErrInvalidTimestamp
+		}
+
+		addr, addrLen, err := DecodeAddress(plaintext[21:])
+		if err != nil {
+			continue
+		}
+		req.TargetAddr = addr
+
+		offset := 21 + addrLen
+		if len(plaintext) < offset+2 {
+			continue
+		}
+		req.Options = plaintext[offset]
+		req.PaddingLength = plaintext[offset+1]
+
+		return req, nil
+	}
+
+	return nil, ErrInvalidAuth
+}
+
+
