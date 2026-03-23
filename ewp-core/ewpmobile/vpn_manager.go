@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -317,15 +316,13 @@ func (vm *vpnManager) Start(tunFD int, config *VPNConfig) error {
 
 	// 6. 创建 TUN 设备 (Android FileDescriptor)
 	log.Printf("[VPNManager] Creating TUN device from FD=%d, MTU=%d", tunFD, vm.tunMTU)
-	
-	// Create raw wireguard-tun device from the file descriptor handed to us by VpnService Builder
-	file := os.NewFile(uintptr(tunFD), "tun")
-	if file == nil {
-		cancel()
-		return fmt.Errorf("create os.File from TUN FD %d failed", tunFD)
-	}
 
-	tunDevice, err := wgtun.CreateTUNFromFile(file, vm.tunMTU)
+	// 使用 CreateUnmonitoredTUNFromFD 而非 CreateTUNFromFile:
+	// CreateTUNFromFile 内部调用 createNetlinkSocket() → unix.Bind(NETLINK_ROUTE)，
+	// Android SELinux 对 untrusted_app 禁止此操作，导致 permission denied。
+	// CreateUnmonitoredTUNFromFD 完全跳过 netlink（不监听接口 up/down 事件），
+	// Android VpnService 已管理 TUN 生命周期，无需 netlink 事件。
+	tunDevice, _, err := wgtun.CreateUnmonitoredTUNFromFD(tunFD)
 	if err != nil {
 		cancel()
 		return fmt.Errorf("create TUN device failed: %w", err)
