@@ -2,9 +2,9 @@ package tun
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"net/netip"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -68,7 +68,7 @@ func (h *Handler) HandleTCP(conn *gonet.TCPConn) {
 		dstIP, _ := netip.AddrFromSlice(dstAddr.IP)
 		dstIP = dstIP.Unmap() // convert ::ffff:198.18.x.x → 198.18.x.x
 		if domain, ok := h.fakeIPPool.LookupByIP(dstIP); ok {
-			target = net.JoinHostPort(domain, fmt.Sprint(dstAddr.Port))
+			target = net.JoinHostPort(domain, strconv.Itoa(dstAddr.Port))
 			log.Printf("[TUN TCP] FakeIP reverse: %s -> %s", dstAddr, target)
 		} else if h.fakeIPPool.IsFakeIP(dstIP) {
 			log.Printf("[TUN TCP] WARNING: FakeIP %s has no mapping!", dstIP)

@@ -39,20 +39,25 @@ func (e *endpoint) LinkAddress() tcpip.LinkAddress {
 }
 
 func (e *endpoint) WritePackets(pkts stack.PacketBufferList) (int, tcpip.Error) {
-	n := 0
-	for _, pkt := range pkts.AsSlice() {
-		view := pkt.ToView()
-		buf := make([]byte, len(view.AsSlice()))
-		copy(buf, view.AsSlice())
-		view.Release()
-
-		_, err := e.tunDev.Write([][]byte{buf}, 0)
-		if err != nil {
-			return n, &tcpip.ErrAborted{}
-		}
-		n++
+	pktsSlice := pkts.AsSlice()
+	if len(pktsSlice) == 0 {
+		return 0, nil
 	}
-	return n, nil
+
+	bufs := make([][]byte, len(pktsSlice))
+	for i, pkt := range pktsSlice {
+		view := pkt.ToView()
+		data := view.AsSlice()
+		buf := make([]byte, len(data))
+		copy(buf, data)
+		view.Release()
+		bufs[i] = buf
+	}
+
+	if _, err := e.tunDev.Write(bufs, 0); err != nil {
+		return 0, &tcpip.ErrAborted{}
+	}
+	return len(pktsSlice), nil
 }
 
 func (e *endpoint) Attach(dispatcher stack.NetworkDispatcher) {
@@ -109,10 +114,8 @@ func (e *endpoint) dispatchLoop() {
 			})
 			e.dispatcher.DeliverNetworkPacket(protocol, pkt)
 			pkt.DecRef()
-
-			// Refresh the buffer for reuse — the previous slice was
-			// handed to gVisor which may hold a reference via MakeWithData.
-			bufs[i] = make([]byte, e.mtu+4)
+			// MakeWithData -> NewViewWithData -> v.Write() 内部复制数据到新 chunk，
+			// 原 bufs[i] 不被 gVisor 持有，可直接复用，无需重新 make。
 		}
 	}
 }
