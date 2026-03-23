@@ -196,8 +196,17 @@ func (vm *vpnManager) Start(tunFD int, config *VPNConfig) error {
 			config.Path,
 			echMgr,
 		)
-		if err == nil && config.Host != "" {
-			wsT.SetHost(config.Host)
+		if err == nil {
+			if config.Host != "" {
+				wsT.SetHost(config.Host)
+			}
+			effectiveSNI := config.SNI
+			if effectiveSNI == "" {
+				effectiveSNI = config.Host
+			}
+			if effectiveSNI != "" {
+				wsT.SetSNI(effectiveSNI)
+			}
 		}
 		vm.transport = wsT
 	case "grpc":
@@ -221,6 +230,13 @@ func (vm *vpnManager) Start(tunFD int, config *VPNConfig) error {
 			if config.Host != "" {
 				grpcT.SetAuthority(config.Host)
 			}
+			effectiveSNI := config.SNI
+			if effectiveSNI == "" {
+				effectiveSNI = config.Host
+			}
+			if effectiveSNI != "" {
+				grpcT.SetSNI(effectiveSNI)
+			}
 		}
 		vm.transport = grpcT
 	case "xhttp":
@@ -243,6 +259,13 @@ func (vm *vpnManager) Start(tunFD int, config *VPNConfig) error {
 			}
 			if config.Host != "" {
 				xhttpT.SetHost(config.Host)
+			}
+			effectiveSNI := config.SNI
+			if effectiveSNI == "" {
+				effectiveSNI = config.Host
+			}
+			if effectiveSNI != "" {
+				xhttpT.SetSNI(effectiveSNI)
 			}
 		}
 		vm.transport = xhttpT
@@ -270,6 +293,13 @@ func (vm *vpnManager) Start(tunFD int, config *VPNConfig) error {
 			if config.Host != "" {
 				h3T.SetAuthority(config.Host)
 			}
+			effectiveSNI := config.SNI
+			if effectiveSNI == "" {
+				effectiveSNI = config.Host
+			}
+			if effectiveSNI != "" {
+				h3T.SetSNI(effectiveSNI)
+			}
 		}
 		vm.transport = h3T
 	default:
@@ -280,18 +310,6 @@ func (vm *vpnManager) Start(tunFD int, config *VPNConfig) error {
 	if err != nil {
 		cancel()
 		return fmt.Errorf("failed to create transport: %w", err)
-	}
-
-	// Apply SNI override: config.SNI → config.Host → "" (transport falls back to parsed server host)
-	effectiveSNI := config.SNI
-	if effectiveSNI == "" {
-		effectiveSNI = config.Host
-	}
-	if effectiveSNI != "" {
-		switch t := vm.transport.(type) {
-		case interface{ SetSNI(string) }:
-			t.SetSNI(effectiveSNI)
-		}
 	}
 
 	// 3. Android socket 保护：所有出站连接绑定到 VpnService.protect() 以避免 TUN 路由死循环

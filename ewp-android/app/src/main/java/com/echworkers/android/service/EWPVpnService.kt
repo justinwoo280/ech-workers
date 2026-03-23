@@ -332,6 +332,7 @@ class EWPVpnService : VpnService(), SocketProtector {
     
     private fun broadcastState(state: VpnServiceState) {
         val intent = Intent(VPN_STATE_ACTION).apply {
+            setPackage(packageName)
             putExtra(EXTRA_STATE, state.name)
         }
         sendBroadcast(intent)
@@ -339,6 +340,7 @@ class EWPVpnService : VpnService(), SocketProtector {
     
     private fun broadcastStats(statsJson: String) {
         val intent = Intent(VPN_STATS_ACTION).apply {
+            setPackage(packageName)
             putExtra(EXTRA_STATS, statsJson)
         }
         sendBroadcast(intent)
@@ -346,6 +348,7 @@ class EWPVpnService : VpnService(), SocketProtector {
     
     private fun broadcastError(message: String) {
         val intent = Intent(VPN_ERROR_ACTION).apply {
+            setPackage(packageName)
             putExtra(EXTRA_ERROR, message)
         }
         sendBroadcast(intent)
