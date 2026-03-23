@@ -76,9 +76,7 @@ func FastIntn(n int) int {
 // FastBytes 快速填充随机字节 (用于 padding，不需要密码学安全, goroutine-safe)
 func FastBytes(b []byte) {
 	r := fastRandPool.Get().(*rand.Rand)
-	for i := range b {
-		b[i] = byte(r.Intn(256))
-	}
+	r.Read(b)
 	fastRandPool.Put(r)
 }
 
@@ -116,8 +114,8 @@ func EncodeFlowFrame(streamID uint16, command byte, content []byte, paddingLen u
 
 // DecodeFlowFrame decodes a flow frame from wire format
 func DecodeFlowFrame(r io.Reader) (*FlowFrame, error) {
-	header := make([]byte, 7)
-	if _, err := io.ReadFull(r, header); err != nil {
+	var header [7]byte
+	if _, err := io.ReadFull(r, header[:]); err != nil {
 		return nil, err
 	}
 

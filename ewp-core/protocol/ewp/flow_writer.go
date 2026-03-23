@@ -2,7 +2,17 @@ package ewp
 
 import (
 	"io"
+	"sync"
 )
+
+const readBufPoolSize = 32 * 1024
+
+var readBufPool = sync.Pool{
+	New: func() interface{} {
+		buf := make([]byte, readBufPoolSize)
+		return &buf
+	},
+}
 
 // FlowWriter wraps a writer and applies Vision-style padding
 type FlowWriter struct {
@@ -88,19 +98,35 @@ func (r *FlowReader) Read(p []byte) (n int, err error) {
 		return r.reader.Read(p)
 	}
 
-	// Read raw data
-	buf := make([]byte, len(p)*2) // Allocate extra space for padding
+	// Read raw data，使用 sync.Pool 复用缓冲区，消除热路径 heap alloc
+	needed := len(p) * 2
+	var buf []byte
+	var pooledPtr *[]byte
+	if needed <= readBufPoolSize {
+		pooledPtr = readBufPool.Get().(*[]byte)
+		buf = (*pooledPtr)[:needed]
+	} else {
+		buf = make([]byte, needed)
+	}
+
 	n, err = r.reader.Read(buf)
 	if err != nil {
+		if pooledPtr != nil {
+			readBufPool.Put(pooledPtr)
+		}
 		return 0, err
 	}
 
-	// Remove padding
+	// Remove padding (ProcessUplink/Downlink 内部复制数据，buf 可安全归还)
 	var unpadded []byte
 	if r.isUplink {
 		unpadded = r.state.ProcessUplink(buf[:n])
 	} else {
 		unpadded = r.state.ProcessDownlink(buf[:n])
+	}
+
+	if pooledPtr != nil {
+		readBufPool.Put(pooledPtr)
 	}
 
 	// Copy to output buffer
