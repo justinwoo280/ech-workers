@@ -214,7 +214,9 @@ class EWPVpnService : VpnService(), SocketProtector {
                 Log.e(TAG, "Failed to establish VPN interface")
                 -1
             } else {
-                val fd = vpnInterface!!.fd
+                // detachFd() 将 fd 所有权转移给 Go 层，避免 ParcelFileDescriptor.close()
+                // 与 Go 的 os.NewFile() 双重持有同一 fd 导致 fdsan SIGABRT
+                val fd = vpnInterface!!.detachFd()
                 Log.i(TAG, "VPN interface established: fd=$fd, proxyMode=${proxyConfig.mode}")
                 fd
             }
