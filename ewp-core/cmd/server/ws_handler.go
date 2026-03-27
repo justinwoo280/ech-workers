@@ -19,30 +19,23 @@ func isWebSocketRequest(r *http.Request) bool {
 }
 
 func wsHandler(w http.ResponseWriter, r *http.Request) {
-	proto := r.Header.Get("Sec-WebSocket-Protocol")
-	if trojanMode {
-		if proto != password {
-			disguiseHandler(w, r)
-			return
-		}
-	} else {
-		if proto != uuid {
-			disguiseHandler(w, r)
-			return
-		}
-	}
-
 	if !isWebSocketRequest(r) {
 		disguiseHandler(w, r)
 		return
 	}
 
-	adapter := wstransport.NewServerAdapter()
-	upgrader := gws.NewUpgrader(adapter, &gws.ServerOption{
-		SubProtocols:   []string{proto},
+	proto := r.Header.Get("Sec-WebSocket-Protocol")
+
+	upgraderOpt := &gws.ServerOption{
 		ReadBufferSize: 65536,
-		ResponseHeader: http.Header{"Sec-WebSocket-Protocol": {proto}},
-	})
+	}
+	if proto != "" {
+		upgraderOpt.SubProtocols = []string{proto}
+		upgraderOpt.ResponseHeader = http.Header{"Sec-WebSocket-Protocol": {proto}}
+	}
+
+	adapter := wstransport.NewServerAdapter()
+	upgrader := gws.NewUpgrader(adapter, upgraderOpt)
 
 	socket, err := upgrader.Upgrade(w, r)
 	if err != nil {
