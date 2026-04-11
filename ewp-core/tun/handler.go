@@ -263,8 +263,11 @@ func (h *Handler) udpReadLoop(tunClientSrc netip.AddrPort, session *udpSession) 
 		//   src = actualRemote  (packet appears to come FROM the FakeIP server)
 		//   dst = tunClientSrc   (packet is delivered TO the TUN client)
 		if actualRemote.IsValid() {
-			if err := h.udpWriter.WriteTo(buf[:n], actualRemote, tunClientSrc); err != nil {
-				log.V("[TUN UDP] Write to TUN failed: %v", err)
+			// Use InjectUDP instead of WriteTo to bypass gVisor's source address validation
+			// WriteTo would go through gonet.DialUDP which does additional source verification
+			// InjectUDP directly writes raw UDP packet to TUN, avoiding double validation
+			if err := h.udpWriter.InjectUDP(buf[:n], actualRemote, tunClientSrc); err != nil {
+				log.V("[TUN UDP] Inject to TUN failed: %v", err)
 			}
 		} else {
 			log.V("[TUN UDP] Dropping reply: no valid source address for session %s", tunClientSrc)
