@@ -232,6 +232,7 @@ func XtlsPadding(content []byte, command byte, userUUID *[]byte, longPadding boo
 
 // XtlsUnpadding removes padding and parses command
 // Ported directly from Xray-core proxy/proxy.go
+// Optimized: reduced allocations by using direct pointer arithmetic instead of bytes.Reader
 func XtlsUnpadding(data []byte, state *FlowState, isUplink bool) []byte {
 	var remainingCommand *int32
 	var remainingContent *int32
@@ -260,16 +261,18 @@ func XtlsUnpadding(data []byte, state *FlowState, isUplink bool) []byte {
 		}
 	}
 
-	newbuffer := &bytes.Buffer{}
-	reader := bytes.NewReader(data)
+	// Pre-allocate output buffer to reduce allocations
+	newbuffer := make([]byte, 0, len(data))
+	pos := 0
 
-	for reader.Len() > 0 {
+	for pos < len(data) {
 		if *remainingCommand > 0 {
 			// Parse command header: [command(1) | contentLen(2) | paddingLen(2)]
-			b, err := reader.ReadByte()
-			if err != nil {
+			if pos >= len(data) {
 				break
 			}
+			b := data[pos]
+			pos++
 			switch *remainingCommand {
 			case 5:
 				*currentCommand = int(b)
@@ -286,20 +289,21 @@ func XtlsUnpadding(data []byte, state *FlowState, isUplink bool) []byte {
 		} else if *remainingContent > 0 {
 			// Read content
 			length := *remainingContent
-			if int32(reader.Len()) < length {
-				length = int32(reader.Len())
+			remaining := int32(len(data) - pos)
+			if remaining < length {
+				length = remaining
 			}
-			buf := make([]byte, length)
-			n, _ := reader.Read(buf)
-			newbuffer.Write(buf[:n])
-			*remainingContent -= int32(n)
+			newbuffer = append(newbuffer, data[pos:pos+int(length)]...)
+			pos += int(length)
+			*remainingContent -= length
 		} else if *remainingPadding > 0 {
 			// Skip padding
 			length := *remainingPadding
-			if int32(reader.Len()) < length {
-				length = int32(reader.Len())
+			remaining := int32(len(data) - pos)
+			if remaining < length {
+				length = remaining
 			}
-			reader.Seek(int64(length), io.SeekCurrent)
+			pos += int(length)
 			*remainingPadding -= length
 		}
 
@@ -313,17 +317,15 @@ func XtlsUnpadding(data []byte, state *FlowState, isUplink bool) []byte {
 				*remainingContent = -1
 				*remainingPadding = -1
 				// Append any remaining data (shouldn't happen in normal case)
-				if reader.Len() > 0 {
-					remaining := make([]byte, reader.Len())
-					reader.Read(remaining)
-					newbuffer.Write(remaining)
+				if pos < len(data) {
+					newbuffer = append(newbuffer, data[pos:]...)
 				}
 				break
 			}
 		}
 	}
 
-	return newbuffer.Bytes()
+	return newbuffer
 }
 
 // IsCompleteRecord checks if buffer contains complete TLS record(s)
