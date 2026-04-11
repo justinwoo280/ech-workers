@@ -21,6 +21,7 @@ import (
 type udpSession struct {
 	tunnelConn transport.TunnelConn
 	remoteAddr netip.AddrPort // the remote server addr (responses appear to come FROM here)
+	fakeAddr   netip.AddrPort // FakeIP:Port that the client originally sent to (for Full Cone NAT)
 	lastActive atomic.Int64  // UnixNano; updated on every packet, read by cleanup goroutine
 }
 
@@ -175,6 +176,7 @@ func (h *Handler) HandleUDP(payload []byte, src netip.AddrPort, dst netip.AddrPo
 		session = &udpSession{
 			tunnelConn: tunnelConn,
 			remoteAddr: dst, // dst is always an IP (from gVisor), safe to store directly
+			fakeAddr:   dst, // Store the FakeIP destination for Full Cone NAT support
 		}
 		session.lastActive.Store(time.Now().UnixNano())
 
@@ -239,23 +241,33 @@ func (h *Handler) udpReadLoop(tunClientSrc netip.AddrPort, session *udpSession) 
 			return
 		}
 
-		// Use the FakeIP the app originally connected to (session.remoteAddr) as the
-		// response source. This ensures FakeIP transparency: the app sent to a fakeIP
-		// and expects responses from that same fakeIP, not the real remote IP.
-		actualRemote := session.remoteAddr
+		// Full Cone NAT Support: Use the FakeIP the app originally sent to.
+		// This is critical because:
+		// 1. Client sends to FakeIP (e.g., 198.18.0.1:53 for DNS)
+		// 2. App expects response from same FakeIP (NOT real server IP)
+		// 3. gVisor UDP socket validates source IP
+		// 4. Using FakeAddr ensures response passes gVisor's validation
+		//
+		// Without this, real server responses are DROPped by gVisor because
+		// the source IP doesn't match the expected FakeIP.
+		actualRemote := session.fakeAddr
 		if !actualRemote.IsValid() {
-			actualRemote = remoteAddr
+			// Fallback to recorded remote (shouldn't happen in normal flow)
+			actualRemote = session.remoteAddr
+			if !actualRemote.IsValid() {
+				actualRemote = remoteAddr
+			}
 		}
 
 		// Inject reply into gVisor:
-		//   src = actualRemote  (packet appears to come FROM the remote server)
+		//   src = actualRemote  (packet appears to come FROM the FakeIP server)
 		//   dst = tunClientSrc   (packet is delivered TO the TUN client)
 		if actualRemote.IsValid() {
 			if err := h.udpWriter.WriteTo(buf[:n], actualRemote, tunClientSrc); err != nil {
 				log.V("[TUN UDP] Write to TUN failed: %v", err)
 			}
 		} else {
-			log.V("[TUN UDP] Dropping reply: actualRemote not valid for session %s", tunClientSrc)
+			log.V("[TUN UDP] Dropping reply: no valid source address for session %s", tunClientSrc)
 		}
 	}
 }
