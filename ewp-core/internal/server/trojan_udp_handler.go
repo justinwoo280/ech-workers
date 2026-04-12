@@ -134,8 +134,10 @@ func (h *trojanUDPHandler) sessionWorker(s *udpSession) {
 			continue
 		}
 		if _, err := s.conn.WriteTo(pkt.payload, pkt.target); err != nil {
-			log.Warn("Trojan UDP write error: %v", err)
-			return
+			log.Warn("Trojan UDP write error for %s: %v", pkt.target, err)
+			// Don't return on write error - just continue
+			// The session will timeout eventually if target is unreachable
+			continue
 		}
 		s.updateActive()
 	}
@@ -188,7 +190,10 @@ func (h *trojanUDPHandler) receiveResponses(s *udpSession) {
 		resp = append(resp, buf[:n]...)
 
 		if err := h.writer.write(resp); err != nil {
-			return
+			log.Warn("Trojan UDP response write failed: %v, session may be disconnected", err)
+			// Don't return here - continue processing other responses
+			// The session will eventually timeout and be cleaned up
+			continue
 		}
 	}
 }
