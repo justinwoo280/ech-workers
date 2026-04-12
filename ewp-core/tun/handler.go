@@ -212,10 +212,14 @@ func (h *Handler) HandleUDP(payload []byte, src netip.AddrPort, dst netip.AddrPo
 	session.lastActive.Store(time.Now().UnixNano())
 
 	// Forward UDP payload to the target via the proxy tunnel
+	log.V("[TUN UDP] Before WriteUDP: endpoint=%s payload_len=%d", endpoint, len(payload))
 	if err := session.tunnelConn.WriteUDP(endpoint, payload); err != nil {
-		log.Warn("[TUN UDP] WriteUDP failed for %s: %v", endpoint, err)
+		log.Warn("[TUN UDP] WriteUDP failed for %s: %v (type: %T)", endpoint, err, err)
+		// Don't return - the session will continue to listen for responses
+		// If WriteUDP keeps failing, the session will eventually timeout
 		return
 	}
+	log.V("[TUN UDP] After WriteUDP success")
 }
 
 // udpReadLoop continuously reads UDP responses from the proxy tunnel and writes them back to the TUN Stack.

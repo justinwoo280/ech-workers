@@ -233,9 +233,10 @@ func (h *udpHandler) sessionWorker(s *udpSession) {
 		// WriteTo 明确指定目标地址（非连接 socket 必须）。
 		// 允许每个包发往不同目标（ICE 多候选地址检查）。
 		if _, err := s.conn.WriteTo(pkt.payload, pkt.target); err != nil {
-			log.Warn("UDP write error: %v", err)
-			h.remove(s.globalID)
-			return
+			log.Warn("UDP write error for %s: %v", pkt.target, err)
+			// Don't return/remove session on write error - just continue
+			// The session will timeout eventually if target is unreachable
+			continue
 		}
 		s.updateActive()
 	}
@@ -284,7 +285,10 @@ func (h *udpHandler) receiveResponses(s *udpSession) {
 		}
 
 		if err := h.writer.write(data); err != nil {
-			return
+			log.Warn("UDP response write failed: %v, session may be disconnected", err)
+			// Don't return here - continue processing other responses
+			// The session will eventually timeout and be cleaned up
+			continue
 		}
 	}
 }
