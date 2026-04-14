@@ -7,7 +7,7 @@ import (
 
 func TestLoadConfig(t *testing.T) {
 	// Test loading H3 config
-	cfg, err := LoadConfig("../config.example.json")
+	cfg, err := LoadConfig("../../example/config.example.json")
 	if err != nil {
 		t.Fatalf("Failed to load H3 config: %v", err)
 	}
@@ -39,7 +39,7 @@ func TestLoadConfig(t *testing.T) {
 }
 
 func TestLoadWebSocketConfig(t *testing.T) {
-	cfg, err := LoadConfig("../config.ws.example.json")
+	cfg, err := LoadConfig("../../example/config.ws.example.json")
 	if err != nil {
 		t.Fatalf("Failed to load WS config: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestLoadWebSocketConfig(t *testing.T) {
 }
 
 func TestLoadTrojanConfig(t *testing.T) {
-	cfg, err := LoadConfig("../config.trojan.example.json")
+	cfg, err := LoadConfig("../../example/config.trojan.example.json")
 	if err != nil {
 		t.Fatalf("Failed to load Trojan config: %v", err)
 	}
