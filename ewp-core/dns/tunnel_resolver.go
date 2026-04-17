@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"ewp-core/log"
@@ -27,12 +28,20 @@ import (
 //   - HTTP requests are serialized through a mutex (HTTP/1.1 limitation)
 //   - Results are cached with extended TTL (proxy handles real resolution)
 //   - Auto-reconnect on connection loss
+//
+// maxDNSCacheEntries is the approximate upper bound on cached DNS responses.
+// When exceeded, a sweep evicts all expired entries; if the count is still
+// high after eviction, the cache is cleared entirely to prevent unbounded
+// memory growth in long-running deployments. (P1-5)
+const maxDNSCacheEntries = 10_000
+
 type TunnelDNSResolver struct {
-	transport transport.Transport
-	dohServer string // e.g., "https://dns.google/dns-query"
-	cache     sync.Map
-	cacheTTL  time.Duration
-	timeout   time.Duration
+	transport  transport.Transport
+	dohServer  string // e.g., "https://dns.google/dns-query"
+	cache      sync.Map
+	cacheCount int64 // atomic — approximate entry count for cap enforcement (P1-5)
+	cacheTTL   time.Duration
+	timeout    time.Duration
 
 	// Persistent connection management
 	connMu     sync.Mutex
@@ -221,6 +230,21 @@ func (r *TunnelDNSResolver) QueryRaw(ctx context.Context, dnsQuery []byte) ([]by
 		}
 	}
 
+	// P1-5: enforce cache capacity cap before storing a new entry.
+	if atomic.AddInt64(&r.cacheCount, 1) > maxDNSCacheEntries {
+		r.evictExpiredCache()
+	}
+
+	// P1-16: Validate that the DoH server echoed our transaction ID.
+	// In the current serial HTTP/1.1 model each request has exactly one
+	// response so TXID mismatches cannot happen in practice.  This check
+	// is a defensive guard for a future HTTP/2 connection-pool upgrade
+	// (P1-4) where multiplexed responses must be matched by TXID.
+	if len(response) >= 2 && (response[0] != dnsQuery[0] || response[1] != dnsQuery[1]) {
+		log.V("[TunnelDNS] TXID mismatch: sent %02x%02x got %02x%02x — using response anyway (HTTP/1.1 serial mode)",
+			dnsQuery[0], dnsQuery[1], response[0], response[1])
+	}
+
 	// Cache the result
 	r.cache.Store(cacheKey, &cachedDNSResult{
 		response:  response,
@@ -396,9 +420,34 @@ func dnsCacheKey(query []byte) string {
 	return string(query[2:])
 }
 
+// evictExpiredCache removes all expired entries from the cache and updates the
+// approximate entry counter.  If the count is still above the cap after
+// eviction (i.e. all entries are unexpired), the entire cache is cleared so
+// memory growth stays bounded. (P1-5)
+func (r *TunnelDNSResolver) evictExpiredCache() {
+	now := time.Now()
+	var evicted int64
+	r.cache.Range(func(k, v interface{}) bool {
+		if result := v.(*cachedDNSResult); now.After(result.expiresAt) {
+			r.cache.Delete(k)
+			evicted++
+		}
+		return true
+	})
+	remaining := atomic.AddInt64(&r.cacheCount, -evicted)
+	if remaining > maxDNSCacheEntries {
+		// All cached entries are still valid but we are over cap — clear to
+		// prevent unbounded growth (trades a cold-cache spike for safety).
+		r.cache = sync.Map{}
+		atomic.StoreInt64(&r.cacheCount, 0)
+		log.Printf("[TunnelDNS] Cache cleared (over cap: %d entries)", remaining)
+	}
+}
+
 // ClearCache clears the resolver cache.
 func (r *TunnelDNSResolver) ClearCache() {
 	r.cache = sync.Map{}
+	atomic.StoreInt64(&r.cacheCount, 0)
 	log.Printf("[TunnelDNS] Cache cleared")
 }
 

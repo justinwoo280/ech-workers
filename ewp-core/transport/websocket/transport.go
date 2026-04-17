@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"strings"
 	"time"
 
 	commonnet "ewp-core/common/net"
@@ -245,32 +244,17 @@ func (t *Transport) handleECHRejection(err error) error {
 	if err == nil {
 		return errors.New("nil error")
 	}
-	errMsg := err.Error()
-	if !strings.Contains(errMsg, "server rejected ECH") && !strings.Contains(errMsg, "ECH") {
+	// P1-12: use errors.As with the concrete *tls.ECHRejectionError type instead
+	// of fragile string matching.  String matching breaks if Go ever changes the
+	// error message; errors.As is version-stable and faster.
+	var echRejErr *tls.ECHRejectionError
+	if !errors.As(err, &echRejErr) {
 		return errors.New("not ECH rejection")
 	}
-	var echRejErr interface{ RetryConfigList() []byte }
-	cause := err
-	for cause != nil {
-		if rejErr, ok := cause.(interface{ RetryConfigList() []byte }); ok {
-			echRejErr = rejErr
-			break
-		}
-		unwrapped := errors.Unwrap(cause)
-		if unwrapped == nil {
-			break
-		}
-		cause = unwrapped
-	}
-	if echRejErr == nil {
-		log.Printf("[WebSocket] ECH rejection detected but no retry config available")
-		return errors.New("no retry config")
-	}
-	retryList := echRejErr.RetryConfigList()
-	if len(retryList) == 0 {
+	if len(echRejErr.RetryConfigList) == 0 {
 		log.Printf("[WebSocket] Server rejected ECH without retry config (secure signal)")
 		return errors.New("empty retry config")
 	}
-	log.Printf("[WebSocket] Updating ECH config from server retry (%d bytes)", len(retryList))
-	return t.echManager.UpdateFromRetry(retryList)
+	log.Printf("[WebSocket] Updating ECH config from server retry (%d bytes)", len(echRejErr.RetryConfigList))
+	return t.echManager.UpdateFromRetry(echRejErr.RetryConfigList)
 }

@@ -2,6 +2,7 @@ package grpc
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -29,10 +30,39 @@ type grpcConnKey struct {
 	bypass    bool
 }
 
+// maxGRPCConnPoolSize caps the number of pooled gRPC ClientConns to prevent
+// unbounded growth when outbound nodes are switched frequently. (P1-10)
+const maxGRPCConnPoolSize = 50
+
 var (
-	grpcConnPool      = make(map[grpcConnKey]*grpc.ClientConn)
-	grpcConnPoolMutex sync.Mutex
+	grpcConnPool        = make(map[grpcConnKey]*grpc.ClientConn)
+	grpcConnPoolMutex   sync.Mutex
+	grpcPoolCleanupOnce sync.Once
 )
+
+// startGRPCPoolCleanup launches a background goroutine that evicts
+// SHUTDOWN / TransientFailure connections from the pool every 5 minutes.
+// Called lazily on first Dial so there are no goroutines in tests that
+// never dial. (P1-10)
+func startGRPCPoolCleanup() {
+	grpcPoolCleanupOnce.Do(func() {
+		go func() {
+			ticker := time.NewTicker(5 * time.Minute)
+			defer ticker.Stop()
+			for range ticker.C {
+				grpcConnPoolMutex.Lock()
+				for k, conn := range grpcConnPool {
+					state := conn.GetState()
+					if state == connectivity.Shutdown || state == connectivity.TransientFailure {
+						conn.Close()
+						delete(grpcConnPool, k)
+					}
+				}
+				grpcConnPoolMutex.Unlock()
+			}
+		}()
+	})
+}
 
 type Transport struct {
 	serverAddr          string
@@ -208,6 +238,8 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 }
 
 func (t *Transport) getOrCreateConn(host, sniOverride, addr string) (*grpc.ClientConn, error) {
+	// Start the pool cleanup goroutine lazily on first use. (P1-10)
+	startGRPCPoolCleanup()
 	if sniOverride != "" {
 		host = sniOverride
 	}
@@ -229,6 +261,18 @@ func (t *Transport) getOrCreateConn(host, sniOverride, addr string) (*grpc.Clien
 		}
 		conn.Close()
 		delete(grpcConnPool, key)
+	}
+
+	// P1-10: enforce pool size cap — evict any stale connection to make room.
+	if len(grpcConnPool) >= maxGRPCConnPoolSize {
+		for k, conn := range grpcConnPool {
+			state := conn.GetState()
+			if state == connectivity.Shutdown || state == connectivity.TransientFailure || state == connectivity.Idle {
+				conn.Close()
+				delete(grpcConnPool, k)
+				break
+			}
+		}
 	}
 
 	var opts []grpc.DialOption
@@ -314,51 +358,24 @@ func isIPAddress(s string) bool {
 	return net.ParseIP(s) != nil
 }
 
-// handleECHRejection checks if error is ECH rejection and updates config
+// handleECHRejection checks if error is ECH rejection and updates config.
+// P1-12: uses errors.As(*tls.ECHRejectionError) instead of fragile string
+// matching so the detection remains correct across Go version upgrades.
 func (t *Transport) handleECHRejection(err error) error {
 	if err == nil {
 		return errors.New("nil error")
 	}
 
-	// Try to extract ECH rejection error
-	// Go's tls.ECHRejectionError is returned wrapped in connection errors
-	var echRejErr interface{ RetryConfigList() []byte }
-
-	// Check if error message contains ECH rejection
-	errMsg := err.Error()
-	if !strings.Contains(errMsg, "server rejected ECH") &&
-		!strings.Contains(errMsg, "ECH") {
+	var echRejErr *tls.ECHRejectionError
+	if !errors.As(err, &echRejErr) {
 		return errors.New("not ECH rejection")
 	}
 
-	// Try to unwrap and find ECHRejectionError
-	cause := err
-	for cause != nil {
-		// Check if this error has RetryConfigList method
-		if rejErr, ok := cause.(interface{ RetryConfigList() []byte }); ok {
-			echRejErr = rejErr
-			break
-		}
-
-		// Try to unwrap
-		unwrapped := errors.Unwrap(cause)
-		if unwrapped == nil {
-			break
-		}
-		cause = unwrapped
-	}
-
-	if echRejErr == nil {
-		log.Printf("[gRPC] ECH rejection detected but no retry config available")
-		return errors.New("no retry config")
-	}
-
-	retryList := echRejErr.RetryConfigList()
-	if len(retryList) == 0 {
+	if len(echRejErr.RetryConfigList) == 0 {
 		log.Printf("[gRPC] Server rejected ECH without retry config (secure signal)")
 		return errors.New("empty retry config")
 	}
 
-	log.Printf("[gRPC] Updating ECH config from server retry (%d bytes)", len(retryList))
-	return t.echManager.UpdateFromRetry(retryList)
+	log.Printf("[gRPC] Updating ECH config from server retry (%d bytes)", len(echRejErr.RetryConfigList))
+	return t.echManager.UpdateFromRetry(echRejErr.RetryConfigList)
 }

@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"ewp-core/internal/server"
@@ -27,6 +28,12 @@ const maxXHTTPHandshakeSize = 4 * 1024 // 4 KB
 // 1 MB gives a comfortable margin while preventing OOM via crafted large bodies.
 const maxXHTTPFrameSize = 1 * 1024 * 1024 // 1 MB
 
+// maxXHTTPSessionsTotal is the server-wide cap on concurrent XHTTP sessions.
+// An authenticated user creating unlimited sessions (each holding a goroutine +
+// remote socket + upload queue) can exhaust file descriptors and OOM the server.
+// When the cap is reached new session requests receive 503. (P0-7)
+const maxXHTTPSessionsTotal = 10_000
+
 type xhttpSession struct {
 	remote           net.Conn
 	uploadQueue      *server.UploadQueue
@@ -41,6 +48,9 @@ var (
 	xhttpSessions      = sync.Map{}
 	xhttpSessionMutex  sync.Mutex
 	xhttpSessionExpiry = 30 * time.Second
+
+	// xhttpSessionCount is the current number of live sessions (atomic). (P0-7)
+	xhttpSessionCount int32
 )
 
 func startXHTTPServer() {
@@ -131,6 +141,8 @@ func setXHTTPResponseHeaders(w http.ResponseWriter) {
 	setStreamResponseHeaders(w, "")
 }
 
+// upsertSession returns the existing session for sessionID, or creates a new one.
+// Returns nil when the server-wide session cap has been reached (P0-7).
 func upsertSession(sessionID string, clientIP string) *xhttpSession {
 	if val, ok := xhttpSessions.Load(sessionID); ok {
 		return val.(*xhttpSession)
@@ -142,6 +154,14 @@ func upsertSession(sessionID string, clientIP string) *xhttpSession {
 	if val, ok := xhttpSessions.Load(sessionID); ok {
 		return val.(*xhttpSession)
 	}
+
+	// P0-7: enforce total session cap to prevent fd/goroutine exhaustion.
+	if atomic.LoadInt32(&xhttpSessionCount) >= maxXHTTPSessionsTotal {
+		log.Warn("XHTTP session cap (%d) reached, rejecting new session from %s",
+			maxXHTTPSessionsTotal, clientIP)
+		return nil
+	}
+	atomic.AddInt32(&xhttpSessionCount, 1)
 
 	session := &xhttpSession{
 		uploadQueue:      server.NewUploadQueue(100),
@@ -167,6 +187,7 @@ func upsertSession(sessionID string, clientIP string) *xhttpSession {
 				}
 				close(session.done)
 				xhttpSessions.Delete(sessionID)
+				atomic.AddInt32(&xhttpSessionCount, -1) // P0-7: release slot
 				log.Info("Session expired after %s: %s (client: %s)",
 					time.Since(session.createdAt).Round(time.Second), sessionID, clientIP)
 			})
@@ -308,6 +329,11 @@ func xhttpHandshakeHandler(w http.ResponseWriter, r *http.Request, sessionID str
 	log.Info("XHTTP handshake OK: session=%s, target=%s, client=%s", sessionID, req.TargetAddr, clientIP)
 
 	session := upsertSession(sessionID, clientIP)
+	if session == nil {
+		// P0-7: session cap exceeded — reject with 503 so the client can retry later
+		http.Error(w, "Service Unavailable: session limit reached", http.StatusServiceUnavailable)
+		return
+	}
 	target := req.TargetAddr.String()
 
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)

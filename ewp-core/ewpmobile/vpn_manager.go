@@ -59,6 +59,9 @@ type vpnManager struct {
 	// 传输层
 	transport transport.Transport
 
+	// ECH manager — must be stopped on Stop() to avoid goroutine leak (P1-6)
+	echMgr *tls.ECHManager
+
 	// TUN 相关
 	tunFD      int
 	tunMTU     int
@@ -94,9 +97,9 @@ type VPNConfig struct {
 	SNI  string // TLS SNI 覆盖（留空则同 Host）
 
 	// TLS 配置
-	EnableTLS     bool   // 是否启用 TLS（移动端一般始终 true）
-	MinTLSVersion string // "1.2" 或 "1.3"
-	EnableMozillaCA bool // 是否使用内置 Mozilla Root CAs
+	EnableTLS       bool   // 是否启用 TLS（移动端一般始终 true）
+	MinTLSVersion   string // "1.2" 或 "1.3"
+	EnableMozillaCA bool   // 是否使用内置 Mozilla Root CAs
 
 	// gRPC / H3gRPC 附加配置
 	UserAgent   string // 自定义 User-Agent
@@ -172,9 +175,13 @@ func (vm *vpnManager) Start(tunFD int, config *VPNConfig) error {
 		}
 		if err := echMgr.Refresh(); err != nil {
 			log.Printf("[VPNManager] ECH initialization failed: %v, falling back to plain TLS", err)
+			echMgr.Stop()
+			echMgr = nil
 			config.EnableECH = false
 		}
 	}
+	// P1-6: store echMgr so Stop() can release its cleanup goroutine.
+	vm.echMgr = echMgr
 
 	// 2. 创建传输层
 	log.Printf("[VPNManager] Creating transport: %s", config.Protocol)
@@ -401,6 +408,13 @@ func (vm *vpnManager) Stop() error {
 	// 清空传输层引用
 	if vm.transport != nil {
 		vm.transport = nil
+	}
+
+	// P1-6: stop the ECH manager's background cleanup goroutine.
+	// Without this, every Start/Stop cycle leaks one goroutine permanently.
+	if vm.echMgr != nil {
+		vm.echMgr.Stop()
+		vm.echMgr = nil
 	}
 
 	vm.running = false

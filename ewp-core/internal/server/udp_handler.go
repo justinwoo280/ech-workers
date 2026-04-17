@@ -25,6 +25,12 @@ const (
 	udpIdleTimeout   = 5 * time.Minute
 	udpIncomingDepth = 64  // per-session 入包队列深度（有界，防 OOM）
 	udpWriteDepth    = 256 // 回包写入队列深度
+
+	// maxUDPSessionsPerConn is the per-connection session cap.
+	// A single authenticated client cannot open more than this many concurrent
+	// UDP sessions; the oldest idle session is evicted when the cap is hit.
+	// This prevents fd/goroutine exhaustion via GlobalID flooding. (P1-3)
+	maxUDPSessionsPerConn = 500
 )
 
 var udpBufferPool = sync.Pool{
@@ -95,6 +101,10 @@ func (h *udpHandler) getOrCreate(globalID [8]byte) (*udpSession, bool) {
 	h.mu.Lock()
 	s, exists := h.sessions[globalID]
 	if !exists {
+		// P1-3: enforce per-connection session cap.
+		if len(h.sessions) >= maxUDPSessionsPerConn {
+			h.evictOldestIdle_locked()
+		}
 		s = &udpSession{
 			globalID: globalID,
 			incoming: make(chan incomingPkt, udpIncomingDepth),
@@ -103,6 +113,30 @@ func (h *udpHandler) getOrCreate(globalID [8]byte) (*udpSession, bool) {
 	}
 	h.mu.Unlock()
 	return s, !exists
+}
+
+// evictOldestIdle_locked removes the session with the longest idle time.
+// Must be called with h.mu held.
+func (h *udpHandler) evictOldestIdle_locked() {
+	var (
+		oldestID   [8]byte
+		oldestIdle time.Duration
+		found      bool
+	)
+	for id, s := range h.sessions {
+		if idle := s.idleSince(); idle > oldestIdle {
+			oldestIdle = idle
+			oldestID = id
+			found = true
+		}
+	}
+	if found {
+		s := h.sessions[oldestID]
+		delete(h.sessions, oldestID)
+		go s.close() // close outside the lock to avoid deadlock
+		log.V("[UDP] session cap reached (%d), evicted oldest idle session (idle=%s)",
+			maxUDPSessionsPerConn, oldestIdle.Round(time.Second))
+	}
 }
 
 func (h *udpHandler) remove(globalID [8]byte) {

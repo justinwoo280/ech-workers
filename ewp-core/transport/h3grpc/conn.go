@@ -21,9 +21,9 @@ import (
 
 // Conn implements transport.TunnelConn for HTTP/3
 type Conn struct {
-	transport  *Transport
-	request    *http.Request
-	response   *http.Response
+	transport *Transport
+	request   *http.Request
+	response  *http.Response
 
 	uuid       [16]byte
 	password   string
@@ -534,15 +534,15 @@ func decodeTrojanUDP(data []byte) ([]byte, error) {
 	default:
 		return nil, fmt.Errorf("unknown trojan address type: %d", data[0])
 	}
-	
+
 	headerLen := offset + addrLen + 2 // Type + Addr + Port
-	if len(data) < headerLen+4 { // + Length(2) + CRLF(2)
+	if len(data) < headerLen+4 {      // + Length(2) + CRLF(2)
 		return nil, fmt.Errorf("truncated trojan udp header")
 	}
-	
+
 	payloadLen := int(data[headerLen])<<8 | int(data[headerLen+1])
 	payloadStart := headerLen + 4
-	
+
 	if len(data) < payloadStart+payloadLen {
 		return nil, fmt.Errorf("truncated trojan udp payload")
 	}
@@ -581,15 +581,15 @@ func decodeTrojanUDPWithAddr(data []byte) ([]byte, netip.AddrPort, error) {
 	default:
 		return nil, netip.AddrPort{}, fmt.Errorf("unknown trojan address type: %d", data[0])
 	}
-	
+
 	headerLen := offset + addrLen + 2
 	if len(data) < headerLen+4 {
 		return nil, netip.AddrPort{}, fmt.Errorf("truncated trojan udp header")
 	}
-	
+
 	payloadLen := int(data[headerLen])<<8 | int(data[headerLen+1])
 	payloadStart := headerLen + 4
-	
+
 	if len(data) < payloadStart+payloadLen {
 		return nil, netip.AddrPort{}, fmt.Errorf("truncated trojan udp payload")
 	}
@@ -714,6 +714,18 @@ func (c *Conn) StartPing(interval time.Duration) chan struct{} {
 	return make(chan struct{})
 }
 
+// maxPendingBufFrames is the backpressure limit for the H3 receive loop.
+// When pendingBuf reaches this many frames, the loop blocks on the channel
+// send instead of continuing to buffer, which applies natural back-pressure
+// to the QUIC flow-control window and caps memory usage. (P1-2)
+const maxPendingBufFrames = 1024
+
+// maxH3DecodeErrors is the number of consecutive proto.Unmarshal failures
+// tolerated before the receive loop tears down the connection. A single
+// corrupt frame is logged and skipped; sustained errors indicate either a
+// protocol violation or an active injection attack. (P1-28)
+const maxH3DecodeErrors = 10
+
 // receiveLoop reads from the H3 stream, decodes frames, and pushes content
 // into recvChan via an internal pending queue so the QUIC receive window is
 // never stalled by a slow consumer.
@@ -724,7 +736,10 @@ func (c *Conn) receiveLoop() {
 	// pendingBuf 解耦网络读取和 channel 投递：
 	// 当 recvChan 满时，已解码的数据先积压在这里，读取循环继续推进
 	// QUIC 接收窗口，避免对端发送窗口耗尽而卡死整条连接。
+	// P1-2: capped at maxPendingBufFrames to prevent unbounded memory growth.
 	var pendingBuf [][]byte
+	// P1-28: consecutive decode error counter.
+	decodeErrCount := 0
 
 	for {
 		// 先尝试非阻塞地清空积压队列
@@ -752,15 +767,39 @@ func (c *Conn) receiveLoop() {
 		}
 
 		// Unmarshal protobuf
+		// P1-28: tolerate up to maxH3DecodeErrors consecutive failures before
+		// closing the connection — prevents a single corrupt/probe frame from
+		// tearing down an otherwise healthy stream.
 		var socketData pb.SocketData
 		if err := proto.Unmarshal(data, &socketData); err != nil {
-			log.Printf("[H3] Failed to unmarshal data: %v", err)
+			decodeErrCount++
+			log.Printf("[H3] Failed to unmarshal data (%d/%d): %v",
+				decodeErrCount, maxH3DecodeErrors, err)
+			if decodeErrCount >= maxH3DecodeErrors {
+				log.Printf("[H3] Too many consecutive decode errors, closing connection")
+				return
+			}
 			continue
 		}
+		// Reset error counter on any successful decode.
+		decodeErrCount = 0
 
 		content := socketData.Content
 		if len(content) == 0 {
 			continue
+		}
+
+		// P1-2: when pendingBuf is at capacity, block on the channel send so
+		// that QUIC flow-control naturally throttles the sender rather than
+		// letting pendingBuf grow without bound.
+		if len(pendingBuf) >= maxPendingBufFrames {
+			select {
+			case c.recvChan <- content:
+				// delivered directly; skip append
+				continue
+			case <-c.closeChan:
+				return
+			}
 		}
 
 		// 尝试非阻塞投递；满了则先积压，下一轮循环再投
