@@ -19,21 +19,21 @@ import (
 )
 
 type Transport struct {
-	serverAddr string
-	token      string
-	password   string
-	uuid       [16]byte
-	useECH     bool
-	enableFlow bool
-	enablePQC  bool
-	useTrojan  bool
+	serverAddr   string
+	token        string
+	password     string
+	uuid         [16]byte
+	useECH       bool
+	enableFlow   bool
+	enablePQC    bool
+	useTrojan    bool
 	useMozillaCA bool
-	path       string
-	host       string
-	sni        string
-	headers    map[string]string
-	echManager *commontls.ECHManager
-	bypassCfg  *transport.BypassConfig
+	path         string
+	host         string
+	sni          string
+	headers      map[string]string
+	echManager   *commontls.ECHManager
+	bypassCfg    *transport.BypassConfig
 }
 
 func New(serverAddr, token string, useECH, enableFlow bool, path string, echMgr *commontls.ECHManager) (*Transport, error) {
@@ -53,19 +53,29 @@ func NewWithProtocol(serverAddr, token, password string, useECH, useMozillaCA, e
 		path = "/"
 	}
 	return &Transport{
-		serverAddr: serverAddr,
-		token:      token,
-		password:   password,
-		uuid:       uuid,
-		useECH:     useECH,
-		enableFlow: enableFlow,
-		enablePQC:  enablePQC,
-		useTrojan:  useTrojan,
+		serverAddr:   serverAddr,
+		token:        token,
+		password:     password,
+		uuid:         uuid,
+		useECH:       useECH,
+		enableFlow:   enableFlow,
+		enablePQC:    enablePQC,
+		useTrojan:    useTrojan,
 		useMozillaCA: useMozillaCA,
-		path:       path,
-		headers:    make(map[string]string),
-		echManager: echMgr,
+		path:         path,
+		headers:      make(map[string]string),
+		echManager:   echMgr,
 	}, nil
+}
+
+// BypassDialer returns the TCP dialer from the bypass config, or nil if not set.
+// Implements bypassDialerProvider so TUN mode can inject it into the ECH manager
+// after Setup() to prevent the ECH-refresh → TUN → proxy → ECH deadlock (P1-1).
+func (t *Transport) BypassDialer() *net.Dialer {
+	if t.bypassCfg == nil {
+		return nil
+	}
+	return t.bypassCfg.TCPDialer
 }
 
 func (t *Transport) Name() string {
@@ -156,8 +166,11 @@ func (t *Transport) dial() (transport.TunnelConn, error) {
 
 	var rawConn net.Conn
 	if t.bypassCfg != nil && t.bypassCfg.TCPDialer != nil {
-		t.bypassCfg.TCPDialer.Timeout = 10 * time.Second
-		rawConn, err = t.bypassCfg.TCPDialer.DialContext(dialCtx, "tcp", connectAddr)
+		// P0-9: value-copy the shared Dialer before mutating Timeout to prevent
+		// a data race when multiple Dial() calls run concurrently.
+		localDialer := *t.bypassCfg.TCPDialer
+		localDialer.Timeout = 10 * time.Second
+		rawConn, err = localDialer.DialContext(dialCtx, "tcp", connectAddr)
 	} else {
 		rawConn, err = commonnet.DialTFO("tcp", connectAddr, 10*time.Second)
 	}

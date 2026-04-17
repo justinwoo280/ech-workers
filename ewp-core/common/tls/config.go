@@ -81,7 +81,10 @@ func (c *STDConfig) SetNextProtos(nextProtos []string) {
 }
 
 func (c *STDConfig) TLSConfig() (*tls.Config, error) {
-	return c.config, nil
+	// Clone ensures each Dial() gets its own *tls.Config so concurrent
+	// handshakes cannot observe partial mutations (e.g. ECH retry updates).
+	// Go docs explicitly state tls.Config must not be modified after first use.
+	return c.config.Clone(), nil
 }
 
 func (c *STDConfig) Clone() Config {

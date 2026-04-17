@@ -147,12 +147,28 @@ func (s *FlowState) ShouldPad(isUplink bool) bool {
 	return s.Inbound.IsPadding
 }
 
-// ShouldDirectCopy checks if should switch to zero-copy mode
+// ShouldDirectCopy checks if the Writer side should switch to zero-copy mode.
+// Used by FlowWriter to decide whether to skip padding on the write path.
 func (s *FlowState) ShouldDirectCopy(isUplink bool) bool {
 	if isUplink {
 		return s.Outbound.UplinkWriterDirectCopy
 	}
 	return s.Inbound.DownlinkWriterDirectCopy
+}
+
+// ShouldDirectCopyRead checks if the Reader side should switch to zero-copy mode.
+// Used by FlowReader to decide whether to skip unpadding on the read path.
+// This is intentionally separate from ShouldDirectCopy: the read-side direct-copy
+// flag is set when we receive command=2 from the remote peer, while the write-side
+// flag is set when we detect TLS App Data in our own outgoing stream.
+// P0-3: FlowReader must read Reader-side fields, NOT Writer-side fields.
+func (s *FlowState) ShouldDirectCopyRead(isUplink bool) bool {
+	if isUplink {
+		// Reading uplink (server→client inbound reader): use Inbound reader flag
+		return s.Inbound.UplinkReaderDirectCopy
+	}
+	// Reading downlink (client→server outbound reader): use Outbound reader flag
+	return s.Outbound.DownlinkReaderDirectCopy
 }
 
 // CheckDirectCopySwitch checks if should switch to direct copy based on TLS state

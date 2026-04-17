@@ -1,6 +1,7 @@
 ﻿package xhttp
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -17,16 +18,16 @@ import (
 )
 
 type StreamOneConn struct {
-	httpClient    *http.Client
-	host          string
-	port          string
-	path          string
-	uuid          [16]byte
-	uuidStr       string
-	password      string
-	enableFlow    bool
-	useTrojan     bool
-	transport     *Transport  // 引用 Transport 以获取新功能
+	httpClient *http.Client
+	host       string
+	port       string
+	path       string
+	uuid       [16]byte
+	uuidStr    string
+	password   string
+	enableFlow bool
+	useTrojan  bool
+	transport  *Transport // 引用 Transport 以获取新功能
 
 	// 连接管理
 	pipeReader        *io.PipeReader
@@ -38,10 +39,10 @@ type StreamOneConn struct {
 	writeOnceUserUUID []byte
 
 	// Xray-core 风格的异步处理
-	waitReader        *WaitReadCloser
-	lastRequestTime   time.Time
-	requestCount      int64
-	udpGlobalID       [8]byte
+	waitReader      *WaitReadCloser
+	lastRequestTime time.Time
+	requestCount    int64
+	udpGlobalID     [8]byte
 }
 
 func NewStreamOneConn(httpClient *http.Client, host, port, path string, uuid [16]byte, uuidStr, password string, enableFlow, useTrojan bool, transport *Transport) *StreamOneConn {
@@ -134,14 +135,14 @@ func (c *StreamOneConn) connectTrojan(target string, initialData []byte) error {
 				errChan <- fmt.Errorf("request panic: %v", r)
 			}
 		}()
-		
+
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
 			c.waitReader.Fail(err)
 			errChan <- err
 			return
 		}
-		
+
 		if resp.StatusCode != http.StatusOK {
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
@@ -149,7 +150,7 @@ func (c *StreamOneConn) connectTrojan(target string, initialData []byte) error {
 			errChan <- fmt.Errorf("http error: %d", resp.StatusCode)
 			return
 		}
-		
+
 		// 设置响应体到 WaitReadCloser
 		c.waitReader.SetReadCloser(resp.Body)
 		respChan <- resp
@@ -243,14 +244,14 @@ func (c *StreamOneConn) connectEWP(target string, initialData []byte) error {
 				errChan <- fmt.Errorf("request panic: %v", r)
 			}
 		}()
-		
+
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
 			c.waitReader.Fail(err)
 			errChan <- err
 			return
 		}
-		
+
 		if resp.StatusCode != http.StatusOK {
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
@@ -258,7 +259,7 @@ func (c *StreamOneConn) connectEWP(target string, initialData []byte) error {
 			errChan <- fmt.Errorf("http error: %d", resp.StatusCode)
 			return
 		}
-		
+
 		// 设置响应体到 WaitReadCloser
 		c.waitReader.SetReadCloser(resp.Body)
 		respChan <- resp
@@ -276,7 +277,14 @@ func (c *StreamOneConn) connectEWP(target string, initialData []byte) error {
 	// 等待响应
 	select {
 	case <-respChan:
-		c.respBody = c.waitReader
+		// Bug-F: wrap in bufio.Reader so bytes read beyond the 26-byte handshake
+		// response are buffered and available to subsequent Read() calls, preventing
+		// silent data loss when the server sends handshake+data in a single TCP segment.
+		br := bufio.NewReaderSize(c.waitReader, 65536)
+		c.respBody = struct {
+			io.Reader
+			io.Closer
+		}{br, c.waitReader}
 		c.connected = true
 		log.V("[XHTTP] EWP connected, target: %s", target)
 	case err := <-errChan:
@@ -285,13 +293,17 @@ func (c *StreamOneConn) connectEWP(target string, initialData []byte) error {
 		return fmt.Errorf("connection timeout")
 	}
 
-	handshakeResp := make([]byte, 64)
-	n, err := c.respBody.Read(handshakeResp)
-	if err != nil {
+	// ewp.HandshakeResponse.Encode() always produces exactly 26 bytes.
+	// Using io.ReadFull guarantees we consume only those 26 bytes; any
+	// application data that arrived in the same read is retained in the
+	// bufio.Reader above and returned by the next Read() call.
+	const ewpHandshakeRespSize = 26
+	handshakeResp := make([]byte, ewpHandshakeRespSize)
+	if _, err := io.ReadFull(c.respBody, handshakeResp); err != nil {
 		return fmt.Errorf("read EWP handshake response: %w", err)
 	}
 
-	resp, err := ewp.DecodeHandshakeResponse(handshakeResp[:n], ewpReq.Version, ewpReq.Nonce, c.uuid)
+	resp, err := ewp.DecodeHandshakeResponse(handshakeResp, ewpReq.Version, ewpReq.Nonce, c.uuid)
 	if err != nil {
 		return fmt.Errorf("decode EWP handshake response: %w", err)
 	}
@@ -481,7 +493,7 @@ func (c *StreamOneConn) WriteUDP(target transport.Endpoint, data []byte) error {
 		buf = append(buf, byte(length>>8), byte(length))
 		buf = append(buf, trojan.CRLF...)
 		buf = append(buf, data...)
-		
+
 		_, err := c.pipeWriter.Write(buf)
 		return err
 	}
@@ -506,7 +518,7 @@ func (c *StreamOneConn) ReadUDP() ([]byte, error) {
 	if c.respBody == nil {
 		return nil, errors.New("not connected")
 	}
-	
+
 	if c.useTrojan {
 		return c.readTrojanUDP()
 	}
@@ -523,7 +535,7 @@ func (c *StreamOneConn) ReadUDPTo(buf []byte) (int, error) {
 	if c.respBody == nil {
 		return 0, errors.New("not connected")
 	}
-	
+
 	if c.useTrojan {
 		payload, err := c.readTrojanUDP()
 		if err != nil {
@@ -545,7 +557,7 @@ func (c *StreamOneConn) ReadUDPFrom(buf []byte) (int, netip.AddrPort, error) {
 	if c.respBody == nil {
 		return 0, netip.AddrPort{}, errors.New("not connected")
 	}
-	
+
 	if c.useTrojan {
 		return readTrojanUDPWithAddrFromReader(c.respBody, buf)
 	}
@@ -559,18 +571,18 @@ func (c *StreamOneConn) readTrojanUDP() ([]byte, error) {
 		return nil, fmt.Errorf("read trojan address: %w", err)
 	}
 	_ = addr // not returned
-	
+
 	lengthBuf := make([]byte, 2)
 	if _, err := io.ReadFull(c.respBody, lengthBuf); err != nil {
 		return nil, fmt.Errorf("read trojan length: %w", err)
 	}
 	length := int(lengthBuf[0])<<8 | int(lengthBuf[1])
-	
+
 	crlf := make([]byte, 2)
 	if _, err := io.ReadFull(c.respBody, crlf); err != nil {
 		return nil, fmt.Errorf("read trojan crlf: %w", err)
 	}
-	
+
 	payload := make([]byte, length)
 	if _, err := io.ReadFull(c.respBody, payload); err != nil {
 		return nil, fmt.Errorf("read trojan payload: %w", err)
@@ -616,7 +628,7 @@ func (c *StreamOneConn) connectTrojanUDP(target transport.Endpoint, initialData 
 	var handshakeData []byte
 	handshakeData = append(handshakeData, key[:]...)
 	handshakeData = append(handshakeData, trojan.CRLF...)
-	handshakeData = append(handshakeData, trojan.CommandUDP)  // ← UDP command
+	handshakeData = append(handshakeData, trojan.CommandUDP) // ← UDP command
 
 	if target.Domain != "" {
 		handshakeData = append(handshakeData, trojan.AddressTypeDomain, byte(len(target.Domain)))

@@ -1,5 +1,7 @@
 package tls
 
+import "crypto/tls"
+
 type ClientOptions struct {
 	ServerName   string
 	UseMozillaCA bool
@@ -44,4 +46,18 @@ func (c *ManagedECHConfig) Clone() Config {
 		STDECHConfig: cloned,
 		manager:      c.manager,
 	}
+}
+
+// TLSConfig returns a fresh clone with the latest ECH config list from the
+// manager. Every Dial() gets its own *tls.Config so concurrent connections
+// never share a mutable struct (P0-8).
+func (c *ManagedECHConfig) TLSConfig() (*tls.Config, error) {
+	echList, err := c.manager.Get()
+	if err != nil {
+		// Fall back to the list that was embedded at creation time.
+		return c.STDECHConfig.TLSConfig()
+	}
+	cfg := c.config.Clone()
+	cfg.EncryptedClientHelloConfigList = echList
+	return cfg, nil
 }

@@ -86,11 +86,14 @@ func (h *trojanUDPHandler) handleStream(reader io.Reader, done chan struct{}) {
 			return
 		}
 
-		// Resolve target
-		target, err := net.ResolveUDPAddr("udp", addr.String())
-		if err != nil {
-			log.Warn("Trojan UDP resolve addr error: %v", err)
-			continue
+		// P0-4: use a context timeout so a slow/unresolvable domain cannot
+		// block the handleStream goroutine indefinitely.
+		// P1-11: on failure, return (tear down the connection) instead of
+		// continue — the client receives EOF rather than a silent timeout.
+		udpTarget, resolveErr := net.ResolveUDPAddr("udp", addr.String())
+		if resolveErr != nil {
+			log.Warn("Trojan UDP resolve addr error: %v", resolveErr)
+			return
 		}
 
 		// Create session on first packet
@@ -98,7 +101,7 @@ func (h *trojanUDPHandler) handleStream(reader io.Reader, done chan struct{}) {
 		if h.session == nil {
 			// 根据目标地址类型选择合适的网络协议：IPv4或IPv6
 			network := "udp4"
-			if target.IP.To4() == nil {
+			if udpTarget.IP.To4() == nil {
 				network = "udp6"
 			}
 			conn, err := net.ListenUDP(network, &net.UDPAddr{})
@@ -109,18 +112,18 @@ func (h *trojanUDPHandler) handleStream(reader io.Reader, done chan struct{}) {
 			}
 			h.session = &udpSession{
 				conn:       conn,
-				initTarget: target,
+				initTarget: udpTarget,
 				incoming:   make(chan incomingPkt, udpIncomingDepth),
 			}
 			h.session.updateActive()
-			log.Debug("Trojan UDP new session: %s", target)
+			log.Debug("Trojan UDP new session: %s", udpTarget)
 			go h.sessionWorker(h.session)
 		}
 		s := h.session
 		h.mu.Unlock()
 
 		if len(payload) > 0 {
-			safeSend(s.incoming, incomingPkt{target: target, payload: payload})
+			safeSend(s.incoming, incomingPkt{target: udpTarget, payload: payload})
 		}
 	}
 }

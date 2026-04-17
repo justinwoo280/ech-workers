@@ -115,7 +115,10 @@ func (r *FlowReader) Read(p []byte) (n int, err error) {
 	}
 
 	// 已进入直传模式，跳过 unpadding
-	if r.state.ShouldDirectCopy(!r.isUplink) {
+	// P0-3: use ShouldDirectCopyRead which reads the Reader-side flags
+	// (UplinkReaderDirectCopy / DownlinkReaderDirectCopy), not the Writer-side
+	// flags that ShouldDirectCopy returns.
+	if r.state.ShouldDirectCopyRead(r.isUplink) {
 		return r.reader.Read(p)
 	}
 

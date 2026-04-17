@@ -7,7 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"ewp-core/common/tls"
+	commontls "ewp-core/common/tls"
 	"ewp-core/log"
 	"ewp-core/option"
 	"ewp-core/protocol"
@@ -45,8 +45,8 @@ func main() {
 	log.Info("Outbound: tag=%s, type=%s, server=%s:%d",
 		outbound.Tag, outbound.Type, outbound.Server, outbound.ServerPort)
 
-	// Create transport
-	trans, err := createTransport(outbound, cfg)
+	// Create transport (and get echMgr for TUN bypass injection)
+	trans, echMgr, err := createTransport(outbound, cfg)
 	if err != nil {
 		log.Fatalf("Failed to create transport: %v", err)
 	}
@@ -62,7 +62,7 @@ func main() {
 	// Start based on inbound type
 	switch inbound.Type {
 	case "tun":
-		startTunMode(inbound, trans, cfg)
+		startTunMode(inbound, trans, echMgr, cfg)
 	case "mixed", "socks", "http":
 		startProxyMode(inbound, trans, cfg)
 	default:
@@ -70,10 +70,16 @@ func main() {
 	}
 }
 
-func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (transport.Transport, error) {
+// bypassDialerProvider is implemented by transport types that expose their
+// bypass dialer (set by tun.Setup) so the ECH manager can use it too.
+type bypassDialerProvider interface {
+	BypassDialer() *net.Dialer
+}
+
+func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (transport.Transport, *commontls.ECHManager, error) {
 	// Validate outbound
 	if outbound.Type != "ewp" && outbound.Type != "trojan" {
-		return nil, fmt.Errorf("unsupported outbound type: %s", outbound.Type)
+		return nil, nil, fmt.Errorf("unsupported outbound type: %s", outbound.Type)
 	}
 
 	// Determine server address
@@ -92,7 +98,7 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 	}
 
 	// Initialize ECH manager
-	var echMgr *tls.ECHManager
+	var echMgr *commontls.ECHManager
 	useECH := outbound.TLS != nil && outbound.TLS.ECH != nil && outbound.TLS.ECH.Enabled
 
 	if useECH {
@@ -108,7 +114,7 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 		}
 
 		log.Info("ECH: initializing (domain: %s, DoH: %s)", echDomain, dohServer)
-		echMgr = tls.NewECHManager(echDomain, dohServer)
+		echMgr = commontls.NewECHManager(echDomain, dohServer)
 
 		if err := echMgr.Refresh(); err != nil {
 			if outbound.TLS.ECH.FallbackOnError {
@@ -116,14 +122,14 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 				useECH = false
 				echMgr = nil
 			} else {
-				return nil, fmt.Errorf("ECH initialization failed: %w", err)
+				return nil, nil, fmt.Errorf("ECH initialization failed: %w", err)
 			}
 		}
 	}
 
 	// Get transport config
 	if outbound.Transport == nil {
-		return nil, fmt.Errorf("transport configuration is required")
+		return nil, nil, fmt.Errorf("transport configuration is required")
 	}
 
 	transportType := outbound.Transport.Type
@@ -150,7 +156,7 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 			path, echMgr,
 		)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 	case "grpc":
@@ -164,7 +170,7 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 			serviceName, echMgr,
 		)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		if outbound.Transport.UserAgent != "" {
@@ -183,7 +189,7 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 			serviceName, echMgr,
 		)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		if outbound.Transport.UserAgent != "" {
@@ -205,11 +211,11 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 			path, echMgr,
 		)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 	default:
-		return nil, fmt.Errorf("unsupported transport type: %s", transportType)
+		return nil, nil, fmt.Errorf("unsupported transport type: %s", transportType)
 	}
 
 	// Apply Host override (HTTP Host header / gRPC authority)
@@ -248,10 +254,10 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 	}
 
 	log.Info("Transport created: %s", trans.Name())
-	return trans, nil
+	return trans, echMgr, nil
 }
 
-func startTunMode(inbound option.InboundConfig, trans transport.Transport, cfg *option.RootConfig) {
+func startTunMode(inbound option.InboundConfig, trans transport.Transport, echMgr *commontls.ECHManager, cfg *option.RootConfig) {
 	log.Info("Starting TUN mode...")
 
 	if !util.IsAdmin() {
@@ -315,6 +321,20 @@ func startTunMode(inbound option.InboundConfig, trans transport.Transport, cfg *
 	//    the TUN device (which would redirect the probe in step 1 if done first)
 	if err := tunDev.Setup(); err != nil {
 		log.Fatalf("TUN setup failed: %v", err)
+	}
+
+	// P1-1: After TUN setup the physical bypass dialer is installed on the
+	// transport. Inject it into the ECH manager so that background ECH
+	// refreshes (every ~1h) route via the physical NIC, not through TUN.
+	// Without this, the refresh triggers a DNS lookup → TUN → proxy →
+	// needs ECH → deadlock.
+	if echMgr != nil {
+		if provider, ok := trans.(bypassDialerProvider); ok {
+			if d := provider.BypassDialer(); d != nil {
+				echMgr.SetBypassDialer(d)
+				log.Info("[ECH] TUN bypass dialer injected — background refreshes bypass TUN")
+			}
+		}
 	}
 
 	sigChan := make(chan os.Signal, 1)

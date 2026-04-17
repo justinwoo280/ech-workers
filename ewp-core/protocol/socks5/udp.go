@@ -21,6 +21,7 @@ type udpSession struct {
 	stopPing   chan struct{}
 	lastActive time.Time
 	mu         sync.Mutex
+	closeOnce  sync.Once // P1-7: prevents close-of-closed-channel panic
 }
 
 func (s *udpSession) touch() {
@@ -30,12 +31,12 @@ func (s *udpSession) touch() {
 }
 
 func (s *udpSession) close() {
-	select {
-	case <-s.stopPing:
-	default:
+	// P1-7: use sync.Once so concurrent close() calls (cleanup goroutine +
+	// main flow) never trigger "close of closed channel" panic.
+	s.closeOnce.Do(func() {
 		close(s.stopPing)
-	}
-	s.tunnelConn.Close()
+		s.tunnelConn.Close()
+	})
 }
 
 // sessionMap manages per-destination UDP sessions.
