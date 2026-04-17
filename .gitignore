@@ -1,3 +1,10 @@
+# Internal planning docs — never commit to public repo
+tickets/
+*.audit.md
+*_审计报告_*.md
+*_Security_Remediation_*.md
+*_Master_Tracker_*.md
+
 # .NET
 **/bin/
 **/obj/
