@@ -10,6 +10,10 @@ import (
 	"ewp-core/log"
 )
 
+// maxProxyBodySize is the maximum request body size the HTTP proxy will buffer.
+// Bodies larger than this receive a 413 response instead of being silently dropped.
+const maxProxyBodySize = 100 * 1024 * 1024 // 100 MB
+
 type Request struct {
 	Method      string
 	URL         string
@@ -108,7 +112,11 @@ func HandleConnection(conn net.Conn, reader *bufio.Reader, onConnect func(net.Co
 		if contentLength := req.Headers["content-length"]; contentLength != "" {
 			var length int
 			fmt.Sscanf(contentLength, "%d", &length)
-			if length > 0 && length < 10*1024*1024 {
+			if length > maxProxyBodySize {
+				conn.Write([]byte("HTTP/1.1 413 Request Entity Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
+				return fmt.Errorf("request body too large: %d bytes (max %d)", length, maxProxyBodySize)
+			}
+			if length > 0 {
 				body := make([]byte, length)
 				if _, err := io.ReadFull(reader, body); err == nil {
 					requestBuilder.Write(body)

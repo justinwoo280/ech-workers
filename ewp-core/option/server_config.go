@@ -89,7 +89,7 @@ func DefaultServerConfig() *ServerConfig {
 		},
 		Protocol: ProtocolConfig{
 			Type:       "ewp",
-			UUID:       "d342d11e-d424-4583-b36e-524ab1f0afa4",
+			UUID:       "", // Must be set explicitly — no default, fail-closed
 			EnableFlow: false,
 		},
 		TLS: nil, // TLS disabled by default
@@ -247,6 +247,12 @@ func LoadFromEnv() *ServerConfig {
 
 	if uuid := os.Getenv("UUID"); uuid != "" {
 		cfg.Protocol.UUID = uuid
+	} else if cfg.Protocol.Type == "ewp" {
+		// Fail-closed: refuse to start with empty UUID in EWP mode.
+		// A hardcoded default UUID is a critical security vulnerability —
+		// anyone with source access can authenticate as a legitimate user.
+		fmt.Fprintln(os.Stderr, "FATAL: UUID environment variable is required for EWP protocol. Refusing to start.")
+		os.Exit(1)
 	}
 
 	if password := os.Getenv("PASSWORD"); password != "" {

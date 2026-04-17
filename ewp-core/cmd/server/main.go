@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -15,7 +16,8 @@ import (
 )
 
 var (
-	uuid         = getEnv("UUID", "d342d11e-d424-4583-b36e-524ab1f0afa4")
+	// uuid has no default — fail-closed if not set (P0-1)
+	uuid         = os.Getenv("UUID")
 	password     = getEnv("PASSWORD", "")
 	port         = getEnv("PORT", "8080")
 	wsPath       = getEnv("WS_PATH", "/")
@@ -30,6 +32,81 @@ var (
 	enableFlow   = false
 	trojanMode   = false
 )
+
+// trustedProxyCIDRs holds parsed CIDRs whose source IPs may set XFF / CF-Connecting-IP.
+// Populated once at startup by initTrustedProxies(). (P0-2)
+var trustedProxyCIDRs []*net.IPNet
+
+// defaultCloudflareRanges is the official Cloudflare edge IP list (IPv4 + IPv6).
+// See https://www.cloudflare.com/ips/
+var defaultCloudflareRanges = []string{
+	// IPv4
+	"103.21.244.0/22",
+	"103.22.200.0/22",
+	"103.31.4.0/22",
+	"104.16.0.0/13",
+	"104.24.0.0/14",
+	"108.162.192.0/18",
+	"131.0.72.0/22",
+	"141.101.64.0/18",
+	"162.158.0.0/15",
+	"172.64.0.0/13",
+	"173.245.48.0/20",
+	"188.114.96.0/20",
+	"190.93.240.0/20",
+	"197.234.240.0/22",
+	"198.41.128.0/17",
+	// IPv6
+	"2400:cb00::/32",
+	"2606:4700::/32",
+	"2803:f800::/32",
+	"2405:b500::/32",
+	"2405:8100::/32",
+	"2a06:98c0::/29",
+	"2c0f:f248::/32",
+}
+
+// initTrustedProxies parses the TRUSTED_PROXIES env var (comma-separated CIDRs).
+// If unset, defaults to Cloudflare's official edge ranges.
+// Set TRUSTED_PROXIES="" to disable XFF parsing entirely (direct-connect mode).
+func initTrustedProxies() {
+	var cidrs []string
+	if env := os.Getenv("TRUSTED_PROXIES"); env != "" {
+		for _, s := range strings.Split(env, ",") {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				cidrs = append(cidrs, s)
+			}
+		}
+		log.Info("Trusted proxies: %d CIDR(s) from TRUSTED_PROXIES env", len(cidrs))
+	} else {
+		cidrs = defaultCloudflareRanges
+		log.Info("Trusted proxies: Cloudflare default ranges (%d CIDRs)", len(cidrs))
+	}
+
+	for _, cidr := range cidrs {
+		_, ipNet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			log.Warn("Invalid trusted proxy CIDR %q: %v", cidr, err)
+			continue
+		}
+		trustedProxyCIDRs = append(trustedProxyCIDRs, ipNet)
+	}
+}
+
+// isTrustedProxy reports whether the given host (without port) is in trustedProxyCIDRs.
+func isTrustedProxy(host string) bool {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	for _, cidr := range trustedProxyCIDRs {
+		if cidr.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
 
 var largeBufferPool = sync.Pool{
 	New: func() interface{} {
@@ -56,6 +133,7 @@ func getEnvInt(key string, def int) int {
 }
 
 func main() {
+	initTrustedProxies()
 	var configFile string
 	flag.StringVar(&configFile, "c", "", "配置文件路径 (JSON 格式)")
 	flag.StringVar(&configFile, "config", "", "配置文件路径 (JSON 格式)")
@@ -103,6 +181,11 @@ func main() {
 			server.SetTrojanFallback(&TrojanFallbackHandler{addr: fallbackAddr})
 		}
 	} else {
+		// P0-1: fail-closed — refuse to start without an explicit UUID
+		if uuid == "" {
+			log.Fatal("UUID environment variable is required for EWP mode, refusing to start. " +
+				"Set the UUID env var to a valid UUID before launching the server.")
+		}
 		log.Info("Protocol: EWP")
 		log.Info("UUID: %s", uuid)
 		if enableFlow {
@@ -151,23 +234,46 @@ func disguiseHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(nginxHTML))
 }
 
+// getClientIP returns the real client IP. (P0-2)
+// XFF / CF-Connecting-IP headers are only trusted when the direct peer
+// (r.RemoteAddr) falls within a configured trusted-proxy CIDR.
+// This prevents attackers from spoofing their IP to bypass rate limiting.
 func getClientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if ips := strings.Split(xff, ","); len(ips) > 0 {
-			return strings.TrimSpace(ips[0])
+	// Extract the direct peer IP (strip port).
+	remoteHost := r.RemoteAddr
+	if idx := strings.LastIndex(remoteHost, ":"); idx != -1 {
+		remoteHost = remoteHost[:idx]
+	}
+
+	// Only honour proxy headers when the request arrives from a trusted proxy.
+	if isTrustedProxy(remoteHost) {
+		// CF-Connecting-IP: single real IP set by Cloudflare — most reliable.
+		if cfip := r.Header.Get("CF-Connecting-IP"); cfip != "" {
+			if ip := net.ParseIP(strings.TrimSpace(cfip)); ip != nil {
+				return ip.String()
+			}
+		}
+		// X-Forwarded-For: take the rightmost untrusted entry
+		// (the last IP appended by our trusted proxy, not client-controlled).
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			parts := strings.Split(xff, ",")
+			for i := len(parts) - 1; i >= 0; i-- {
+				candidate := strings.TrimSpace(parts[i])
+				if ip := net.ParseIP(candidate); ip != nil && !isTrustedProxy(candidate) {
+					return ip.String()
+				}
+			}
+		}
+		// X-Real-IP fallback
+		if xri := r.Header.Get("X-Real-IP"); xri != "" {
+			if ip := net.ParseIP(strings.TrimSpace(xri)); ip != nil {
+				return ip.String()
+			}
 		}
 	}
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		return xri
-	}
-	if cfip := r.Header.Get("CF-Connecting-IP"); cfip != "" {
-		return cfip
-	}
-	clientIP := r.RemoteAddr
-	if idx := strings.LastIndex(clientIP, ":"); idx != -1 {
-		clientIP = clientIP[:idx]
-	}
-	return clientIP
+
+	// Direct connection or untrusted peer: use the socket address.
+	return remoteHost
 }
 
 func maskPassword(p string) string {

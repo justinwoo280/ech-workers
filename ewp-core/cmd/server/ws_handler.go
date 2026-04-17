@@ -69,7 +69,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	opts := server.TunnelOptions{
 		Protocol:  newProtocolHandler(),
 		Transport: adapter,
-		ClientIP:  r.RemoteAddr,
+		ClientIP:  getClientIP(r),
 		Timeout:   10 * time.Second,
 	}
 	server.EstablishTunnel(context.Background(), firstMsg, opts)

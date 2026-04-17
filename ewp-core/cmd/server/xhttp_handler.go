@@ -18,6 +18,15 @@ import (
 	xhttptransport "ewp-core/transport/xhttp"
 )
 
+// maxXHTTPHandshakeSize is the maximum size of an XHTTP handshake body (EWP handshake
+// packet is tiny — UUID + nonce + command + address). 4 KB is very generous.
+const maxXHTTPHandshakeSize = 4 * 1024 // 4 KB
+
+// maxXHTTPFrameSize is the maximum size of a single XHTTP upload frame.
+// Legitimate tunnel payloads are bounded by the TUN/SOCKS5 read buffer (typically 64 KB).
+// 1 MB gives a comfortable margin while preventing OOM via crafted large bodies.
+const maxXHTTPFrameSize = 1 * 1024 * 1024 // 1 MB
+
 type xhttpSession struct {
 	remote           net.Conn
 	uploadQueue      *server.UploadQueue
@@ -277,9 +286,14 @@ func xhttpStreamOneHandler(w http.ResponseWriter, r *http.Request) {
 func xhttpHandshakeHandler(w http.ResponseWriter, r *http.Request, sessionID string) {
 	clientIP := getClientIP(r)
 
-	handshakeData, err := io.ReadAll(r.Body)
+	handshakeData, err := io.ReadAll(io.LimitReader(r.Body, maxXHTTPHandshakeSize+1))
 	if err != nil {
 		httpError(w, http.StatusBadRequest, "Bad Request", "XHTTP handshake: Failed to read body: %v", err)
+		return
+	}
+	if len(handshakeData) > maxXHTTPHandshakeSize {
+		httpError(w, http.StatusRequestEntityTooLarge, "Request Too Large",
+			"XHTTP handshake: body exceeds %d bytes", maxXHTTPHandshakeSize)
 		return
 	}
 
@@ -415,9 +429,14 @@ func xhttpUploadHandler(w http.ResponseWriter, r *http.Request, sessionID, seqSt
 	if seqStr != "" {
 		seq := uint64(0)
 		fmt.Sscanf(seqStr, "%d", &seq)
-		payload, err := io.ReadAll(r.Body)
+		payload, err := io.ReadAll(io.LimitReader(r.Body, maxXHTTPFrameSize+1))
 		if err != nil {
 			log.Warn("XHTTP upload read error: %v", err)
+			return
+		}
+		if len(payload) > maxXHTTPFrameSize {
+			log.Warn("XHTTP upload: frame too large (%d bytes), closing session", len(payload))
+			xhttpSessions.Delete(sessionID)
 			return
 		}
 		if err := session.uploadQueue.Push(server.Packet{Payload: payload, Seq: seq}); err != nil {

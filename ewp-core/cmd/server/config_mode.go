@@ -218,7 +218,7 @@ func loadTLSConfig(cfg *option.ServerTLSConfig) (*tls.Config, error) {
 
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS12,
+		MinVersion:   tls.VersionTLS13,
 	}
 
 	if len(cfg.ALPN) > 0 {
