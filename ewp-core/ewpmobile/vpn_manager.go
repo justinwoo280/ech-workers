@@ -23,6 +23,7 @@ import (
 	"ewp-core/tun"
 	ewpgvisor "ewp-core/tun/gvisor"
 
+	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	wgtun "golang.zx2c4.com/wireguard/tun"
 )
 
@@ -159,6 +160,22 @@ func (vm *vpnManager) Start(tunFD int, config *VPNConfig) error {
 		vm.tunMTU = 1400
 	}
 
+	// P0-12: compute dnsServers before ECH init so it's available for bypass config later
+	dnsServers := config.DNSServers
+	if len(dnsServers) == 0 {
+		// Fallback to single server config if provided
+		if config.DNSServer != "" {
+			dnsServer := config.DNSServer
+			if !strings.HasPrefix(dnsServer, "https://") && !strings.HasPrefix(dnsServer, "http://") {
+				dnsServer = "https://" + dnsServer
+			}
+			dnsServers = []string{dnsServer}
+		} else {
+			// Use defaults from constant package
+			dnsServers = constant.DefaultDNSServers
+		}
+	}
+
 	// 1. 初始化 ECH（如果启用）
 	var echMgr *tls.ECHManager
 	if config.EnableECH {
@@ -166,22 +183,6 @@ func (vm *vpnManager) Start(tunFD int, config *VPNConfig) error {
 		echDomain := config.ECHDomain
 		if echDomain == "" {
 			echDomain = "cloudflare-ech.com"
-		}
-		
-		// P0-12: use multiple DoH servers for redundancy
-		dnsServers := config.DNSServers
-		if len(dnsServers) == 0 {
-			// Fallback to single server config if provided
-			if config.DNSServer != "" {
-				dnsServer := config.DNSServer
-				if !strings.HasPrefix(dnsServer, "https://") && !strings.HasPrefix(dnsServer, "http://") {
-					dnsServer = "https://" + dnsServer
-				}
-				dnsServers = []string{dnsServer}
-			} else {
-				// Use defaults from constant package
-				dnsServers = constant.DefaultDNSServers
-			}
 		}
 
 		// P0-12: strict mode = false for mobile (allow fallback to expired cache)
@@ -354,8 +355,7 @@ func (vm *vpnManager) Start(tunFD int, config *VPNConfig) error {
 	log.Printf("[VPNManager] Creating TUN handler...")
 
 	// We prepare the udp writer interface ahead of time, pointing to the stack pointer later.
-	udpWriter := &gvisorUDPWriter{stack: nil}
-	vm.tunHandler = tun.NewHandler(ctx, vm.transport, udpWriter)
+	vm.tunHandler = tun.NewHandler(ctx, vm.transport)
 
 	// Initialize FakeIP pool for instant DNS responses
 	fakeIPPool := dns.NewFakeIPPool()
@@ -382,7 +382,9 @@ func (vm *vpnManager) Start(tunFD int, config *VPNConfig) error {
 	stackConfig := &ewpgvisor.StackConfig{
 		MTU:        vm.tunMTU,
 		TCPHandler: vm.tunHandler.HandleTCP,
-		UDPHandler: vm.tunHandler.HandleUDP,
+		UDPHandler: func(conn *gonet.UDPConn, payload []byte, src netip.AddrPort, dst netip.AddrPort) {
+			vm.tunHandler.HandleUDP(conn, payload, src, dst)
+		},
 	}
 
 	vm.tunStack, err = ewpgvisor.NewStack(vm.tunDevice, stackConfig)
@@ -391,7 +393,6 @@ func (vm *vpnManager) Start(tunFD int, config *VPNConfig) error {
 		cancel()
 		return fmt.Errorf("create gvisor stack failed: %w", err)
 	}
-	udpWriter.stack = vm.tunStack
 
 	vm.running = true
 	vm.startTime = time.Now()

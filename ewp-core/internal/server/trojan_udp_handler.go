@@ -111,10 +111,10 @@ func (h *trojanUDPHandler) handleStream(reader io.Reader, done chan struct{}) {
 				return
 			}
 			h.session = &udpSession{
-				conn:       conn,
-				initTarget: udpTarget,
-				incoming:   make(chan incomingPkt, udpIncomingDepth),
+				conn:     conn,
+				incoming: make(chan incomingPkt, udpIncomingDepth),
 			}
+			h.session.initTarget.Store(udpTarget)
 			h.session.updateActive()
 			log.Debug("Trojan UDP new session: %s", udpTarget)
 			go h.sessionWorker(h.session)
