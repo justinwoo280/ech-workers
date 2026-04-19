@@ -24,5 +24,9 @@
     public static *** Companion();
 }
 
+# Google Tink (EncryptedSharedPreferences) — compile-time annotations not in runtime classpath
+-dontwarn com.google.errorprone.annotations.**
+-dontwarn javax.annotation.**
+
 # Keep Compose
 -keep class androidx.compose.** { *; }
