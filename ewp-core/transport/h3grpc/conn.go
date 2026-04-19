@@ -58,6 +58,10 @@ type Conn struct {
 
 	// Goroutine management
 	wg sync.WaitGroup
+
+	// P1-UDP-OPT: 可重用缓冲区用于 WriteUDP（零分配热路径）
+	udpWriteBuf []byte
+	udpWriteMu  sync.Mutex
 }
 
 // signalClose closes closeChan exactly once, safely from any goroutine.
@@ -419,41 +423,69 @@ func (c *Conn) ewpConnectUDP(target transport.Endpoint, initialData []byte) erro
 
 // WriteUDP sends a subsequent UDP packet over the established UDP tunnel
 func (c *Conn) WriteUDP(target transport.Endpoint, data []byte) error {
+	c.udpWriteMu.Lock()
+	defer c.udpWriteMu.Unlock()
+
 	if c.useTrojan {
-		length := uint16(len(data))
-		addrLen := 7
-		if target.Domain != "" {
-			addrLen = 1 + 1 + len(target.Domain) + 2
-		} else if target.Addr.Addr().Is6() {
-			addrLen = 19
-		}
-		buf := make([]byte, 0, addrLen+4+len(data))
-		if target.Domain != "" {
-			buf = append(buf, trojan.AddressTypeDomain, byte(len(target.Domain)))
-			buf = append(buf, []byte(target.Domain)...)
-			buf = append(buf, byte(target.Port>>8), byte(target.Port))
-		} else {
-			buf = trojan.AppendAddrPort(buf, target.Addr)
-		}
-		buf = append(buf, byte(length>>8), byte(length))
-		buf = append(buf, trojan.CRLF...)
-		buf = append(buf, data...)
-		return c.Write(buf)
+		return c.writeTrojanUDPPooled(target, data)
 	}
+
+	// P1-UDP-OPT: EWP 路径使用可重用缓冲区
+	requiredCap := 2 + 8 + 1 + 1 + 19 + 2 + len(data) // 最大尺寸（IPv6）
+	if target.Domain != "" {
+		requiredCap = 2 + 8 + 1 + 1 + (1 + 1 + len(target.Domain) + 2) + 2 + len(data)
+	}
+
+	if cap(c.udpWriteBuf) < requiredCap {
+		c.udpWriteBuf = make([]byte, 0, requiredCap)
+	}
+
+	c.udpWriteBuf = c.udpWriteBuf[:0]
 
 	if target.Domain != "" {
-		buf := make([]byte, 0, 2+8+1+1+(1+1+len(target.Domain)+2)+2+len(data))
-		buf = ewp.AppendUDPDomainFrame(buf, c.udpGlobalID, ewp.UDPStatusKeep, target.Domain, target.Port, data)
-		return c.Write(buf)
+		c.udpWriteBuf = ewp.AppendUDPDomainFrame(
+			c.udpWriteBuf, c.udpGlobalID, ewp.UDPStatusKeep,
+			target.Domain, target.Port, data,
+		)
+	} else {
+		c.udpWriteBuf = ewp.AppendUDPAddrFrame(
+			c.udpWriteBuf, c.udpGlobalID, ewp.UDPStatusKeep,
+			target.Addr, data,
+		)
 	}
 
+	return c.Write(c.udpWriteBuf)
+}
+
+func (c *Conn) writeTrojanUDPPooled(target transport.Endpoint, data []byte) error {
+	// P1-UDP-OPT: Trojan 路径使用可重用缓冲区
+	length := uint16(len(data))
 	addrLen := 7
-	if target.Addr.IsValid() && target.Addr.Addr().Is6() {
+	if target.Domain != "" {
+		addrLen = 1 + 1 + len(target.Domain) + 2
+	} else if target.Addr.Addr().Is6() {
 		addrLen = 19
 	}
-	buf := make([]byte, 0, 2+8+1+1+addrLen+2+len(data))
-	buf = ewp.AppendUDPAddrFrame(buf, c.udpGlobalID, ewp.UDPStatusKeep, target.Addr, data)
-	return c.Write(buf)
+
+	requiredCap := addrLen + 4 + len(data)
+	if cap(c.udpWriteBuf) < requiredCap {
+		c.udpWriteBuf = make([]byte, 0, requiredCap)
+	}
+
+	c.udpWriteBuf = c.udpWriteBuf[:0]
+
+	if target.Domain != "" {
+		c.udpWriteBuf = append(c.udpWriteBuf, trojan.AddressTypeDomain, byte(len(target.Domain)))
+		c.udpWriteBuf = append(c.udpWriteBuf, []byte(target.Domain)...)
+		c.udpWriteBuf = append(c.udpWriteBuf, byte(target.Port>>8), byte(target.Port))
+	} else {
+		c.udpWriteBuf = trojan.AppendAddrPort(c.udpWriteBuf, target.Addr)
+	}
+	c.udpWriteBuf = append(c.udpWriteBuf, byte(length>>8), byte(length))
+	c.udpWriteBuf = append(c.udpWriteBuf, trojan.CRLF...)
+	c.udpWriteBuf = append(c.udpWriteBuf, data...)
+
+	return c.Write(c.udpWriteBuf)
 }
 
 // ReadUDP reads and decodes a UDP response packet

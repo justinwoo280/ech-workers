@@ -111,40 +111,29 @@ func (h *trojanUDPHandler) handleStream(reader io.Reader, done chan struct{}) {
 				return
 			}
 			h.session = &udpSession{
-				conn:     conn,
-				incoming: make(chan incomingPkt, udpIncomingDepth),
+				conn: conn,
 			}
 			h.session.initTarget.Store(udpTarget)
 			h.session.updateActive()
 			log.Debug("Trojan UDP new session: %s", udpTarget)
-			go h.sessionWorker(h.session)
+			// P3-UDP-OPT: 仅启动接收器，无 worker
+			go h.receiveResponses(h.session)
 		}
 		s := h.session
 		h.mu.Unlock()
 
-		if len(payload) > 0 {
-			safeSend(s.incoming, incomingPkt{target: udpTarget, payload: payload})
+		// P3-UDP-OPT: 直接写入 UDP socket（线程安全）
+		if len(payload) > 0 && udpTarget != nil {
+			if _, err := s.conn.WriteTo(payload, udpTarget); err != nil {
+				log.Warn("Trojan UDP write error for %s: %v", udpTarget, err)
+			} else {
+				s.updateActive()
+			}
 		}
 	}
 }
 
-// sessionWorker sends outgoing UDP packets.
-func (h *trojanUDPHandler) sessionWorker(s *udpSession) {
-	go h.receiveResponses(s)
-
-	for pkt := range s.incoming {
-		if pkt.target == nil {
-			continue
-		}
-		if _, err := s.conn.WriteTo(pkt.payload, pkt.target); err != nil {
-			log.Warn("Trojan UDP write error for %s: %v", pkt.target, err)
-			// Don't return on write error - just continue
-			// The session will timeout eventually if target is unreachable
-			continue
-		}
-		s.updateActive()
-	}
-}
+// P3-UDP-OPT: sessionWorker 已移除，直接在 handleStream 中调用 WriteTo
 
 // receiveResponses reads UDP responses from the remote and sends them back
 // through the tunnel using Trojan UDP framing.

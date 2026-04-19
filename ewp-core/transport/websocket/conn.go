@@ -44,6 +44,10 @@ type Conn struct {
 	heartbeatPeriod time.Duration
 	earlyDataLength int
 	earlyDataSent   bool
+
+	// P1-UDP-OPT: 可重用缓冲区用于 WriteUDP（零分配热路径）
+	udpWriteBuf []byte
+	udpWriteMu  sync.Mutex
 }
 
 func newConn(uuid [16]byte, password string, enableFlow, useTrojan bool) *Conn {
@@ -371,29 +375,46 @@ func (c *Conn) connectTrojanUDP(target transport.Endpoint, initialData []byte) e
 // --- WriteUDP ---
 
 func (c *Conn) WriteUDP(target transport.Endpoint, data []byte) error {
+	c.udpWriteMu.Lock()
+	defer c.udpWriteMu.Unlock()
+
 	if c.useTrojan {
-		return c.writeTrojanUDP(target, data)
+		return c.writeTrojanUDPPooled(target, data)
 	}
+
+	// P1-UDP-OPT: 计算所需容量并确保缓冲区足够大
+	requiredCap := 2 + 8 + 1 + 1 + 19 + 2 + len(data) // 最大尺寸（IPv6）
+	if target.Domain != "" {
+		requiredCap = 2 + 8 + 1 + 1 + (1 + 1 + len(target.Domain) + 2) + 2 + len(data)
+	}
+
+	// 仅在需要时增长缓冲区（首次调用或大包）
+	if cap(c.udpWriteBuf) < requiredCap {
+		c.udpWriteBuf = make([]byte, 0, requiredCap)
+	}
+
+	// 重置缓冲区并追加帧
+	c.udpWriteBuf = c.udpWriteBuf[:0]
 
 	if target.Domain != "" {
 		// Domain target: send domain directly to server, avoid local DNS resolution.
 		// In TUN mode, local DNS would return a FakeIP which the server cannot route.
-		buf := make([]byte, 0, 2+8+1+1+(1+1+len(target.Domain)+2)+2+len(data))
-		buf = ewp.AppendUDPDomainFrame(buf, c.udpGlobalID, ewp.UDPStatusKeep, target.Domain, target.Port, data)
-		return c.Write(buf)
+		c.udpWriteBuf = ewp.AppendUDPDomainFrame(
+			c.udpWriteBuf, c.udpGlobalID, ewp.UDPStatusKeep,
+			target.Domain, target.Port, data,
+		)
+	} else {
+		c.udpWriteBuf = ewp.AppendUDPAddrFrame(
+			c.udpWriteBuf, c.udpGlobalID, ewp.UDPStatusKeep,
+			target.Addr, data,
+		)
 	}
 
-	addrLen := 7
-	if target.Addr.IsValid() && target.Addr.Addr().Is6() {
-		addrLen = 19
-	}
-	totalCap := 2 + 8 + 1 + 1 + addrLen + 2 + len(data)
-	buf := make([]byte, 0, totalCap)
-	buf = ewp.AppendUDPAddrFrame(buf, c.udpGlobalID, ewp.UDPStatusKeep, target.Addr, data)
-	return c.Write(buf)
+	return c.Write(c.udpWriteBuf)
 }
 
-func (c *Conn) writeTrojanUDP(target transport.Endpoint, data []byte) error {
+func (c *Conn) writeTrojanUDPPooled(target transport.Endpoint, data []byte) error {
+	// P1-UDP-OPT: 使用可重用缓冲区
 	length := uint16(len(data))
 	addrLen := 7
 	if target.Domain != "" {
@@ -401,18 +422,26 @@ func (c *Conn) writeTrojanUDP(target transport.Endpoint, data []byte) error {
 	} else if target.Addr.Addr().Is6() {
 		addrLen = 19
 	}
-	buf := make([]byte, 0, addrLen+4+len(data))
-	if target.Domain != "" {
-		buf = append(buf, trojan.AddressTypeDomain, byte(len(target.Domain)))
-		buf = append(buf, []byte(target.Domain)...)
-		buf = append(buf, byte(target.Port>>8), byte(target.Port))
-	} else {
-		buf = trojan.AppendAddrPort(buf, target.Addr)
+
+	requiredCap := addrLen + 4 + len(data)
+	if cap(c.udpWriteBuf) < requiredCap {
+		c.udpWriteBuf = make([]byte, 0, requiredCap)
 	}
-	buf = append(buf, byte(length>>8), byte(length))
-	buf = append(buf, trojan.CRLF...)
-	buf = append(buf, data...)
-	return c.socket.WriteMessage(gws.OpcodeBinary, buf)
+
+	c.udpWriteBuf = c.udpWriteBuf[:0]
+
+	if target.Domain != "" {
+		c.udpWriteBuf = append(c.udpWriteBuf, trojan.AddressTypeDomain, byte(len(target.Domain)))
+		c.udpWriteBuf = append(c.udpWriteBuf, []byte(target.Domain)...)
+		c.udpWriteBuf = append(c.udpWriteBuf, byte(target.Port>>8), byte(target.Port))
+	} else {
+		c.udpWriteBuf = trojan.AppendAddrPort(c.udpWriteBuf, target.Addr)
+	}
+	c.udpWriteBuf = append(c.udpWriteBuf, byte(length>>8), byte(length))
+	c.udpWriteBuf = append(c.udpWriteBuf, trojan.CRLF...)
+	c.udpWriteBuf = append(c.udpWriteBuf, data...)
+
+	return c.socket.WriteMessage(gws.OpcodeBinary, c.udpWriteBuf)
 }
 
 // --- ReadUDP ---
