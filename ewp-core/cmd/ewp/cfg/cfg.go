@@ -18,12 +18,30 @@ import (
 
 // File is the top-level config struct mapped from YAML/JSON.
 type File struct {
-	Inbounds  []InboundCfg  `yaml:"inbounds" json:"inbounds"`
-	Outbounds []OutboundCfg `yaml:"outbounds" json:"outbounds"`
-	Router    RouterCfg     `yaml:"router" json:"router"`
-	DNS       DNSCfg        `yaml:"dns" json:"dns"`
-	ECH       ECHCfg        `yaml:"ech" json:"ech"`
-	STUN      STUNCfg       `yaml:"stun" json:"stun"`
+	Inbounds  []InboundCfg   `yaml:"inbounds" json:"inbounds"`
+	Outbounds []OutboundCfg  `yaml:"outbounds" json:"outbounds"`
+	Router    RouterCfg      `yaml:"router" json:"router"`
+	DNS       DNSCfg         `yaml:"dns" json:"dns"`
+	ECH       ECHCfg         `yaml:"ech" json:"ech"`
+	STUN      STUNCfg        `yaml:"stun" json:"stun"`
+	ServerNameDNS ServerNameDNSCfg `yaml:"server_name_dns" json:"server_name_dns"`
+}
+
+// ServerNameDNSCfg configures how the client resolves the EWP server's
+// own domain name to an IP at Dial time. Distinct from `dns.client`
+// (TUN port-53 application traffic policy) and from `ech.bootstrap_doh`
+// (one-shot HTTPS RR fetch).
+//
+// Threat-model rationale: every Dial of a v2 transport currently leaks
+// the upstream server's domain to whoever the OS resolver talks to —
+// usually the local ISP, sometimes worse. Configuring server_name_dns.doh
+// routes that single A/AAAA query through DoH instead, so the wire only
+// carries `dns.google` or `1.1.1.1` traffic from the user's perspective.
+//
+// Empty doh.servers ⇒ OS resolver is used.
+type ServerNameDNSCfg struct {
+	DoH        UpstreamDoHCfg `yaml:"doh" json:"doh"`
+	PreferIPv6 bool           `yaml:"prefer_ipv6" json:"prefer_ipv6"`
 }
 
 // DNSCfg configures the project-wide DNS posture.

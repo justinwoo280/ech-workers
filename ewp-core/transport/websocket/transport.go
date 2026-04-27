@@ -17,6 +17,7 @@ import (
 
 	"github.com/lxzan/gws"
 
+	"ewp-core/common/clientdns"
 	commontls "ewp-core/common/tls"
 	"ewp-core/log"
 	"ewp-core/transport"
@@ -38,6 +39,16 @@ type Transport struct {
 
 	mu        sync.Mutex
 	bypassCfg *transport.BypassConfig
+	resolver  *clientdns.Resolver
+}
+
+// SetClientResolver wires the privacy-preserving DoH resolver used to
+// translate the EWP server's domain name to an IP at Dial time. Pass
+// nil to fall back to the OS resolver.
+func (t *Transport) SetClientResolver(r *clientdns.Resolver) {
+	t.mu.Lock()
+	t.resolver = r
+	t.mu.Unlock()
 }
 
 // New constructs a v2 WebSocket transport.
@@ -123,7 +134,23 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 	if bp := t.bypass(); bp != nil && bp.TCPDialer != nil {
 		dialer = bp.TCPDialer
 	}
-	rawConn, err := dialer.DialContext(context.Background(), "tcp", net.JoinHostPort(host, port))
+
+	// Resolve server domain via the privacy-preserving DoH resolver
+	// if one was configured; otherwise the OS resolver does the
+	// heavy lifting (and leaks the domain to the local ISP, which
+	// is exactly what the user opted out of by setting client_dns).
+	dialAddr := net.JoinHostPort(host, port)
+	t.mu.Lock()
+	resolver := t.resolver
+	t.mu.Unlock()
+	if resolver != nil {
+		resolved, rerr := resolver.ResolveHostPort(context.Background(), dialAddr)
+		if rerr != nil {
+			return nil, fmt.Errorf("ws: client dns: %w", rerr)
+		}
+		dialAddr = resolved
+	}
+	rawConn, err := dialer.DialContext(context.Background(), "tcp", dialAddr)
 	if err != nil {
 		return nil, fmt.Errorf("ws: tcp dial: %w", err)
 	}

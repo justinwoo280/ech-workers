@@ -19,6 +19,7 @@ import (
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 
+	"ewp-core/common/clientdns"
 	commontls "ewp-core/common/tls"
 	"ewp-core/log"
 	"ewp-core/transport"
@@ -40,6 +41,15 @@ type Transport struct {
 	mu        sync.Mutex
 	rt        *http3.Transport
 	bypassCfg *transport.BypassConfig
+	resolver  *clientdns.Resolver
+}
+
+// SetClientResolver wires the privacy-preserving DoH resolver.
+func (t *Transport) SetClientResolver(r *clientdns.Resolver) {
+	t.mu.Lock()
+	t.resolver = r
+	t.rt = nil // force rebuild so the new resolver wraps the QUIC dial too
+	t.mu.Unlock()
 }
 
 func New(serverAddr, serviceName string, useECH, useMozillaCA, enablePQC bool, echManager *commontls.ECHManager) *Transport {
@@ -106,7 +116,7 @@ func (t *Transport) initRoundTripper(host, sni string) (*http3.Transport, error)
 		tlsCfg.ClientSessionCache = nil
 	}
 
-	dial := makeBypassQUICDial(t.bypass())
+	dial := makeBypassQUICDial(t.bypass(), t.resolver)
 
 	rt := &http3.Transport{
 		TLSClientConfig: tlsCfg,
@@ -183,8 +193,10 @@ func (d *dualCloser) Close() error {
 }
 
 // makeBypassQUICDial builds a quic-go dial function bound to the
-// bypass UDP listen config when we are in TUN mode.
-func makeBypassQUICDial(bp *transport.BypassConfig) func(ctx context.Context, addr string, tlsCfg *tls.Config, qcfg *quic.Config) (*quic.Conn, error) {
+// bypass UDP listen config when we are in TUN mode, and routes name
+// resolution through the privacy-preserving DoH resolver instead of
+// net.ResolveUDPAddr (which would call the OS resolver).
+func makeBypassQUICDial(bp *transport.BypassConfig, resolver *clientdns.Resolver) func(ctx context.Context, addr string, tlsCfg *tls.Config, qcfg *quic.Config) (*quic.Conn, error) {
 	return func(ctx context.Context, addr string, tlsCfg *tls.Config, qcfg *quic.Config) (*quic.Conn, error) {
 		var lc *net.ListenConfig
 		if bp != nil && bp.UDPListenConfig != nil {
@@ -195,6 +207,14 @@ func makeBypassQUICDial(bp *transport.BypassConfig) func(ctx context.Context, ad
 		pc, err := lc.ListenPacket(ctx, "udp", "")
 		if err != nil {
 			return nil, err
+		}
+		if resolver != nil {
+			resolved, rerr := resolver.ResolveHostPort(ctx, addr)
+			if rerr != nil {
+				_ = pc.Close()
+				return nil, fmt.Errorf("h3grpc: client dns: %w", rerr)
+			}
+			addr = resolved
 		}
 		raddr, err := net.ResolveUDPAddr("udp", addr)
 		if err != nil {

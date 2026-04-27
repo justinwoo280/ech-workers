@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"ewp-core/common/clientdns"
 	commontls "ewp-core/common/tls"
 	"ewp-core/log"
 	"ewp-core/transport"
@@ -34,6 +35,14 @@ type Transport struct {
 
 	mu        sync.Mutex
 	bypassCfg *transport.BypassConfig
+	resolver  *clientdns.Resolver
+}
+
+// SetClientResolver wires the privacy-preserving DoH resolver.
+func (t *Transport) SetClientResolver(r *clientdns.Resolver) {
+	t.mu.Lock()
+	t.resolver = r
+	t.mu.Unlock()
 }
 
 func New(serverAddr, path string, useECH, useMozillaCA, enablePQC bool, echManager *commontls.ECHManager) *Transport {
@@ -109,6 +118,16 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 		IdleConnTimeout:       30 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			t.mu.Lock()
+			resolver := t.resolver
+			t.mu.Unlock()
+			if resolver != nil {
+				resolved, rerr := resolver.ResolveHostPort(ctx, addr)
+				if rerr != nil {
+					return nil, fmt.Errorf("xhttp: client dns: %w", rerr)
+				}
+				addr = resolved
+			}
 			rawConn, err := dialer.DialContext(ctx, network, addr)
 			if err != nil {
 				return nil, err

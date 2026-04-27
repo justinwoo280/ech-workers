@@ -6,6 +6,7 @@ import (
 	"net"
 	neturl "net/url"
 
+	"ewp-core/common/clientdns"
 	commontls "ewp-core/common/tls"
 	"ewp-core/engine"
 	httpinb "ewp-core/inbound/http"
@@ -53,6 +54,17 @@ func BuildInbound(c InboundCfg) (engine.Inbound, error) {
 	}
 }
 
+// BuildServerNameResolver constructs a *clientdns.Resolver from the
+// cfg.ServerNameDNS block. Returns (nil, nil) if no DoH servers are
+// configured — callers can pass the result straight to BuildOutbound,
+// which treats nil as "use OS resolver".
+func BuildServerNameResolver(c ServerNameDNSCfg) (*clientdns.Resolver, error) {
+	return clientdns.New(clientdns.Config{
+		Servers:    c.DoH.Servers,
+		PreferIPv6: c.PreferIPv6,
+	})
+}
+
 // BuildOutbound returns the engine.Outbound for the given config
 // block. Supported types: "direct", "ewpclient".
 //
@@ -60,7 +72,7 @@ func BuildInbound(c InboundCfg) (engine.Inbound, error) {
 // HTTPS resource records at startup. It is independent of any other
 // DoH path so that ECH bootstrap cannot deadlock on a not-yet-built
 // tunnel. Pass nil for "ECH disabled" outbounds.
-func BuildOutbound(c OutboundCfg, echBootstrap []string) (engine.Outbound, error) {
+func BuildOutbound(c OutboundCfg, echBootstrap []string, resolver *clientdns.Resolver) (engine.Outbound, error) {
 	switch c.Type {
 	case "direct":
 		return direct.New(c.Tag, 0), nil // 0 = use direct's default dial timeout
@@ -70,7 +82,7 @@ func BuildOutbound(c OutboundCfg, echBootstrap []string) (engine.Outbound, error
 		if err != nil {
 			return nil, fmt.Errorf("ewpclient %q: uuid: %w", c.Tag, err)
 		}
-		t, err := buildClientTransport(c.Transport, echBootstrap)
+		t, err := buildClientTransport(c.Transport, echBootstrap, resolver)
 		if err != nil {
 			return nil, fmt.Errorf("ewpclient %q: %w", c.Tag, err)
 		}
@@ -92,7 +104,7 @@ func BuildOutbound(c OutboundCfg, echBootstrap []string) (engine.Outbound, error
 // PQC is always on for v2: the inner SecureStream uses
 // X25519+ML-KEM-768 hybrid; the outer TLS layer here mirrors that
 // posture by including X25519MLKEM768 in CurvePreferences.
-func buildClientTransport(c TransportCfg, echBootstrap []string) (transport.Transport, error) {
+func buildClientTransport(c TransportCfg, echBootstrap []string, resolver *clientdns.Resolver) (transport.Transport, error) {
 	if c.URL == "" {
 		return nil, errors.New("transport.url is required")
 	}
@@ -141,6 +153,7 @@ func buildClientTransport(c TransportCfg, echBootstrap []string) (transport.Tran
 		if effectiveSNI != "" {
 			t.SetSNI(effectiveSNI)
 		}
+		t.SetClientResolver(resolver)
 		tr = t
 
 	case "grpc":
@@ -151,6 +164,7 @@ func buildClientTransport(c TransportCfg, echBootstrap []string) (transport.Tran
 		if effectiveSNI != "" {
 			t.SetSNI(effectiveSNI)
 		}
+		t.SetClientResolver(resolver)
 		tr = t
 
 	case "xhttp":
@@ -161,6 +175,7 @@ func buildClientTransport(c TransportCfg, echBootstrap []string) (transport.Tran
 		if effectiveSNI != "" {
 			t.SetSNI(effectiveSNI)
 		}
+		t.SetClientResolver(resolver)
 		tr = t
 
 	case "h3grpc", "h3":
@@ -171,6 +186,7 @@ func buildClientTransport(c TransportCfg, echBootstrap []string) (transport.Tran
 		if effectiveSNI != "" {
 			t.SetSNI(effectiveSNI)
 		}
+		t.SetClientResolver(resolver)
 		tr = t
 
 	default:

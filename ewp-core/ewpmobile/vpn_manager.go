@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"ewp-core/common/clientdns"
 	commontls "ewp-core/common/tls"
 	"ewp-core/dns"
 	"ewp-core/engine"
@@ -115,6 +116,21 @@ func (vm *vpnManager) Start(tunFD int, cfg *VPNConfig) error {
 		return err
 	}
 	vm.tr = tr
+
+	// 3a. Build the privacy-preserving server-name resolver and inject
+	// it into the transport. We reuse the same DoH list as
+	// AsyncResolver — on mobile the threat model is unitary (the user
+	// trusts these DoH servers for everything, otherwise they wouldn't
+	// have configured them), so a single setting is friendlier than
+	// the desktop's split server_name_dns / dns / ech.bootstrap_doh
+	// triplet.
+	if snResolver, snErr := clientdns.New(clientdns.Config{Servers: dohServers}); snErr == nil && snResolver != nil {
+		if r, ok := tr.(interface {
+			SetClientResolver(*clientdns.Resolver)
+		}); ok {
+			r.SetClientResolver(snResolver)
+		}
+	}
 
 	// 4. EWP client outbound + a direct outbound for completeness.
 	out := ewpclient.New("ewp", tr, uuid)

@@ -27,3 +27,17 @@ ech:
     servers:
       - "https://1.1.1.1/dns-query"
       - "https://dns.google/dns-query"
+
+# server_name_dns: how the *client* resolves the upstream EWP server's
+# domain name to an IP at Dial time. Without this block the OS resolver
+# is used and the local ISP sees every "my-vps.example.com" lookup.
+# With it, only DoH traffic to 1.1.1.1 / 8.8.8.8 is visible.
+#
+# Independent of `ech.bootstrap_doh:` (one-shot ECH config fetch) and
+# `dns:` (server-side resolver for destinations users ask for).
+server_name_dns:
+  doh:
+    servers:
+      - "https://1.1.1.1/dns-query"
+      - "https://dns.google/dns-query"
+  prefer_ipv6: false

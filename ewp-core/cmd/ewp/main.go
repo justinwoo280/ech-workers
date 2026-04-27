@@ -70,8 +70,23 @@ func main() {
 			len(conf.DNS.Server.Upstream.Servers), conf.DNS.Server.Upstream.WorkerPool)
 	}
 
+	// Client DNS: privacy-preserving resolver used by ewpclient
+	// outbounds to translate the upstream EWP server's domain name
+	// into an IP at Dial time. Independent of serverResolver and
+	// echBootstrap. Returns nil if user did not configure
+	// `client_dns:`, in which case the OS resolver is used.
+	clientResolver, err := cfg.BuildServerNameResolver(conf.ServerNameDNS)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "server_name_dns: %v\n", err)
+		os.Exit(2)
+	}
+	if clientResolver != nil {
+		log.Printf("[ewp] server-name DNS resolver: %d DoH upstream(s) for upstream-server lookup",
+			len(conf.ServerNameDNS.DoH.Servers))
+	}
+
 	for _, oc := range conf.Outbounds {
-		out, err := cfg.BuildOutbound(oc, conf.ECH.BootstrapDoH.Servers)
+		out, err := cfg.BuildOutbound(oc, conf.ECH.BootstrapDoH.Servers, clientResolver)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "outbound %q: %v\n", oc.Tag, err)
 			os.Exit(2)

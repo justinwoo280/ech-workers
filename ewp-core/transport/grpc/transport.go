@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
 
+	"ewp-core/common/clientdns"
 	commontls "ewp-core/common/tls"
 	pb "ewp-core/proto"
 	"ewp-core/transport"
@@ -43,6 +44,21 @@ type Transport struct {
 	mu        sync.Mutex
 	pool      map[connPoolKey]*grpc.ClientConn
 	bypassCfg *transport.BypassConfig
+	resolver  *clientdns.Resolver
+}
+
+// SetClientResolver wires the privacy-preserving DoH resolver used to
+// translate the EWP server's domain name to an IP at Dial time.
+func (t *Transport) SetClientResolver(r *clientdns.Resolver) {
+	t.mu.Lock()
+	t.resolver = r
+	// Drop pooled conns — they were dialed with possibly a different
+	// resolver (or none); a fresh one might pick a different IP.
+	for k, c := range t.pool {
+		_ = c.Close()
+		delete(t.pool, k)
+	}
+	t.mu.Unlock()
 }
 
 // New constructs a v2 gRPC transport. serviceName is the service name
@@ -153,6 +169,16 @@ func (t *Transport) getOrDialPool(host, port, sni string) (*grpc.ClientConn, err
 		d := &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
 		if bp := t.bypass(); bp != nil && bp.TCPDialer != nil {
 			d = bp.TCPDialer
+		}
+		t.mu.Lock()
+		resolver := t.resolver
+		t.mu.Unlock()
+		if resolver != nil {
+			resolved, rerr := resolver.ResolveHostPort(ctx, addr)
+			if rerr != nil {
+				return nil, fmt.Errorf("grpc: client dns: %w", rerr)
+			}
+			addr = resolved
 		}
 		return d.DialContext(ctx, "tcp", addr)
 	}
