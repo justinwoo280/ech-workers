@@ -98,3 +98,11 @@ func (a *ServerAdapter) Close() error {
 	})
 	return nil
 }
+
+// --- v2 transport.TunnelConn surface ---
+
+// SendMessage is the v2 alias for Write — one WS binary frame per call.
+func (a *ServerAdapter) SendMessage(b []byte) error { return a.Write(b) }
+
+// ReadMessage is the v2 alias for Read — one WS binary frame per call.
+func (a *ServerAdapter) ReadMessage() ([]byte, error) { return a.Read() }

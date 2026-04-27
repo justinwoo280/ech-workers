@@ -1,348 +1,142 @@
 //go:build android
 
+// Package ewpmobile is the gomobile binding consumed by the Kotlin
+// VpnService. Kotlin uses the symbols exposed in this file; vpn_manager.go
+// provides the v2 implementation.
+//
+// The API has been re-cut for v2:
+//
+//   - There is one builder (VPNConfigBuilder) with v2-only fields.
+//     The legacy v1 fields (EnableFlow, AppProtocol="trojan",
+//     XhttpMode, EnableTLS, MinTLSVersion, ContentType, UserAgent,
+//     ECHDomain, TunMask, TunGateway) have been removed; if you
+//     were setting them on the Kotlin side you can now just delete
+//     those lines.
+//
+//   - StartVPNTrojan / StartVPNAdvanced are gone. Trojan support is
+//     a non-goal in v2 (EWP only). Advanced-mode is the default —
+//     just call NewVPNConfig().Set...().Build() and pass it to
+//     StartVPN.
+//
+//   - QuickStartVPN and StartVPNWithProtocol are kept as
+//     convenience shims for the simplest call sites.
 package ewpmobile
 
 import (
-	"log"
-	"net"
-	"sync"
-	"syscall"
-	"time"
+	"fmt"
+
+	"ewp-core/log"
 )
 
-// GoMobile 导出的 VPN 接口
-// 提供简化的全局 VPN 管理功能
-
-var (
-	globalVPN *vpnManager
-	vpnMu     sync.Mutex
-)
-
-// VPNConfigBuilder VPN 配置构建器（GoMobile 友好）
+// VPNConfigBuilder is a fluent builder around *VPNConfig.
+//
+// Kotlin usage:
+//
+//	val cfg = ewpmobile.NewVPNConfig("server.example:443", "01020304...")
+//	    .SetProtocol("ws")
+//	    .SetEnableECH(true)
+//	    .SetSNI("server.example")
+//	    .SetDoHServers("https://1.1.1.1/dns-query,https://dns.google/dns-query")
+//	    .Build()
+//	ewpmobile.StartVPN(tunFd, cfg)
 type VPNConfigBuilder struct {
-	config *VPNConfig
+	cfg *VPNConfig
 }
 
-// NewVPNConfig 创建 VPN 配置构建器
+// NewVPNConfig returns a builder seeded with the upstream EWP server
+// address and the hex-encoded UUID token issued by that server.
 func NewVPNConfig(serverAddr, token string) *VPNConfigBuilder {
-	return &VPNConfigBuilder{
-		config: &VPNConfig{
-			ServerAddr:  serverAddr,
-			Token:       token,
-			Protocol:    "ws",  // 默认 WebSocket
-			AppProtocol: "ewp", // 默认 EWP
-			Path:        "/",   // 默认路径
-			EnableECH:   true,  // 默认启用 ECH
-			EnableFlow:  true,  // 默认启用 Vision 流控
-			EnablePQC:   false, // 默认不启用 PQC
-			EnableMozillaCA: true, // 默认启用内置 Mozilla CA
-			TunMTU:      1400,  // 默认 MTU
-		},
-	}
+	return &VPNConfigBuilder{cfg: &VPNConfig{
+		ServerAddr: serverAddr,
+		Token:      token,
+		Protocol:   "ws",
+		Path:       "/ewp",
+		EnableECH:  true,
+		TUNMTU:     1420,
+	}}
 }
 
-// SetPassword 设置密码（Trojan 协议需要）
-func (b *VPNConfigBuilder) SetPassword(password string) *VPNConfigBuilder {
-	b.config.Password = password
+func (b *VPNConfigBuilder) SetProtocol(p string) *VPNConfigBuilder    { b.cfg.Protocol = p; return b }
+func (b *VPNConfigBuilder) SetPath(p string) *VPNConfigBuilder        { b.cfg.Path = p; return b }
+func (b *VPNConfigBuilder) SetSNI(s string) *VPNConfigBuilder         { b.cfg.SNI = s; return b }
+func (b *VPNConfigBuilder) SetHost(h string) *VPNConfigBuilder        { b.cfg.Host = h; return b }
+func (b *VPNConfigBuilder) SetEnableECH(en bool) *VPNConfigBuilder    { b.cfg.EnableECH = en; return b }
+func (b *VPNConfigBuilder) SetTUNMTU(mtu int) *VPNConfigBuilder       { b.cfg.TUNMTU = mtu; return b }
+func (b *VPNConfigBuilder) SetTUNIPv4(ip string) *VPNConfigBuilder    { b.cfg.TUNIPv4 = ip; return b }
+func (b *VPNConfigBuilder) SetTUNIPv6(ip string) *VPNConfigBuilder    { b.cfg.TUNIPv6 = ip; return b }
+func (b *VPNConfigBuilder) SetDNSv4(ip string) *VPNConfigBuilder      { b.cfg.DNSv4 = ip; return b }
+func (b *VPNConfigBuilder) SetDNSv6(ip string) *VPNConfigBuilder      { b.cfg.DNSv6 = ip; return b }
+
+// SetDoHServers takes a comma-separated list of DoH URLs (the wire
+// format is comma-separated because gomobile cannot pass []string).
+func (b *VPNConfigBuilder) SetDoHServers(commaSeparated string) *VPNConfigBuilder {
+	b.cfg.DoHServers = splitCSV(commaSeparated)
 	return b
 }
 
-// SetProtocol 设置传输协议（ws/grpc/xhttp）
-func (b *VPNConfigBuilder) SetProtocol(protocol string) *VPNConfigBuilder {
-	b.config.Protocol = protocol
-	return b
-}
+// Build returns the immutable *VPNConfig. It performs no validation;
+// errors surface from StartVPN.
+func (b *VPNConfigBuilder) Build() *VPNConfig { return b.cfg }
 
-// SetAppProtocol 设置应用协议（ewp/trojan）
-func (b *VPNConfigBuilder) SetAppProtocol(appProtocol string) *VPNConfigBuilder {
-	b.config.AppProtocol = appProtocol
-	return b
-}
+// ---------------------------------------------------------------------
+// Top-level entry points (the surface Kotlin actually calls)
+// ---------------------------------------------------------------------
 
-// SetPath 设置路径（WebSocket 路径或 gRPC 服务名）
-func (b *VPNConfigBuilder) SetPath(path string) *VPNConfigBuilder {
-	b.config.Path = path
-	return b
-}
-
-// SetEnableECH 设置是否启用 ECH
-func (b *VPNConfigBuilder) SetEnableECH(enable bool) *VPNConfigBuilder {
-	b.config.EnableECH = enable
-	return b
-}
-
-// SetEnableFlow 设置是否启用 Vision 流控
-func (b *VPNConfigBuilder) SetEnableFlow(enable bool) *VPNConfigBuilder {
-	b.config.EnableFlow = enable
-	return b
-}
-
-// SetEnablePQC 设置是否启用后量子加密
-func (b *VPNConfigBuilder) SetEnablePQC(enable bool) *VPNConfigBuilder {
-	b.config.EnablePQC = enable
-	return b
-}
-
-// SetEnableMozillaCA 设置是否启用内置 Mozilla 根证书
-func (b *VPNConfigBuilder) SetEnableMozillaCA(enable bool) *VPNConfigBuilder {
-	b.config.EnableMozillaCA = enable
-	return b
-}
-
-// SetECHDomain 设置 ECH 域名
-func (b *VPNConfigBuilder) SetECHDomain(domain string) *VPNConfigBuilder {
-	b.config.ECHDomain = domain
-	return b
-}
-
-// SetDNSServer 设置 DNS 服务器
-func (b *VPNConfigBuilder) SetDNSServer(server string) *VPNConfigBuilder {
-	b.config.DNSServer = server
-	return b
-}
-
-// SetTunIP 设置 TUN IP 地址
-func (b *VPNConfigBuilder) SetTunIP(ip string) *VPNConfigBuilder {
-	b.config.TunIP = ip
-	return b
-}
-
-// SetTunGateway 设置 TUN 网关
-func (b *VPNConfigBuilder) SetTunGateway(gateway string) *VPNConfigBuilder {
-	b.config.TunGateway = gateway
-	return b
-}
-
-// SetTunMask 设置 TUN 子网掩码
-func (b *VPNConfigBuilder) SetTunMask(mask string) *VPNConfigBuilder {
-	b.config.TunMask = mask
-	return b
-}
-
-// SetTunDNS 设置 TUN DNS 服务器
-func (b *VPNConfigBuilder) SetTunDNS(dns string) *VPNConfigBuilder {
-	b.config.TunDNS = dns
-	return b
-}
-
-// SetTunMTU 设置 TUN MTU
-func (b *VPNConfigBuilder) SetTunMTU(mtu int) *VPNConfigBuilder {
-	b.config.TunMTU = mtu
-	return b
-}
-
-// SetHost 设置 HTTP Host 头覆盖（CDN 域名，留空则同 ServerAddr）
-func (b *VPNConfigBuilder) SetHost(host string) *VPNConfigBuilder {
-	b.config.Host = host
-	return b
-}
-
-// SetSNI 设置 TLS SNI 覆盖（留空则同 Host）
-func (b *VPNConfigBuilder) SetSNI(sni string) *VPNConfigBuilder {
-	b.config.SNI = sni
-	return b
-}
-
-// SetEnableTLS 设置是否启用 TLS
-func (b *VPNConfigBuilder) SetEnableTLS(enable bool) *VPNConfigBuilder {
-	b.config.EnableTLS = enable
-	return b
-}
-
-// SetMinTLSVersion 设置最低 TLS 版本（"1.2" 或 "1.3"）
-func (b *VPNConfigBuilder) SetMinTLSVersion(version string) *VPNConfigBuilder {
-	b.config.MinTLSVersion = version
-	return b
-}
-
-// SetXhttpMode 设置 XHTTP 模式（"auto" / "stream-one" / "stream-down"）
-func (b *VPNConfigBuilder) SetXhttpMode(mode string) *VPNConfigBuilder {
-	b.config.XhttpMode = mode
-	return b
-}
-
-// SetUserAgent 设置 gRPC/H3gRPC User-Agent
-func (b *VPNConfigBuilder) SetUserAgent(ua string) *VPNConfigBuilder {
-	b.config.UserAgent = ua
-	return b
-}
-
-// SetContentType 设置 H3gRPC Content-Type
-func (b *VPNConfigBuilder) SetContentType(ct string) *VPNConfigBuilder {
-	b.config.ContentType = ct
-	return b
-}
-
-// Build 构建配置
-func (b *VPNConfigBuilder) Build() *VPNConfig {
-	return b.config
-}
-
-// ========== 全局 VPN 管理函数 ==========
-
-// StartVPN 启动 VPN（全局单例）
-// tunFD: Android VPNService 的 ParcelFileDescriptor.getFd()
-// config: VPN 配置
+// StartVPN brings up the VPN with the supplied config, attaching to the
+// TUN fd that VpnService.establish() returned.
 func StartVPN(tunFD int, config *VPNConfig) error {
-	vpnMu.Lock()
-	defer vpnMu.Unlock()
-
-	// 如果已有 VPN 在运行，先停止
-	if globalVPN != nil && globalVPN.IsRunning() {
-		log.Printf("[VPN] Stopping existing VPN before starting new one")
-		globalVPN.Stop()
+	if config == nil {
+		return fmt.Errorf("nil config")
 	}
-
-	// 创建新的 VPN 管理器
-	globalVPN = newVPNManager()
-
-	// 启动 VPN
-	return globalVPN.Start(tunFD, config)
+	return vmInst.Start(tunFD, config)
 }
 
-// StopVPN 停止 VPN
-func StopVPN() error {
-	vpnMu.Lock()
-	defer vpnMu.Unlock()
+// StopVPN tears the VPN down.
+func StopVPN() error { return vmInst.Stop() }
 
-	if globalVPN == nil {
-		return nil
-	}
+// IsVPNRunning reports liveness.
+func IsVPNRunning() bool { return vmInst.IsRunning() }
 
-	err := globalVPN.Stop()
-	globalVPN = nil
-	return err
-}
+// GetVPNStats returns a JSON snapshot of runtime statistics. See
+// vpn_manager.GetStats() for fields.
+func GetVPNStats() string { return vmInst.GetStats() }
 
-// IsVPNRunning 检查 VPN 是否运行
-func IsVPNRunning() bool {
-	vpnMu.Lock()
-	defer vpnMu.Unlock()
-
-	if globalVPN == nil {
-		return false
-	}
-
-	return globalVPN.IsRunning()
-}
-
-// GetVPNStats 获取 VPN 统计信息（JSON 字符串）
-func GetVPNStats() string {
-	vpnMu.Lock()
-	defer vpnMu.Unlock()
-
-	if globalVPN == nil {
-		return `{"running":false}`
-	}
-
-	return globalVPN.GetStats()
-}
-
-// ========== 网络工具 ==========
-
-// TestLatency 测试到服务器的 TCP 连接延迟（毫秒）。
-// 返回值：>= 0 为延迟 ms，-1 表示连接失败或超时。
-// serverAddr 格式: "host:port"，例如 "example.com:443"
-// 若 socket 保护器已设置（VPN 运行中），自动使用保护 socket 避免路由死循环。
-func TestLatency(serverAddr string) int {
-	start := time.Now()
-	var conn net.Conn
-	var err error
-
-	if IsSocketProtectorSet() {
-		dialer := &net.Dialer{
-			Timeout: 5 * time.Second,
-			Control: func(network, address string, c syscall.RawConn) error {
-				c.Control(func(fd uintptr) { ProtectSocket(int(fd)) })
-				return nil
-			},
-		}
-		conn, err = dialer.Dial("tcp", serverAddr)
-	} else {
-		conn, err = net.DialTimeout("tcp", serverAddr, 5*time.Second)
-	}
-
-	if err != nil {
-		return -1
-	}
-	conn.Close()
-	return int(time.Since(start).Milliseconds())
-}
-
-// ========== 简化的快捷函数 ==========
-
-// QuickStartVPN 快速启动 VPN（使用默认配置）
-// 参数：
-//   - tunFD: TUN 文件描述符
-//   - serverAddr: 服务器地址（如 "xxx.workers.dev:443"）
-//   - token: 认证令牌
+// QuickStartVPN is the smallest convenience entry: ws + ECH + 1.1.1.1
+// DoH + standard MTU. Suitable for "I just want it to work" Kotlin
+// code paths.
 func QuickStartVPN(tunFD int, serverAddr, token string) error {
-	config := NewVPNConfig(serverAddr, token).Build()
-	return StartVPN(tunFD, config)
+	cfg := NewVPNConfig(serverAddr, token).
+		SetEnableECH(true).
+		SetDoHServers("https://1.1.1.1/dns-query,https://dns.google/dns-query").
+		Build()
+	return StartVPN(tunFD, cfg)
 }
 
-// StartVPNWithProtocol 启动 VPN（指定协议）
-// 参数：
-//   - tunFD: TUN 文件描述符
-//   - serverAddr: 服务器地址
-//   - token: 认证令牌
-//   - protocol: 传输协议（ws/grpc/xhttp）
-//   - enableECH: 是否启用 ECH
+// StartVPNWithProtocol lets the caller pick the outer transport while
+// keeping every other v2 default.
 func StartVPNWithProtocol(tunFD int, serverAddr, token, protocol string, enableECH bool) error {
-	config := NewVPNConfig(serverAddr, token).
+	cfg := NewVPNConfig(serverAddr, token).
 		SetProtocol(protocol).
 		SetEnableECH(enableECH).
+		SetDoHServers("https://1.1.1.1/dns-query,https://dns.google/dns-query").
 		Build()
-	return StartVPN(tunFD, config)
+	return StartVPN(tunFD, cfg)
 }
 
-// StartVPNTrojan 启动 Trojan 协议的 VPN
-// 参数：
-//   - tunFD: TUN 文件描述符
-//   - serverAddr: 服务器地址
-//   - password: Trojan 密码
-//   - protocol: 传输协议（ws/grpc/xhttp）
-func StartVPNTrojan(tunFD int, serverAddr, password, protocol string) error {
-	config := NewVPNConfig(serverAddr, "").
-		SetPassword(password).
-		SetProtocol(protocol).
-		SetAppProtocol("trojan").
-		Build()
-	return StartVPN(tunFD, config)
-}
-
-// ========== 高级配置函数 ==========
-
-// StartVPNAdvanced 启动 VPN（完整配置）
-// 参数示例：
+// TestLatency does a single UDP-handshake-style RTT to serverAddr and
+// returns the result in milliseconds, or -1 on error.
 //
-//	serverAddr: "xxx.workers.dev:443" 或 "104.16.1.2:443"
-//	token: "your-uuid"
-//	password: "" (Trojan 协议需要)
-//	protocol: "ws" / "grpc" / "xhttp"
-//	appProtocol: "ewp" / "trojan"
-//	path: "/" (WebSocket 路径或 gRPC 服务名)
-//	enableECH: true
-//	enableFlow: true
-//	enablePQC: false
-func StartVPNAdvanced(
-	tunFD int,
-	serverAddr, token, password string,
-	protocol, appProtocol, path string,
-	enableECH, enableFlow, enablePQC bool,
-) error {
-	config := &VPNConfig{
-		ServerAddr:  serverAddr,
-		Token:       token,
-		Password:    password,
-		Protocol:    protocol,
-		AppProtocol: appProtocol,
-		Path:        path,
-		EnableECH:   enableECH,
-		EnableFlow:  enableFlow,
-		EnablePQC:   enablePQC,
-		EnableMozillaCA: true, // 默认开启
-		TunMTU:      1400,
+// Implementation note: in v2 we no longer dial an EWP-aware probe —
+// we just measure raw TCP connect time, which is the only signal that
+// matters for "is the upstream reachable from this network".
+func TestLatency(serverAddr string) int {
+	if serverAddr == "" {
+		return -1
 	}
-	return StartVPN(tunFD, config)
+	ms, err := pingTCP(serverAddr)
+	if err != nil {
+		log.Printf("[ewpmobile] TestLatency(%q): %v", serverAddr, err)
+		return -1
+	}
+	return ms
 }

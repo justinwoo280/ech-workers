@@ -1,3 +1,7 @@
+// Package h3grpc carries v2 outer messages over HTTP/3 + gRPC-Web
+// framing. Streaming uses one POST per Dial: the request body is the
+// uplink, the response body is the downlink. Each gRPC-Web frame =
+// one v2 outer message.
 package h3grpc
 
 import (
@@ -5,418 +9,201 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
-	"strings"
+	"net/url"
 	"sync"
 	"time"
 
-	commontls "ewp-core/common/tls"
-	"ewp-core/log"
-	"ewp-core/protocol/trojan"
-	"ewp-core/transport"
-
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
+
+	commontls "ewp-core/common/tls"
+	"ewp-core/log"
+	"ewp-core/transport"
 )
 
-// Transport implements HTTP/3 transport for gRPC-Web
+// Transport implements transport.Transport for HTTP/3 + gRPC-Web.
 type Transport struct {
 	serverAddr  string
-	uuidStr     string
-	password    string
-	uuid        [16]byte
-	useECH      bool
-	enableFlow  bool
-	enablePQC   bool
-	useMozillaCA bool
-	useTrojan   bool
 	serviceName string
-	authority   string
-	sni         string
-	idleTimeout time.Duration
-	concurrency int
-	echManager  *commontls.ECHManager
-	bypassCfg   *transport.BypassConfig
 
-	// Anti-DPI settings
-	userAgent   string
-	contentType string
+	useECH       bool
+	useMozillaCA bool
+	enablePQC    bool
+	echManager   *commontls.ECHManager
 
-	// HTTP/3 specific — protected by mu
-	mu             sync.RWMutex
-	client         *http.Client
-	http3Transport *http3.Transport
-	quicConfig     *quic.Config
-	tlsConfig      *tls.Config
+	sni  string
+	host string
+
+	mu        sync.Mutex
+	rt        *http3.Transport
+	bypassCfg *transport.BypassConfig
 }
 
-// New creates a new HTTP/3 transport
-func New(serverAddr, uuidStr string, useECH, enableFlow bool, serviceName string, echManager *commontls.ECHManager) (*Transport, error) {
-	return NewWithProtocol(serverAddr, uuidStr, "", useECH, false, enableFlow, false, false, serviceName, echManager)
-}
-
-// NewWithProtocol creates a new HTTP/3 transport with full options
-func NewWithProtocol(serverAddr, uuidStr, password string, useECH, useMozillaCA, enableFlow, enablePQC, useTrojan bool, serviceName string, echManager *commontls.ECHManager) (*Transport, error) {
-	var uuid [16]byte
-	if !useTrojan {
-		var err error
-		uuid, err = transport.ParseUUID(uuidStr)
-		if err != nil {
-			return nil, fmt.Errorf("invalid UUID: %w", err)
-		}
-	}
-
+func New(serverAddr, serviceName string, useECH, useMozillaCA, enablePQC bool, echManager *commontls.ECHManager) *Transport {
 	if serviceName == "" {
 		serviceName = "ProxyService"
 	}
-	serviceName = strings.TrimPrefix(serviceName, "/")
-
-	t := &Transport{
-		serverAddr:  serverAddr,
-		uuidStr:     uuidStr,
-		password:    password,
-		uuid:        uuid,
-		useECH:      useECH,
-		enableFlow:  enableFlow,
-		enablePQC:   enablePQC,
-		useTrojan:   useTrojan,
+	return &Transport{
+		serverAddr:   serverAddr,
+		serviceName:  serviceName,
+		useECH:       useECH,
 		useMozillaCA: useMozillaCA,
-		serviceName: serviceName,
-		authority:   "",
-		idleTimeout: 30 * time.Second,
-		concurrency: 4,
-		echManager:  echManager,
-
-		userAgent:   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-		contentType: "application/grpc-web+proto",
+		enablePQC:    enablePQC,
+		echManager:   echManager,
 	}
-
-	if err := t.initClient(); err != nil {
-		return nil, fmt.Errorf("failed to initialize HTTP/3 client: %w", err)
-	}
-
-	return t, nil
 }
 
-// initClient builds the TLS/QUIC/HTTP stack.
-// Must be called under t.mu write lock (or during construction before the Transport escapes).
-func (t *Transport) initClient() error {
-	parsed, err := transport.ParseAddress(t.serverAddr)
-	if err != nil {
-		return fmt.Errorf("invalid server address: %w", err)
-	}
+func (t *Transport) Name() string { return "h3grpc" }
 
-	serverName := t.sni
-	if serverName == "" {
-		serverName = parsed.Host
-	}
+func (t *Transport) SetSNI(sni string)   { t.sni = sni }
+func (t *Transport) SetHost(host string) { t.host = host }
 
-	tlsCfg, err := commontls.NewClient(commontls.ClientOptions{
-		ServerName:   serverName,
-		UseMozillaCA: t.useMozillaCA,
-		EnableECH:    t.useECH,
-		EnablePQC:    t.enablePQC,
-		ECHManager:   t.echManager,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create TLS config: %w", err)
-	}
-
-	stdTLSConfig, err := tlsCfg.TLSConfig()
-	if err != nil {
-		return fmt.Errorf("failed to get TLS config: %w", err)
-	}
-
-	// Force HTTP/3 ALPN
-	stdTLSConfig.NextProtos = []string{"h3"}
-
-	// Enable session resumption for 0-RTT
-	stdTLSConfig.ClientSessionCache = tls.NewLRUClientSessionCache(100)
-
-	t.tlsConfig = stdTLSConfig
-
-	t.quicConfig = &quic.Config{
-		InitialStreamReceiveWindow:     6 * 1024 * 1024,
-		MaxStreamReceiveWindow:         16 * 1024 * 1024,
-		InitialConnectionReceiveWindow: 15 * 1024 * 1024,
-		MaxConnectionReceiveWindow:     25 * 1024 * 1024,
-		MaxIdleTimeout:                 t.idleTimeout,
-		KeepAlivePeriod:                10 * time.Second,
-		DisablePathMTUDiscovery:        false,
-		EnableDatagrams:                false,
-		Allow0RTT:                      true,
-	}
-
-	t.http3Transport = &http3.Transport{
-		TLSClientConfig:    t.tlsConfig,
-		QUICConfig:         t.quicConfig,
-		DisableCompression: true,
-	}
-
-	t.client = &http.Client{
-		Transport: t.http3Transport,
-		Timeout:   0,
-	}
-
-	return nil
-}
-
-// getClient returns the current HTTP client under a read lock.
-func (t *Transport) getClient() *http.Client {
-	t.mu.RLock()
-	c := t.client
-	t.mu.RUnlock()
-	return c
-}
-
-// reinitClient closes the old HTTP/3 transport and builds a fresh one.
-// Called after updating the ECH config so all future dials use the new key.
-func (t *Transport) reinitClient() error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	if t.http3Transport != nil {
-		t.http3Transport.Close()
-		t.http3Transport = nil
-	}
-
-	return t.initClient()
-}
-
-// SetAuthority sets the :authority pseudo-header
-func (t *Transport) SetAuthority(authority string) *Transport {
-	t.authority = authority
-	return t
-}
-
-// SetSNI sets the SNI override and reinitializes the client
-// P2-11: Return error to propagate reinit failures
-func (t *Transport) SetSNI(sni string) error {
-	t.sni = sni
-	return t.reinitClient()
-}
-
-// SetConcurrency sets the number of concurrent streams
-func (t *Transport) SetConcurrency(n int) *Transport {
-	if n > 0 {
-		t.concurrency = n
-	}
-	return t
-}
-
-// SetIdleTimeout sets the QUIC connection idle timeout
-func (t *Transport) SetIdleTimeout(d time.Duration) *Transport {
-	t.idleTimeout = d
-	if t.quicConfig != nil {
-		t.quicConfig.MaxIdleTimeout = d
-	}
-	return t
-}
-
-// SetUserAgent sets custom User-Agent header
-func (t *Transport) SetUserAgent(ua string) *Transport {
-	if ua != "" {
-		t.userAgent = ua
-	}
-	return t
-}
-
-// SetContentType sets custom Content-Type header
-func (t *Transport) SetContentType(ct string) *Transport {
-	if ct != "" {
-		t.contentType = ct
-	}
-	return t
-}
-
-// SetBypassConfig injects a bypass dialer for TUN mode.
-// When set, QUIC connections are established via a UDP socket bound to the
-// physical network interface, bypassing the TUN routing table.
 func (t *Transport) SetBypassConfig(cfg *transport.BypassConfig) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	t.bypassCfg = cfg
-	if t.http3Transport == nil {
-		return
-	}
-	if cfg != nil && cfg.UDPListenConfig != nil {
-		t.http3Transport.Dial = t.makeBypassQUICDial(cfg.UDPListenConfig)
-	} else {
-		t.http3Transport.Dial = nil
-	}
+	t.rt = nil // force rebuild next Dial
+	t.mu.Unlock()
 }
 
-// makeBypassQUICDial returns an http3.Transport.Dial function that uses a UDP
-// socket bound to the physical interface to avoid TUN routing loops.
-func (t *Transport) makeBypassQUICDial(lc *net.ListenConfig) func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
-	return func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
-		udpAddr, err := net.ResolveUDPAddr("udp", addr)
-		if err != nil {
-			return nil, fmt.Errorf("bypass QUIC dial: resolve addr %s: %w", addr, err)
-		}
-
-		pconn, err := lc.ListenPacket(ctx, "udp", ":0")
-		if err != nil {
-			return nil, fmt.Errorf("bypass QUIC dial: bind UDP socket: %w", err)
-		}
-
-		qt := &quic.Transport{Conn: pconn}
-		earlyConn, err := qt.DialEarly(ctx, udpAddr, tlsCfg, cfg)
-		if err != nil {
-			qt.Close()
-			return nil, fmt.Errorf("bypass QUIC dial: %w", err)
-		}
-		return earlyConn, nil
-	}
+func (t *Transport) bypass() *transport.BypassConfig {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.bypassCfg
 }
 
-// Name returns the transport name
-func (t *Transport) Name() string {
-	var name string
-	if t.useTrojan {
-		name = "H3+Trojan"
-	} else if t.enableFlow {
-		name = "H3+Flow"
-	} else {
-		name = "H3+EWP"
+func (t *Transport) initRoundTripper(host, sni string) (*http3.Transport, error) {
+	t.mu.Lock()
+	if t.rt != nil {
+		rt := t.rt
+		t.mu.Unlock()
+		return rt, nil
 	}
-	if t.useECH {
-		name += "+ECH(QUIC)"
-	} else {
-		name += "+TLS"
+	t.mu.Unlock()
+
+	cfg, err := commontls.NewSTDConfig(sni, t.useMozillaCA, t.enablePQC)
+	if err != nil {
+		return nil, err
 	}
-	return name
+	tlsCfg, err := cfg.TLSConfig()
+	if err != nil {
+		return nil, err
+	}
+	tlsCfg.NextProtos = []string{"h3"}
+	if t.useECH && t.echManager != nil {
+		echList, err := t.echManager.Get()
+		if err != nil {
+			return nil, err
+		}
+		tlsCfg.EncryptedClientHelloConfigList = echList
+		tlsCfg.EncryptedClientHelloRejectionVerify = func(cs tls.ConnectionState) error {
+			return errors.New("server rejected ECH")
+		}
+		// ECH + 0-RTT + session-cache do not mix; turn the latter two off.
+		tlsCfg.SessionTicketsDisabled = true
+		tlsCfg.ClientSessionCache = nil
+	}
+
+	dial := makeBypassQUICDial(t.bypass())
+
+	rt := &http3.Transport{
+		TLSClientConfig: tlsCfg,
+		QUICConfig: &quic.Config{
+			MaxIdleTimeout:        45 * time.Second,
+			KeepAlivePeriod:       15 * time.Second,
+			MaxIncomingStreams:    256,
+			MaxIncomingUniStreams: 256,
+			Allow0RTT:             !t.useECH, // never with ECH
+		},
+		Dial: dial,
+	}
+	t.mu.Lock()
+	t.rt = rt
+	t.mu.Unlock()
+	return rt, nil
 }
 
-// Dial creates a new connection
+// Dial opens a long-lived bidi POST: req.Body is the uplink, resp.Body
+// is the downlink, both framed as gRPC-Web.
 func (t *Transport) Dial() (transport.TunnelConn, error) {
-	parsed, err := transport.ParseAddress(t.serverAddr)
+	host, port, err := net.SplitHostPort(t.serverAddr)
+	if err != nil {
+		return nil, fmt.Errorf("h3grpc: bad serverAddr %q: %w", t.serverAddr, err)
+	}
+	sni := t.sni
+	if sni == "" {
+		sni = host
+	}
+
+	rt, err := t.initRoundTripper(host, sni)
 	if err != nil {
 		return nil, err
 	}
 
-	host := parsed.Host
-	port := parsed.Port
-	addr := net.JoinHostPort(host, port)
-
-	// Resolve serverAddr host to IP
-	effectiveSNI := t.sni
-	if effectiveSNI == "" {
-		effectiveSNI = host
+	httpHost := t.host
+	if httpHost == "" {
+		httpHost = host
 	}
-	if !isIPAddress(host) {
-		ip, err := transport.ResolveIP(t.bypassCfg, host, port)
-		if err != nil {
-			log.Printf("[H3] DNS resolution failed for %s: %v", host, err)
-			return nil, fmt.Errorf("DNS resolution failed: %w", err)
-		}
-		addr = net.JoinHostPort(ip, port)
-		log.V("[H3] Connecting to: %s (SNI: %s)", addr, effectiveSNI)
-	} else {
-		log.V("[H3] Connecting to: %s", addr)
-	}
+	target := url.URL{Scheme: "https", Host: net.JoinHostPort(httpHost, port), Path: "/" + t.serviceName + "/Tunnel"}
 
-	scheme := "https"
-	path := "/" + t.serviceName + "/Tunnel"
-
-	var url string
-	if t.authority != "" {
-		url = fmt.Sprintf("%s://%s%s", scheme, t.authority, path)
-	} else {
-		url = fmt.Sprintf("%s://%s%s", scheme, addr, path)
-	}
-
-	log.V("[H3] Connecting to %s (resolved: %s)", url, addr)
-
-	req, err := http.NewRequest("POST", url, nil)
+	pr, pw := io.Pipe()
+	req, err := http.NewRequest(http.MethodPost, target.String(), pr)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, err
 	}
+	req.Header.Set("Content-Type", "application/grpc-web+proto")
+	req.Header.Set("X-Grpc-Web", "1")
+	req.Host = httpHost
 
-	req.Header.Set("Content-Type", t.contentType)
-	req.Header.Set("User-Agent", t.userAgent)
-
-	// Set Host header: use authority override if set, otherwise use serverAddr host
-	if t.authority != "" {
-		req.Host = t.authority
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		_ = pw.CloseWithError(err)
+		return nil, fmt.Errorf("h3grpc: roundtrip: %w", err)
 	}
-
-	conn := &Conn{
-		transport:  t,
-		request:    req,
-		uuid:       t.uuid,
-		password:   t.password,
-		enableFlow: t.enableFlow,
-		useTrojan:  t.useTrojan,
-		recvChan:   make(chan []byte, 256), // 加大缓冲：减少 receiveLoop 积压到 pendingBuf 的频率
-		sendChan:   make(chan []byte, 256),
-		closeChan:  make(chan struct{}),
-		connReady:  make(chan struct{}),
+	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
+		_ = pw.CloseWithError(errors.New("non-200"))
+		return nil, fmt.Errorf("h3grpc: status %s", resp.Status)
 	}
-	if t.useTrojan {
-		conn.key = trojan.GenerateKey(t.password)
-	}
+	log.V("[h3grpc] tunnel established (%s)", t.serverAddr)
 
-	return conn, nil
+	enc := NewGRPCWebEncoder(pw, false)
+	dec := NewGRPCWebDecoder(resp.Body)
+	closer := &dualCloser{a: pw, b: resp.Body}
+	return newConn(dec, enc, closer), nil
 }
 
-// Close closes the transport and cleans up resources
-func (t *Transport) Close() error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.http3Transport != nil {
-		t.http3Transport.Close()
-	}
-	return nil
+type dualCloser struct{ a, b io.Closer }
+
+func (d *dualCloser) Close() error {
+	_ = d.a.Close()
+	return d.b.Close()
 }
 
-// Stats returns transport statistics
-func (t *Transport) Stats() map[string]interface{} {
-	return map[string]interface{}{
-		"transport":    "h3grpc",
-		"server":       t.serverAddr,
-		"ech_enabled":  t.useECH,
-		"flow_enabled": t.enableFlow,
-		"pqc_enabled":  t.enablePQC,
-		"concurrency":  t.concurrency,
+// makeBypassQUICDial builds a quic-go dial function bound to the
+// bypass UDP listen config when we are in TUN mode.
+func makeBypassQUICDial(bp *transport.BypassConfig) func(ctx context.Context, addr string, tlsCfg *tls.Config, qcfg *quic.Config) (*quic.Conn, error) {
+	return func(ctx context.Context, addr string, tlsCfg *tls.Config, qcfg *quic.Config) (*quic.Conn, error) {
+		var lc *net.ListenConfig
+		if bp != nil && bp.UDPListenConfig != nil {
+			lc = bp.UDPListenConfig
+		} else {
+			lc = &net.ListenConfig{}
+		}
+		pc, err := lc.ListenPacket(ctx, "udp", "")
+		if err != nil {
+			return nil, err
+		}
+		raddr, err := net.ResolveUDPAddr("udp", addr)
+		if err != nil {
+			_ = pc.Close()
+			return nil, err
+		}
+		tr := &quic.Transport{Conn: pc.(*net.UDPConn)}
+		return tr.Dial(ctx, raddr, tlsCfg, qcfg)
 	}
 }
 
-// isIPAddress checks if a string is a valid IP address
-func isIPAddress(s string) bool {
-	return net.ParseIP(s) != nil
-}
-
-// handleECHRejection extracts the server's ECH retry config from a rejection error,
-// updates the ECH manager, and reinitialises the HTTP/3 client with the new config.
-// Returns nil when the config was successfully updated (caller should retry the dial).
-func (t *Transport) handleECHRejection(err error) error {
-	if !t.useECH || t.echManager == nil {
-		return errors.New("ECH not enabled or no manager")
-	}
-
-	var echRejErr *tls.ECHRejectionError
-	if !errors.As(err, &echRejErr) {
-		return errors.New("not an ECH rejection error")
-	}
-
-	retryList := echRejErr.RetryConfigList
-	if len(retryList) == 0 {
-		log.Printf("[H3] Server rejected ECH without retry config (misconfigured server or wrong domain)")
-		return errors.New("empty retry config")
-	}
-
-	log.Printf("[H3] ECH rejected by server; updating config from retry list (%d bytes)", len(retryList))
-
-	if err := t.echManager.UpdateFromRetry(retryList); err != nil {
-		return fmt.Errorf("update ECH config: %w", err)
-	}
-
-	if err := t.reinitClient(); err != nil {
-		return fmt.Errorf("reinit client after ECH update: %w", err)
-	}
-
-	log.Printf("[H3] ECH config updated; new client ready for retry")
-	return nil
-}
+var _ transport.Transport = (*Transport)(nil)

@@ -3,32 +3,18 @@ package tls
 import (
 	"crypto/tls"
 	"crypto/x509"
-	_ "embed"
 	"errors"
 	"fmt"
 	"net"
-	"sync"
+
+	"ewp-core/common/cabundle"
 )
 
-//go:embed mozilla_cas.pem
-var mozillaCAPEM []byte
-
-var (
-	mozillaPool *x509.CertPool
-	mozillaOnce sync.Once
-)
-
-// GetMozillaCertPool returns a CertPool containing root CAs from Mozilla NSS.
-func GetMozillaCertPool() *x509.CertPool {
-	mozillaOnce.Do(func() {
-		mozillaPool = x509.NewCertPool()
-		if !mozillaPool.AppendCertsFromPEM(mozillaCAPEM) {
-			// This should never happen if the embedded file is valid PEM
-			panic("failed to parse embedded mozilla_cas.pem")
-		}
-	})
-	return mozillaPool
-}
+// GetMozillaCertPool returns a CertPool containing root CAs from
+// Mozilla NSS. Backed by the shared common/cabundle leaf package
+// (which also serves dns/, breaking what would otherwise be an
+// import cycle: common/tls -> dns -> common/tls).
+func GetMozillaCertPool() *x509.CertPool { return cabundle.MozillaPool() }
 
 type STDConfig struct {
 	config *tls.Config

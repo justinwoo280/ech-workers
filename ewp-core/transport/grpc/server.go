@@ -31,3 +31,7 @@ func (a *ServerAdapter) Write(data []byte) error {
 func (a *ServerAdapter) Close() error {
 	return nil
 }
+
+// --- v2 transport.TunnelConn surface ---
+func (a *ServerAdapter) SendMessage(b []byte) error    { return a.Write(b) }
+func (a *ServerAdapter) ReadMessage() ([]byte, error)  { return a.Read() }

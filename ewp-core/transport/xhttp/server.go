@@ -50,3 +50,7 @@ func (a *ServerAdapter) Close() error {
 	a.closed = true
 	return nil
 }
+
+// --- v2 transport.TunnelConn surface ---
+func (a *ServerAdapter) SendMessage(b []byte) error    { return a.Write(b) }
+func (a *ServerAdapter) ReadMessage() ([]byte, error)  { return a.Read() }

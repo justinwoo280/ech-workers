@@ -1,492 +1,161 @@
+// Package xhttp carries v2 outer messages over HTTP/1.1 stream-one
+// (one long POST per Dial: req body = uplink, resp body = downlink).
+// Each leg is framed with a 4-byte big-endian length prefix.
 package xhttp
 
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
-	"net/http/httptrace"
-	"strings"
+	"net/url"
 	"sync"
 	"time"
 
-	commonnet "ewp-core/common/net"
 	commontls "ewp-core/common/tls"
 	"ewp-core/log"
 	"ewp-core/transport"
-
-	"golang.org/x/net/http2"
 )
 
 type Transport struct {
 	serverAddr string
-	token      string
-	password   string // Trojan password
-	uuid       [16]byte
-	uuidStr    string
-	useECH     bool
-	enableFlow bool
-	enablePQC  bool
-	useMozillaCA bool
-	useTrojan  bool // Use Trojan protocol
 	path       string
-	mode       string
-	echManager *commontls.ECHManager
 
-	// Xray-core 风格的随机化配置
-	paddingBytes      RangeConfig // Referer padding 大小
-	postSizeRange     RangeConfig // POST 请求体大小随机化
-	requestInterval   RangeConfig // 请求间隔随机化
-	maxConcurrent     RangeConfig // 最大并发数随机化
-	connectionTimeout RangeConfig // 连接超时随机化
+	useECH       bool
+	useMozillaCA bool
+	enablePQC    bool
+	echManager   *commontls.ECHManager
 
-	// HTTP 头部配置
-	customHeaders    map[string]string
-	enablePadding    bool // 是否启用 padding（ECH 环境下建议关闭路径 padding）
-	paddingInReferer bool // 仅在 Referer 中添加 padding
+	sni  string
+	host string
 
-	// Browser Dialer 配置
-	useBrowserDialer bool // 是否使用 Browser Dialer
-
-	// SSE 伪装配置
-	useSSEHeaders bool // 伪装成 Server-Sent Events 流
-	noSSEHeader   bool // 禁用 SSE Content-Type（某些 CDN 场景）
-
-	// Xmux 连接池管理
-	xmuxConfig  XmuxConfig
-	xmuxManager *XmuxManager
-	xmuxMu      sync.Mutex
-
-	sni       string
-	host      string
+	mu        sync.Mutex
 	bypassCfg *transport.BypassConfig
 }
 
-func New(serverAddr, token string, useECH, enableFlow bool, path string, echManager *commontls.ECHManager) (*Transport, error) {
-	return NewWithProtocol(serverAddr, token, "", useECH, false, enableFlow, false, false, path, echManager)
-}
-
-func NewWithProtocol(serverAddr, token, password string, useECH, useMozillaCA, enableFlow, enablePQC, useTrojan bool, path string, echManager *commontls.ECHManager) (*Transport, error) {
-	var uuid [16]byte
-	if !useTrojan {
-		var err error
-		uuid, err = transport.ParseUUID(token)
-		if err != nil {
-			return nil, fmt.Errorf("invalid UUID: %w", err)
-		}
-	}
-
+func New(serverAddr, path string, useECH, useMozillaCA, enablePQC bool, echManager *commontls.ECHManager) *Transport {
 	if path == "" {
-		path = "/xhttp"
+		path = "/"
 	}
-
-	// 默认配置 - 针对 ECH 环境优化
-	paddingInReferer := useECH // ECH 环境下默认只在 Referer 中 padding
-
-	// 初始化 Xmux 配置
-	xmuxConfig := XmuxConfig{
-		MaxConcurrency:   &RangeConfig{From: 2, To: 5},     // 每个连接最大并发 2-5
-		MaxConnections:   &RangeConfig{From: 1, To: 3},     // 总共 1-3 个连接
-		CMaxReuseTimes:   &RangeConfig{From: 0, To: 0},     // 连接复用次数无限制
-		HMaxRequestTimes: &RangeConfig{From: 50, To: 100},  // 每个连接处理 50-100 个请求
-		HMaxReusableSecs: &RangeConfig{From: 300, To: 600}, // 连接可重用 5-10 分钟
-		HKeepAlivePeriod: 30,                               // Keep-Alive 30 秒
-	}
-
 	return &Transport{
-		serverAddr: serverAddr,
-		token:      token,
-		password:   password,
-		uuid:       uuid,
-		uuidStr:    token,
-		useECH:     useECH,
-		enableFlow: enableFlow,
-		enablePQC:  enablePQC,
+		serverAddr:   serverAddr,
+		path:         path,
+		useECH:       useECH,
 		useMozillaCA: useMozillaCA,
-		useTrojan:  useTrojan,
-		path:       path,
-		mode:       "stream-one",
-		echManager: echManager,
-
-		// 随机化配置 - 基于 Xray-core
-		paddingBytes:      RangeConfig{From: 50, To: 200},     // Referer padding
-		postSizeRange:     RangeConfig{From: 1024, To: 4096},  // POST 大小
-		requestInterval:   RangeConfig{From: 10, To: 100},     // 请求间隔 ms
-		maxConcurrent:     RangeConfig{From: 2, To: 5},        // 并发数
-		connectionTimeout: RangeConfig{From: 5000, To: 10000}, // 连接超时 ms
-
-		// HTTP 配置
-		customHeaders:    make(map[string]string),
-		enablePadding:    true,
-		paddingInReferer: paddingInReferer,
-
-		// SSE 伪装配置（默认启用）
-		useSSEHeaders: true,  // 伪装成 SSE 流，对抗 CDN/Nginx 缓冲
-		noSSEHeader:   false, // 某些 CDN 可能需要禁用 Content-Type
-
-		// Xmux 连接池配置
-		xmuxConfig:  xmuxConfig,
-		xmuxManager: nil, // 延迟初始化
-	}, nil
-}
-
-func (t *Transport) SetMode(mode string) *Transport {
-	t.mode = mode
-	return t
-}
-
-// SetCustomHeader 设置自定义头部
-func (t *Transport) SetCustomHeader(key, value string) *Transport {
-	t.customHeaders[key] = value
-	return t
-}
-
-func (t *Transport) SetSNI(sni string) *Transport {
-	t.sni = sni
-	return t
-}
-
-func (t *Transport) SetHost(host string) *Transport {
-	t.host = host
-	return t
-}
-
-func (t *Transport) GetHost() string {
-	return t.host
-}
-
-// SetPaddingConfig 设置 padding 配置
-func (t *Transport) SetPaddingConfig(enable bool, onlyReferer bool) *Transport {
-	t.enablePadding = enable
-	t.paddingInReferer = onlyReferer
-	return t
-}
-
-// SetXmuxConfig 设置 Xmux 连接池配置
-func (t *Transport) SetXmuxConfig(config XmuxConfig) *Transport {
-	t.xmuxMu.Lock()
-	defer t.xmuxMu.Unlock()
-	t.xmuxConfig = config
-	if t.xmuxManager != nil {
-		t.xmuxManager.Close()
-		t.xmuxManager = nil
+		enablePQC:    enablePQC,
+		echManager:   echManager,
 	}
-	return t
 }
 
-// SetSSEHeaders 设置是否使用 SSE 伪装头
-func (t *Transport) SetSSEHeaders(enabled bool) *Transport {
-	t.useSSEHeaders = enabled
-	return t
-}
+func (t *Transport) Name() string { return "xhttp" }
 
-// SetNoSSEHeader 设置是否禁用 SSE Content-Type（某些 CDN 场景）
-func (t *Transport) SetNoSSEHeader(disabled bool) *Transport {
-	t.noSSEHeader = disabled
-	return t
-}
-
-// SetBrowserDialer 设置是否使用 Browser Dialer
-func (t *Transport) SetBrowserDialer(enable bool) *Transport {
-	t.useBrowserDialer = enable
-	return t
-}
+func (t *Transport) SetSNI(sni string)   { t.sni = sni }
+func (t *Transport) SetHost(host string) { t.host = host }
 
 func (t *Transport) SetBypassConfig(cfg *transport.BypassConfig) {
-	t.xmuxMu.Lock()
-	defer t.xmuxMu.Unlock()
+	t.mu.Lock()
 	t.bypassCfg = cfg
-	if t.xmuxManager != nil {
-		t.xmuxManager.Close()
-		t.xmuxManager = nil
-	}
+	t.mu.Unlock()
 }
 
-// getXmuxManager 获取或创建 Xmux 管理器（线程安全）
-func (t *Transport) getXmuxManager() *XmuxManager {
-	t.xmuxMu.Lock()
-	defer t.xmuxMu.Unlock()
-	if t.xmuxManager == nil {
-		t.xmuxManager = NewXmuxManager(t.xmuxConfig, func() XmuxConn {
-			httpClient, _ := t.createHTTPClient(t.parseHost(), t.parsePort())
-			return NewXmuxHTTPClient(httpClient)
-		})
-	}
-	return t.xmuxManager
-}
-
-// parseHost 解析主机名
-func (t *Transport) parseHost() string {
-	parsed, err := transport.ParseAddress(t.serverAddr)
-	if err != nil {
-		return "unknown"
-	}
-	return parsed.Host
-}
-
-// parsePort 解析端口
-func (t *Transport) parsePort() string {
-	parsed, err := transport.ParseAddress(t.serverAddr)
-	if err != nil {
-		return "443"
-	}
-	return parsed.Port
-}
-
-// GetRequestHeader 统一的请求头生成 - 基于 Xray-core 设计
-func (t *Transport) GetRequestHeader(rawURL string) http.Header {
-	header := http.Header{}
-
-	// 添加自定义头部
-	for k, v := range t.customHeaders {
-		header.Add(k, v)
-	}
-
-	// ECH 环境下仅在 Referer 中添加 padding
-	if t.enablePadding && t.paddingInReferer {
-		paddingLength := t.paddingBytes.Rand()
-		if paddingLength > 0 {
-			// 构造带 padding 的 Referer
-			refererURL := rawURL + "?x_padding=" + strings.Repeat("X", int(paddingLength))
-			header.Set("Referer", refererURL)
-		}
-	}
-
-	// 添加其他标准头部
-	header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-
-	// SSE 伪装：Accept text/event-stream 让中间件认为这是 SSE 长连接
-	if t.useSSEHeaders {
-		header.Set("Accept", "text/event-stream")
-	} else {
-		header.Set("Accept", "*/*")
-	}
-
-	header.Set("Accept-Language", "en-US,en;q=0.9")
-	header.Set("Cache-Control", "no-cache")
-	header.Set("Pragma", "no-cache")
-
-	return header
-}
-
-func (t *Transport) Name() string {
-	name := "XHTTP"
-	if t.useTrojan {
-		name += "+Trojan"
-	} else if t.enableFlow {
-		name += "+Vision"
-	} else {
-		name += "+EWP"
-	}
-	if t.useECH {
-		name += "+ECH"
-	} else {
-		name += "+TLS"
-	}
-	return name
+func (t *Transport) bypass() *transport.BypassConfig {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.bypassCfg
 }
 
 func (t *Transport) Dial() (transport.TunnelConn, error) {
-	if t.mode == "stream-down" {
-		return t.dialStreamDown()
+	host, port, err := net.SplitHostPort(t.serverAddr)
+	if err != nil {
+		return nil, fmt.Errorf("xhttp: bad serverAddr %q: %w", t.serverAddr, err)
 	}
-	return t.dialStreamOne()
-}
+	sni := t.sni
+	if sni == "" {
+		sni = host
+	}
 
-func (t *Transport) createHTTPClient(host, port string) (*http.Client, error) {
-	parsed, err := transport.ParseAddress(t.serverAddr)
+	cfg, err := commontls.NewSTDConfig(sni, t.useMozillaCA, t.enablePQC)
 	if err != nil {
 		return nil, err
 	}
-
-	serverName := t.sni
-	if serverName == "" {
-		serverName = parsed.Host
-	}
-
-	tlsConfig, err := commontls.NewClient(commontls.ClientOptions{
-		ServerName:   serverName,
-		UseMozillaCA: t.useMozillaCA,
-		EnableECH:    t.useECH,
-		EnablePQC:    t.enablePQC,
-		ECHManager:   t.echManager,
-	})
+	tlsCfg, err := cfg.TLSConfig()
 	if err != nil {
-		return nil, fmt.Errorf("failed to create TLS config: %w", err)
+		return nil, err
 	}
-
-	stdConfig, err := tlsConfig.TLSConfig()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get TLS config: %w", err)
-	}
-
-	stdConfig.NextProtos = []string{"h2"}
-
-	// Resolve serverAddr host to IP
-	var resolvedIP string
-	if !isIPAddress(host) {
-		ip, err := transport.ResolveIP(t.bypassCfg, host, port)
+	tlsCfg.NextProtos = []string{"http/1.1"}
+	if t.useECH && t.echManager != nil {
+		echList, err := t.echManager.Get()
 		if err != nil {
-			log.Printf("[XHTTP] DNS resolution failed for %s: %v", host, err)
-			return nil, fmt.Errorf("DNS resolution failed: %w", err)
+			return nil, err
 		}
-		resolvedIP = ip
+		tlsCfg.EncryptedClientHelloConfigList = echList
+		tlsCfg.EncryptedClientHelloRejectionVerify = func(cs tls.ConnectionState) error {
+			return errors.New("server rejected ECH")
+		}
 	}
 
-	target := net.JoinHostPort(host, port)
-	if resolvedIP != "" {
-		target = net.JoinHostPort(resolvedIP, port)
-		log.V("[XHTTP] Connecting to: %s (SNI: %s)", target, serverName)
+	dialer := &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
+	if bp := t.bypass(); bp != nil && bp.TCPDialer != nil {
+		dialer = bp.TCPDialer
 	}
 
-	// HTTP/2 Transport 配置 - 参考 Xray-core ChromeH2KeepAlivePeriod
-	h2Transport := &http2.Transport{
-		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
-			var rawConn net.Conn
-			var err error
-			if t.bypassCfg != nil && t.bypassCfg.TCPDialer != nil {
-				rawConn, err = t.bypassCfg.TCPDialer.DialContext(ctx, "tcp", target)
-			} else {
-				rawConn, err = commonnet.DialTFOContext(ctx, "tcp", target, 10*time.Second)
-			}
+	httpTransport := &http.Transport{
+		TLSClientConfig:       tlsCfg,
+		ForceAttemptHTTP2:     false, // stay HTTP/1.1 for true streaming
+		MaxIdleConnsPerHost:   1,
+		IdleConnTimeout:       30 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			rawConn, err := dialer.DialContext(ctx, network, addr)
 			if err != nil {
 				return nil, err
 			}
-			return tls.Client(rawConn, stdConfig), nil
-		},
-		IdleConnTimeout:            90 * time.Second, // 连接空闲超时
-		ReadIdleTimeout:            15 * time.Second, // 读空闲超时（参考 Chrome）→ 触发 HTTP/2 PING
-		StrictMaxConcurrentStreams: true,             // 严格限制并发流数
-	}
-
-	return &http.Client{
-		Transport: h2Transport,
-		Timeout:   0,
-	}, nil
-}
-
-// createRequestWithContext 创建带 httptrace 和 WithoutCancel 的请求
-func (t *Transport) createRequestWithContext(ctx context.Context, method, url string, body io.Reader) (*http.Request, error) {
-	// 使用 WithoutCancel 防止上层 context 取消中断请求
-	ctx = context.WithoutCancel(ctx)
-
-	// 添加 httptrace 获取真实地址信息
-	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
-		GotConn: func(connInfo httptrace.GotConnInfo) {
-			log.V("[XHTTP] GotConn: Remote=%s, Local=%s, Reused=%v, WasIdle=%v",
-				connInfo.Conn.RemoteAddr(), connInfo.Conn.LocalAddr(),
-				connInfo.Reused, connInfo.WasIdle)
-		},
-		DNSStart: func(info httptrace.DNSStartInfo) {
-			log.V("[XHTTP] DNS Start: %s", info.Host)
-		},
-		DNSDone: func(info httptrace.DNSDoneInfo) {
-			log.V("[XHTTP] DNS Done: %v", info.Addrs)
-		},
-		TLSHandshakeStart: func() {
-			log.V("[XHTTP] TLS Handshake Start")
-		},
-		TLSHandshakeDone: func(state tls.ConnectionState, err error) {
-			if err == nil {
-				log.V("[XHTTP] TLS Handshake Done: Version=%s, Cipher=%s, ServerName=%s",
-					tlsVersionToString(state.Version),
-					tls.CipherSuiteName(state.CipherSuite),
-					state.ServerName)
-			} else {
-				log.V("[XHTTP] TLS Handshake Error: %v", err)
+			tlsConn := tls.Client(rawConn, tlsCfg)
+			if err := tlsConn.HandshakeContext(ctx); err != nil {
+				_ = rawConn.Close()
+				return nil, err
 			}
+			return tlsConn, nil
 		},
-	})
+	}
 
-	req, err := http.NewRequestWithContext(ctx, method, url, body)
+	httpHost := t.host
+	if httpHost == "" {
+		httpHost = host
+	}
+	target := url.URL{Scheme: "https", Host: net.JoinHostPort(httpHost, port), Path: t.path}
+
+	pr, pw := io.Pipe()
+	req, err := http.NewRequest(http.MethodPost, target.String(), pr)
 	if err != nil {
 		return nil, err
 	}
-	if t.host != "" {
-		req.Host = t.host
-	}
-	return req, nil
-}
+	req.Host = httpHost
+	req.Header.Set("Content-Type", "application/octet-stream")
 
-// tlsVersionToString 转换 TLS 版本号为字符串
-func tlsVersionToString(version uint16) string {
-	switch version {
-	case tls.VersionTLS10:
-		return "TLS 1.0"
-	case tls.VersionTLS11:
-		return "TLS 1.1"
-	case tls.VersionTLS12:
-		return "TLS 1.2"
-	case tls.VersionTLS13:
-		return "TLS 1.3"
-	default:
-		return fmt.Sprintf("Unknown %x", version)
-	}
-}
-
-func (t *Transport) dialStreamOne() (transport.TunnelConn, error) {
-	parsed, err := transport.ParseAddress(t.serverAddr)
+	resp, err := httpTransport.RoundTrip(req)
 	if err != nil {
-		return nil, err
+		_ = pw.CloseWithError(err)
+		return nil, fmt.Errorf("xhttp: roundtrip: %w", err)
 	}
+	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
+		_ = pw.CloseWithError(errors.New("non-200"))
+		return nil, fmt.Errorf("xhttp: status %s", resp.Status)
+	}
+	log.V("[xhttp] tunnel established (%s)", t.serverAddr)
 
-	// 使用 Xmux 连接池获取 HTTP 客户端
-	xmuxManager := t.getXmuxManager()
-	xmuxClient := xmuxManager.GetXmuxClient(context.Background())
-	xmuxHTTPClient := xmuxClient.XmuxConn.(*XmuxHTTPClient)
-	httpClient := xmuxHTTPClient.GetClient()
-
-	log.V("[XHTTP] HTTP/2 transport ready for %s (pooled)", parsed.Host)
-
-	return NewStreamOneConn(
-		httpClient,
-		parsed.Host,
-		parsed.Port,
-		t.path,
-		t.uuid,
-		t.uuidStr,
-		t.password,
-		t.enableFlow,
-		t.useTrojan,
-		t, // 传递 Transport 以获取新功能
-	), nil
+	return newStreamOneConn(resp.Body, pw, &transportCloser{tr: httpTransport}), nil
 }
 
-func (t *Transport) dialStreamDown() (transport.TunnelConn, error) {
-	parsed, err := transport.ParseAddress(t.serverAddr)
-	if err != nil {
-		return nil, err
-	}
+type transportCloser struct{ tr *http.Transport }
 
-	// 使用 Xmux 连接池获取 HTTP 客户端
-	xmuxManager := t.getXmuxManager()
-	xmuxClient := xmuxManager.GetXmuxClient(context.Background())
-	xmuxHTTPClient := xmuxClient.XmuxConn.(*XmuxHTTPClient)
-	httpClient := xmuxHTTPClient.GetClient()
-
-	return NewStreamDownConn(
-		httpClient,
-		parsed.Host,
-		parsed.Port,
-		t.path,
-		t.uuid,
-		t.uuidStr,
-		t.password,
-		t.enableFlow,
-		t.useTrojan,
-		t, // 传递 Transport 以获取新功能
-	), nil
+func (c *transportCloser) Close() error {
+	c.tr.CloseIdleConnections()
+	return nil
 }
 
-// isIPAddress checks if a string is an IP address
-// isIPAddress checks if a string is a valid IP address
-// P2-15: Handle IPv6 addresses with brackets like [::1]
-func isIPAddress(s string) bool {
-	// Strip brackets for IPv6 literals
-	if len(s) > 2 && s[0] == '[' && s[len(s)-1] == ']' {
-		s = s[1 : len(s)-1]
-	}
-	return net.ParseIP(s) != nil
-}
+var _ transport.Transport = (*Transport)(nil)

@@ -4,498 +4,319 @@ package ewpmobile
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"net/netip"
-	"strings"
 	"sync"
 	"time"
 
-	"ewp-core/common/tls"
-	"ewp-core/constant"
+	commontls "ewp-core/common/tls"
 	"ewp-core/dns"
+	"ewp-core/engine"
 	"ewp-core/log"
+	"ewp-core/outbound/direct"
+	"ewp-core/outbound/ewpclient"
+	v2 "ewp-core/protocol/ewp/v2"
 	"ewp-core/transport"
 	"ewp-core/transport/grpc"
 	"ewp-core/transport/h3grpc"
 	"ewp-core/transport/websocket"
 	"ewp-core/transport/xhttp"
 	"ewp-core/tun"
-	ewpgvisor "ewp-core/tun/gvisor"
-
-	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
-	wgtun "golang.zx2c4.com/wireguard/tun"
 )
 
-type gvisorUDPWriter struct {
-	stack *ewpgvisor.Stack
+// VPNConfig is the v2 mobile config consumed by export_vpn.go and the
+// Kotlin layer. v1 fields (EnableFlow, AppProtocol, XhttpMode, ECHDomain,
+// TunMask, ContentType, EnableTLS, MinTLSVersion, ...) are intentionally
+// gone — see export_vpn.go.
+type VPNConfig struct {
+	ServerAddr string // host:port of the upstream EWP server
+	Token      string // hex-encoded 16-byte UUID
+
+	Protocol string // "ws" | "grpc" | "xhttp" | "h3grpc"
+	Path     string // listener path (e.g. "/ewp" or gRPC service name)
+
+	SNI  string
+	Host string
+
+	EnableECH bool
+
+	DoHServers []string
+
+	TUNMTU  int
+	TUNIPv4 string
+	TUNIPv6 string
+	DNSv4   string
+	DNSv6   string
 }
 
-func (w *gvisorUDPWriter) WriteTo(p []byte, src netip.AddrPort, dst netip.AddrPort) error {
-	if w.stack == nil {
-		return fmt.Errorf("stack is nil")
-	}
-	return w.stack.WriteUDP(p, src, dst)
-}
-
-func (w *gvisorUDPWriter) InjectUDP(p []byte, src netip.AddrPort, dst netip.AddrPort) error {
-	if w.stack == nil {
-		return fmt.Errorf("stack is nil")
-	}
-	return w.stack.InjectUDP(p, src, dst)
-}
-
-func (w *gvisorUDPWriter) ReleaseConn(src netip.AddrPort, dst netip.AddrPort) {
-	if w.stack != nil {
-		w.stack.ReleaseWriteConn(src, dst)
-	}
-}
-
-// vpnManager 统一的 VPN 管理器，集成连接和 TUN 功能
 type vpnManager struct {
 	mu      sync.RWMutex
 	running bool
-	ctx     context.Context
-	cancel  context.CancelFunc
 
-	// 传输层
-	transport transport.Transport
+	ctx    context.Context
+	cancel context.CancelFunc
 
-	// ECH manager — must be stopped on Stop() to avoid goroutine leak (P1-6)
-	echMgr *tls.ECHManager
-
-	// DoH servers for bypass resolver (from ech.doh_servers config)
-	dnsServers []string
-
-	// TUN 相关
-	tunFD      int
-	tunMTU     int
-	tunDevice  wgtun.Device
-	tunStack   *ewpgvisor.Stack
-	tunHandler *tun.Handler
-
-	// 配置
 	config *VPNConfig
 
-	// 统计
-	startTime   time.Time
-	bytesUp     uint64
-	bytesDown   uint64
-	connections uint64
+	echMgr   *commontls.ECHManager
+	resolver *dns.AsyncResolver
+
+	tr      transport.Transport
+	out     *ewpclient.Outbound
+	tunInst *tun.TUN
+	eng     *engine.Engine
+
+	startTime time.Time
 }
 
-// VPNConfig VPN 配置
-type VPNConfig struct {
-	// 服务器配置
-	ServerAddr string // 连接目标（IP 或域名，直接 DNS 解析后建立 TCP 连接）
-	Token      string
-	Password   string
+func newVPNManager() *vpnManager { return &vpnManager{} }
 
-	// 协议配置
-	Protocol    string // "ws" / "grpc" / "xhttp" / "h3grpc"
-	AppProtocol string // "ewp" / "trojan"
-	Path        string // WebSocket 路径 或 gRPC 服务名
-	XhttpMode   string // "auto" / "stream-one" / "stream-down"（仅 xhttp）
-
-	// Host/SNI 配置（CDN 场景）
-	Host string // HTTP Host 头覆盖（留空则同 ServerAddr）
-	SNI  string // TLS SNI 覆盖（留空则同 Host）
-
-	// TLS 配置
-	EnableTLS       bool   // 是否启用 TLS（移动端一般始终 true）
-	MinTLSVersion   string // "1.2" 或 "1.3"
-	EnableMozillaCA bool   // 是否使用内置 Mozilla Root CAs
-
-	// gRPC / H3gRPC 附加配置
-	UserAgent   string // 自定义 User-Agent
-	ContentType string // H3gRPC Content-Type
-
-	// 安全配置
-	EnableECH  bool
-	EnableFlow bool
-	EnablePQC  bool
-	ECHDomain  string
-	DNSServer  string   // Deprecated: use DNSServers instead (P0-12)
-	DNSServers []string // P0-12: multiple DoH servers for redundancy
-
-	// TUN 配置
-	TunIP      string
-	TunGateway string
-	TunMask    string
-	TunDNS     string
-	TunMTU     int
-}
-
-// newVPNManager 创建 VPN 管理器
-func newVPNManager() *vpnManager {
-	return &vpnManager{
-		running: false,
-	}
-}
-
-// Start 启动 VPN（连接 + TUN）
-func (vm *vpnManager) Start(tunFD int, config *VPNConfig) error {
+func (vm *vpnManager) Start(tunFD int, cfg *VPNConfig) error {
 	vm.mu.Lock()
 	defer vm.mu.Unlock()
 
 	if vm.running {
-		return fmt.Errorf("VPN already running")
+		return fmt.Errorf("vpn already running")
+	}
+	if cfg == nil || cfg.ServerAddr == "" || cfg.Token == "" {
+		return fmt.Errorf("ServerAddr and Token are required")
 	}
 
-	log.Printf("[VPNManager] Starting VPN: server=%s, protocol=%s", config.ServerAddr, config.Protocol)
-
-	// 检查 socket 保护器
-	if !IsSocketProtectorSet() {
-		log.Printf("[VPNManager] Warning: Socket protector not set, may cause VPN loop")
-	}
-
-	// 创建上下文
-	ctx, cancel := context.WithCancel(context.Background())
-	vm.ctx = ctx
-	vm.cancel = cancel
-	vm.config = config
-	vm.tunFD = tunFD
-	vm.tunMTU = config.TunMTU
-	if vm.tunMTU <= 0 {
-		vm.tunMTU = 1400
-	}
-
-	// P0-12: compute dnsServers before ECH init so it's available for bypass config later
-	dnsServers := config.DNSServers
-	if len(dnsServers) == 0 {
-		// Fallback to single server config if provided
-		if config.DNSServer != "" {
-			dnsServer := config.DNSServer
-			if !strings.HasPrefix(dnsServer, "https://") && !strings.HasPrefix(dnsServer, "http://") {
-				dnsServer = "https://" + dnsServer
-			}
-			dnsServers = []string{dnsServer}
-		} else {
-			// Use defaults from constant package
-			dnsServers = constant.DefaultDNSServers
-		}
-	}
-
-	// 1. 初始化 ECH（如果启用）
-	var echMgr *tls.ECHManager
-	if config.EnableECH {
-		log.Printf("[VPNManager] Initializing ECH...")
-		echDomain := config.ECHDomain
-		if echDomain == "" {
-			echDomain = "cloudflare-ech.com"
-		}
-
-		// P0-12: strict mode = false for mobile (allow fallback to expired cache)
-		echMgr = tls.NewECHManagerWithTTL(echDomain, 1*time.Hour, false, dnsServers...)
-		if IsSocketProtectorSet() {
-			echMgr.SetBypassDialer(makeProtectedBypassConfigWithDoH(dnsServers).TCPDialer)
-		}
-		if err := echMgr.Refresh(); err != nil {
-			log.Printf("[VPNManager] ECH initialization failed: %v, falling back to plain TLS", err)
-			echMgr.Stop()
-			echMgr = nil
-			config.EnableECH = false
-		}
-	}
-	// P1-6: store echMgr so Stop() can release its cleanup goroutine.
-	vm.echMgr = echMgr
-
-	// Store dnsServers for later use in bypass config
-	vm.dnsServers = dnsServers
-
-	// 2. 创建传输层
-	log.Printf("[VPNManager] Creating transport: %s", config.Protocol)
-	useTrojan := config.AppProtocol == "trojan"
-	var err error
-
-	switch config.Protocol {
-	case "ws", "websocket":
-		var wsT *websocket.Transport
-		wsT, err = websocket.NewWithProtocol(
-			config.ServerAddr,
-			config.Token,
-			config.Password,
-			config.EnableECH,
-			config.EnableMozillaCA,
-			config.EnableFlow,
-			config.EnablePQC,
-			useTrojan,
-			config.Path,
-			echMgr,
-		)
-		if err == nil {
-			if config.Host != "" {
-				wsT.SetHost(config.Host)
-			}
-			effectiveSNI := config.SNI
-			if effectiveSNI == "" {
-				effectiveSNI = config.Host
-			}
-			if effectiveSNI != "" {
-				wsT.SetSNI(effectiveSNI)
-			}
-		}
-		vm.transport = wsT
-	case "grpc":
-		var grpcT *grpc.Transport
-		grpcT, err = grpc.NewWithProtocol(
-			config.ServerAddr,
-			config.Token,
-			config.Password,
-			config.EnableECH,
-			config.EnableMozillaCA,
-			config.EnableFlow,
-			config.EnablePQC,
-			useTrojan,
-			config.Path,
-			echMgr,
-		)
-		if err == nil {
-			if config.UserAgent != "" {
-				grpcT.SetUserAgent(config.UserAgent)
-			}
-			if config.Host != "" {
-				grpcT.SetAuthority(config.Host)
-			}
-			effectiveSNI := config.SNI
-			if effectiveSNI == "" {
-				effectiveSNI = config.Host
-			}
-			if effectiveSNI != "" {
-				grpcT.SetSNI(effectiveSNI)
-			}
-		}
-		vm.transport = grpcT
-	case "xhttp":
-		var xhttpT *xhttp.Transport
-		xhttpT, err = xhttp.NewWithProtocol(
-			config.ServerAddr,
-			config.Token,
-			config.Password,
-			config.EnableECH,
-			config.EnableMozillaCA,
-			config.EnableFlow,
-			config.EnablePQC,
-			useTrojan,
-			config.Path,
-			echMgr,
-		)
-		if err == nil {
-			if config.XhttpMode != "" {
-				xhttpT.SetMode(config.XhttpMode)
-			}
-			if config.Host != "" {
-				xhttpT.SetHost(config.Host)
-			}
-			effectiveSNI := config.SNI
-			if effectiveSNI == "" {
-				effectiveSNI = config.Host
-			}
-			if effectiveSNI != "" {
-				xhttpT.SetSNI(effectiveSNI)
-			}
-		}
-		vm.transport = xhttpT
-	case "h3grpc":
-		var h3T *h3grpc.Transport
-		h3T, err = h3grpc.NewWithProtocol(
-			config.ServerAddr,
-			config.Token,
-			config.Password,
-			config.EnableECH,
-			config.EnableMozillaCA,
-			config.EnableFlow,
-			config.EnablePQC,
-			useTrojan,
-			config.Path,
-			echMgr,
-		)
-		if err == nil {
-			if config.UserAgent != "" {
-				h3T.SetUserAgent(config.UserAgent)
-			}
-			if config.ContentType != "" {
-				h3T.SetContentType(config.ContentType)
-			}
-			if config.Host != "" {
-				h3T.SetAuthority(config.Host)
-			}
-			effectiveSNI := config.SNI
-			if effectiveSNI == "" {
-				effectiveSNI = config.Host
-			}
-			if effectiveSNI != "" {
-				// P2-11: h3grpc SetSNI now returns error
-				if err := h3T.SetSNI(effectiveSNI); err != nil {
-					cancel()
-					return fmt.Errorf("failed to set SNI: %w", err)
-				}
-			}
-		}
-		vm.transport = h3T
-	default:
-		cancel()
-		return fmt.Errorf("unsupported protocol: %s", config.Protocol)
-	}
-
+	uuid, err := decodeUUIDHex(cfg.Token)
 	if err != nil {
-		cancel()
-		return fmt.Errorf("failed to create transport: %w", err)
+		return fmt.Errorf("token: %w", err)
 	}
 
-	// 3. Android socket 保护：所有出站连接绑定到 VpnService.protect() 以避免 TUN 路由死循环
-	if IsSocketProtectorSet() {
-		vm.transport.SetBypassConfig(makeProtectedBypassConfigWithDoH(vm.dnsServers))
-		log.Printf("[VPNManager] Socket protection applied to transport")
-	} else {
-		log.Printf("[VPNManager] Warning: No socket protector - transport may loop through TUN")
+	vm.ctx, vm.cancel = context.WithCancel(context.Background())
+	vm.config = cfg
+
+	// 1. DoH AsyncResolver — DoH-only, never OS resolver.
+	dohServers := cfg.DoHServers
+	if len(dohServers) == 0 {
+		dohServers = []string{"https://1.1.1.1/dns-query", "https://dns.google/dns-query"}
+	}
+	vm.resolver = dns.NewAsyncResolver(dns.AsyncResolverConfig{DoHServers: dohServers})
+
+	// 2. ECH manager (optional).
+	if cfg.EnableECH {
+		domain := cfg.SNI
+		if domain == "" {
+			// Fall back to the apex of ServerAddr (strip port).
+			domain = hostOnly(cfg.ServerAddr)
+		}
+		vm.echMgr = commontls.NewECHManager(domain, dohServers...)
 	}
 
-	// 4. 初始化 TUN 处理器与 DNS 接管
-	log.Printf("[VPNManager] Creating TUN handler...")
-
-	// We prepare the udp writer interface ahead of time, pointing to the stack pointer later.
-	vm.tunHandler = tun.NewHandler(ctx, vm.transport)
-
-	// Initialize FakeIP pool for instant DNS responses
-	fakeIPPool := dns.NewFakeIPPool()
-	vm.tunHandler.SetFakeIPPool(fakeIPPool)
-	log.Printf("[VPNManager] FakeIP DNS enabled")
-
-	// 6. 创建 TUN 设备 (Android FileDescriptor)
-	log.Printf("[VPNManager] Creating TUN device from FD=%d, MTU=%d", tunFD, vm.tunMTU)
-
-	// 使用 CreateUnmonitoredTUNFromFD 而非 CreateTUNFromFile:
-	// CreateTUNFromFile 内部调用 createNetlinkSocket() → unix.Bind(NETLINK_ROUTE)，
-	// Android SELinux 对 untrusted_app 禁止此操作，导致 permission denied。
-	// CreateUnmonitoredTUNFromFD 完全跳过 netlink（不监听接口 up/down 事件），
-	// Android VpnService 已管理 TUN 生命周期，无需 netlink 事件。
-	tunDevice, _, err := wgtun.CreateUnmonitoredTUNFromFD(tunFD)
+	// 3. Build outer transport.
+	tr, err := vm.buildTransport()
 	if err != nil {
-		cancel()
-		return fmt.Errorf("create TUN device failed: %w", err)
+		vm.cleanupOnFail()
+		return err
 	}
-	vm.tunDevice = tunDevice
+	vm.tr = tr
 
-	// 7. 创建网络栈 (use gvisor stack)
-	log.Printf("[VPNManager] Creating network stack (gvisor)...")
-	stackConfig := &ewpgvisor.StackConfig{
-		MTU:        vm.tunMTU,
-		TCPHandler: vm.tunHandler.HandleTCP,
-		UDPHandler: func(conn *gonet.UDPConn, payload []byte, src netip.AddrPort, dst netip.AddrPort) {
-			vm.tunHandler.HandleUDP(conn, payload, src, dst)
+	// 4. EWP client outbound + a direct outbound for completeness.
+	out := ewpclient.New("ewp", tr, uuid)
+	vm.out = out
+
+	// 5. Engine with static "ewp" route.
+	eng := engine.New(&engine.StaticRouter{Tag: "ewp"})
+	if err := eng.AddOutbound(out); err != nil {
+		vm.cleanupOnFail()
+		return fmt.Errorf("engine.AddOutbound: %w", err)
+	}
+	if err := eng.AddOutbound(direct.New("direct", 30*time.Second)); err != nil {
+		vm.cleanupOnFail()
+		return fmt.Errorf("engine.AddOutbound direct: %w", err)
+	}
+	vm.eng = eng
+
+	// 6. TUN inbound bound to the Android-provided fd.
+	tunCfg := &tun.Config{
+		IP:               firstNonEmpty(cfg.TUNIPv4, "10.233.0.2"),
+		DNS:              firstNonEmpty(cfg.DNSv4, "10.233.0.1"),
+		IPv6:             cfg.TUNIPv6,
+		IPv6DNS:          cfg.DNSv6,
+		MTU:              firstPositive(cfg.TUNMTU, 1420),
+		Stack:            "gvisor",
+		ServerAddr:       cfg.ServerAddr,
+		BypassDoHServers: dohServers,
+		OnBypass: func(b *transport.BypassConfig) {
+			tr.SetBypassConfig(b)
 		},
 	}
-
-	vm.tunStack, err = ewpgvisor.NewStack(vm.tunDevice, stackConfig)
+	t, err := tun.NewWithFD(tunCfg, tunFD)
 	if err != nil {
-		vm.tunDevice.Close()
-		cancel()
-		return fmt.Errorf("create gvisor stack failed: %w", err)
+		vm.cleanupOnFail()
+		return fmt.Errorf("tun.NewWithFD: %w", err)
+	}
+	vm.tunInst = t
+	if err := eng.AddInbound(t.AsInbound("tun")); err != nil {
+		vm.cleanupOnFail()
+		return fmt.Errorf("engine.AddInbound tun: %w", err)
+	}
+
+	if err := eng.Start(vm.ctx); err != nil {
+		vm.cleanupOnFail()
+		return fmt.Errorf("engine.Start: %w", err)
 	}
 
 	vm.running = true
 	vm.startTime = time.Now()
-
-	log.Printf("[VPNManager] VPN started successfully")
+	log.Printf("[ewpmobile] VPN up: server=%s proto=%s ech=%v", cfg.ServerAddr, cfg.Protocol, cfg.EnableECH)
 	return nil
 }
 
-// Stop 停止 VPN
 func (vm *vpnManager) Stop() error {
 	vm.mu.Lock()
 	defer vm.mu.Unlock()
-
 	if !vm.running {
 		return nil
 	}
 
-	log.Printf("[VPNManager] Stopping VPN...")
-
-	// 停止网络栈
-	if vm.tunStack != nil {
-		vm.tunStack.Close()
-		vm.tunStack = nil
-	}
-
-	// 关闭 TUN 设备
-	if vm.tunDevice != nil {
-		vm.tunDevice.Close()
-		vm.tunDevice = nil
-	}
-
-	// 取消上下文
 	if vm.cancel != nil {
 		vm.cancel()
 	}
-
-	// 清空传输层引用
-	if vm.transport != nil {
-		vm.transport = nil
+	if vm.eng != nil {
+		_ = vm.eng.Close()
 	}
-
-	// P1-6: stop the ECH manager's background cleanup goroutine.
-	// Without this, every Start/Stop cycle leaks one goroutine permanently.
+	if vm.tunInst != nil {
+		_ = vm.tunInst.Close()
+	}
 	if vm.echMgr != nil {
 		vm.echMgr.Stop()
-		vm.echMgr = nil
+	}
+	if vm.resolver != nil {
+		_ = vm.resolver.Close()
 	}
 
 	vm.running = false
+	vm.eng = nil
+	vm.tunInst = nil
+	vm.out = nil
+	vm.tr = nil
+	vm.echMgr = nil
+	vm.resolver = nil
 
-	log.Printf("[VPNManager] VPN stopped")
+	log.Printf("[ewpmobile] VPN down")
 	return nil
 }
 
-// IsRunning 检查运行状态
 func (vm *vpnManager) IsRunning() bool {
 	vm.mu.RLock()
 	defer vm.mu.RUnlock()
 	return vm.running
 }
 
-// GetStats 获取统计信息（返回 JSON 字符串）
 func (vm *vpnManager) GetStats() string {
 	vm.mu.RLock()
 	defer vm.mu.RUnlock()
-
 	if !vm.running {
 		return `{"running":false}`
 	}
-
-	uptime := time.Since(vm.startTime).Seconds()
-
-	stats := map[string]interface{}{
-		"running":     true,
-		"uptime":      uptime,
-		"bytesUp":     vm.bytesUp,
-		"bytesDown":   vm.bytesDown,
-		"connections": vm.connections,
-		"serverAddr":  vm.config.ServerAddr,
-		"protocol":    vm.config.Protocol,
-		"appProtocol": vm.config.AppProtocol,
-		"enableEch":   vm.config.EnableECH,
-		"enableFlow":  vm.config.EnableFlow,
-		"tunMtu":      vm.tunMTU,
+	out := map[string]interface{}{
+		"running":    true,
+		"uptime":     time.Since(vm.startTime).Seconds(),
+		"serverAddr": vm.config.ServerAddr,
+		"protocol":   vm.config.Protocol,
+		"ech":        vm.config.EnableECH,
+		"tunMTU":     vm.config.TUNMTU,
 	}
-
-	// 传输层统计（暂未实现）
-
-	jsonData, _ := json.Marshal(stats)
-	return string(jsonData)
+	b, _ := json.Marshal(out)
+	return string(b)
 }
 
-// updateStats 更新统计信息（内部使用）
-func (vm *vpnManager) updateStats(bytesUp, bytesDown uint64) {
-	vm.mu.Lock()
-	defer vm.mu.Unlock()
-	vm.bytesUp += bytesUp
-	vm.bytesDown += bytesDown
+func (vm *vpnManager) cleanupOnFail() {
+	if vm.cancel != nil {
+		vm.cancel()
+	}
+	if vm.echMgr != nil {
+		vm.echMgr.Stop()
+		vm.echMgr = nil
+	}
+	if vm.resolver != nil {
+		_ = vm.resolver.Close()
+		vm.resolver = nil
+	}
 }
 
-// incrementConnections 增加连接计数
-func (vm *vpnManager) incrementConnections() {
-	vm.mu.Lock()
-	defer vm.mu.Unlock()
-	vm.connections++
+func (vm *vpnManager) buildTransport() (transport.Transport, error) {
+	c := vm.config
+	const useMozillaCA, enablePQC = true, true
+
+	switch c.Protocol {
+	case "", "ws", "websocket":
+		t := websocket.New(c.ServerAddr, firstNonEmpty(c.Path, "/ewp"), c.EnableECH, useMozillaCA, enablePQC, vm.echMgr)
+		applySNIHost(t, c.SNI, c.Host)
+		return t, nil
+	case "grpc":
+		t := grpc.New(c.ServerAddr, firstNonEmpty(c.Path, "ProxyService"), c.EnableECH, useMozillaCA, enablePQC, vm.echMgr)
+		applySNIHost(t, c.SNI, c.Host)
+		return t, nil
+	case "xhttp":
+		t := xhttp.New(c.ServerAddr, firstNonEmpty(c.Path, "/ewp"), c.EnableECH, useMozillaCA, enablePQC, vm.echMgr)
+		applySNIHost(t, c.SNI, c.Host)
+		return t, nil
+	case "h3grpc", "h3":
+		t := h3grpc.New(c.ServerAddr, firstNonEmpty(c.Path, "ProxyService"), c.EnableECH, useMozillaCA, enablePQC, vm.echMgr)
+		applySNIHost(t, c.SNI, c.Host)
+		return t, nil
+	default:
+		return nil, fmt.Errorf("unknown protocol %q", c.Protocol)
+	}
 }
+
+type sniHostSetter interface {
+	SetSNI(string)
+	SetHost(string)
+}
+
+func applySNIHost(t any, sni, host string) {
+	if s, ok := t.(sniHostSetter); ok {
+		if sni != "" {
+			s.SetSNI(sni)
+		}
+		if host != "" {
+			s.SetHost(host)
+		}
+	}
+}
+
+func decodeUUIDHex(s string) ([v2.UUIDLen]byte, error) {
+	var u [v2.UUIDLen]byte
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		return u, err
+	}
+	if len(b) != v2.UUIDLen {
+		return u, fmt.Errorf("uuid: want %d bytes, got %d", v2.UUIDLen, len(b))
+	}
+	copy(u[:], b)
+	return u, nil
+}
+
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
+}
+
+func firstPositive(a, b int) int {
+	if a > 0 {
+		return a
+	}
+	return b
+}
+
+func hostOnly(addr string) string {
+	for i := len(addr) - 1; i >= 0; i-- {
+		if addr[i] == ':' {
+			return addr[:i]
+		}
+	}
+	return addr
+}
+
+var vmInst = newVPNManager()

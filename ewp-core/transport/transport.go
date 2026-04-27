@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/netip"
 	"strings"
-	"time"
 )
 
 // ProtectError indicates that VpnService.protect() failed on Android.
@@ -40,33 +39,28 @@ func (e Endpoint) String() string {
 	return e.Addr.String()
 }
 
-// TunnelConn represents a tunnel connection (abstraction interface)
+// TunnelConn is the message-bounded outer transport contract that
+// the EWP v2 SecureStream sits on top of.
+//
+// Transports MUST deliver each call to SendMessage as a single
+// atomic outer-protocol message (e.g. one WebSocket binary frame,
+// one gRPC SocketData proto, one length-prefixed HTTP body chunk).
+// Transports MUST return one such message per ReadMessage call,
+// never splitting and never coalescing.
+//
+// Transports MUST NOT inspect, transform, pad, encrypt, or in any
+// way understand the bytes they carry. All protocol semantics live
+// in protocol/ewp/v2.
+//
+// Concurrency: SendMessage and ReadMessage may be called
+// concurrently with each other (one writer goroutine, one reader
+// goroutine is the expected pattern). Concurrent SendMessage calls
+// or concurrent ReadMessage calls MUST be safe — implementations
+// serialise internally if needed.
 type TunnelConn interface {
-	// Connect sends TCP connection request and waits for response
-	Connect(target string, initialData []byte) error
-	// ConnectUDP sends UDP connection request (for UDP over TCP tunnel)
-	ConnectUDP(target Endpoint, initialData []byte) error
-	// WriteUDP sends a subsequent UDP packet over an established UDP tunnel
-	// Must be called after ConnectUDP. Frames data as EWP StatusKeep.
-	WriteUDP(target Endpoint, data []byte) error
-	// ReadUDP reads and decodes an EWP-framed UDP response packet
-	// Returns the payload bytes. Must be called after ConnectUDP.
-	ReadUDP() ([]byte, error)
-	// ReadUDPTo reads and decodes an EWP-framed UDP response packet
-	// directly into the provided buffer (zero-copy optimization).
-	// Returns the number of bytes read. Must be called after ConnectUDP.
-	ReadUDPTo(buf []byte) (int, error)
-	// ReadUDPFrom reads a UDP response and returns the real remote address
-	// from the protocol frame header. Zero heap allocation.
-	ReadUDPFrom(buf []byte) (int, netip.AddrPort, error)
-	// Read reads data from tunnel to provided buffer (zero-copy optimization)
-	Read(buf []byte) (int, error)
-	// Write writes data to tunnel
-	Write(data []byte) error
-	// Close closes the connection
+	SendMessage(b []byte) error
+	ReadMessage() ([]byte, error)
 	Close() error
-	// StartPing starts heartbeat (returns stop channel)
-	StartPing(interval time.Duration) chan struct{}
 }
 
 // BypassConfig holds dialers that bypass the TUN routing table.

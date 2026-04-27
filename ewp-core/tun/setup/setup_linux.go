@@ -1,5 +1,10 @@
 //go:build linux && !android
 
+// On linux desktop we drive iproute2 / sysctl directly. On Android
+// the VpnService API in Java has already configured the TUN device
+// before our binary even sees the fd; the corresponding stubs live
+// in setup_other.go.
+
 package setup
 
 import (

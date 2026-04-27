@@ -1,3 +1,6 @@
+// Package websocket is the WebSocket-over-TLS outer transport for
+// EWP v2. It carries opaque message-bounded bytes; all v2 protocol
+// semantics live in protocol/ewp/v2.
 package websocket
 
 import (
@@ -7,254 +10,156 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
+	"strings"
+	"sync"
 	"time"
 
-	commonnet "ewp-core/common/net"
+	"github.com/lxzan/gws"
+
 	commontls "ewp-core/common/tls"
 	"ewp-core/log"
 	"ewp-core/transport"
-
-	"github.com/lxzan/gws"
 )
 
+// Transport implements transport.Transport for WebSocket-over-TLS.
 type Transport struct {
-	serverAddr   string
-	token        string
-	password     string
-	uuid         [16]byte
+	serverAddr string
+	path       string
+
 	useECH       bool
-	enableFlow   bool
-	enablePQC    bool
-	useTrojan    bool
 	useMozillaCA bool
-	path         string
-	host         string
-	sni          string
-	headers      map[string]string
+	enablePQC    bool
 	echManager   *commontls.ECHManager
-	bypassCfg    *transport.BypassConfig
+
+	// Optional overrides:
+	host string // HTTP Host header (for fronting)
+	sni  string // TLS SNI (for fronting)
+
+	mu        sync.Mutex
+	bypassCfg *transport.BypassConfig
 }
 
-func New(serverAddr, token string, useECH, enableFlow bool, path string, echMgr *commontls.ECHManager) (*Transport, error) {
-	return NewWithProtocol(serverAddr, token, "", useECH, false, enableFlow, false, false, path, echMgr)
-}
-
-func NewWithProtocol(serverAddr, token, password string, useECH, useMozillaCA, enableFlow, enablePQC, useTrojan bool, path string, echMgr *commontls.ECHManager) (*Transport, error) {
-	var uuid [16]byte
-	if !useTrojan {
-		var err error
-		uuid, err = transport.ParseUUID(token)
-		if err != nil {
-			return nil, fmt.Errorf("invalid UUID: %w", err)
-		}
-	}
+// New constructs a v2 WebSocket transport.
+//
+// serverAddr: "host:port" for the upstream TLS listener.
+// path: HTTP path on the listener (e.g. "/ewp").
+// useECH: enable Encrypted ClientHello.
+// useMozillaCA: trust the embedded Mozilla bundle (recommended).
+// enablePQC: include X25519MLKEM768 in CurvePreferences (recommended).
+// echManager: optional pre-configured ECHManager; if nil and useECH
+// is true, the default manager is created at Dial-time.
+func New(serverAddr, path string, useECH, useMozillaCA, enablePQC bool, echManager *commontls.ECHManager) *Transport {
 	if path == "" {
 		path = "/"
 	}
 	return &Transport{
 		serverAddr:   serverAddr,
-		token:        token,
-		password:     password,
-		uuid:         uuid,
-		useECH:       useECH,
-		enableFlow:   enableFlow,
-		enablePQC:    enablePQC,
-		useTrojan:    useTrojan,
-		useMozillaCA: useMozillaCA,
 		path:         path,
-		headers:      make(map[string]string),
-		echManager:   echMgr,
-	}, nil
+		useECH:       useECH,
+		useMozillaCA: useMozillaCA,
+		enablePQC:    enablePQC,
+		echManager:   echManager,
+	}
 }
 
-// BypassDialer returns the TCP dialer from the bypass config, or nil if not set.
-// Implements bypassDialerProvider so TUN mode can inject it into the ECH manager
-// after Setup() to prevent the ECH-refresh → TUN → proxy → ECH deadlock (P1-1).
-func (t *Transport) BypassDialer() *net.Dialer {
-	if t.bypassCfg == nil {
-		return nil
-	}
-	return t.bypassCfg.TCPDialer
+func (t *Transport) Name() string { return "websocket" }
+
+func (t *Transport) SetSNI(sni string)   { t.sni = sni }
+func (t *Transport) SetHost(host string) { t.host = host }
+
+func (t *Transport) SetBypassConfig(cfg *transport.BypassConfig) {
+	t.mu.Lock()
+	t.bypassCfg = cfg
+	t.mu.Unlock()
 }
 
-func (t *Transport) Name() string {
-	name := "WebSocket"
-	if t.useTrojan {
-		name += "+Trojan"
-	} else if t.enableFlow {
-		name += "+Vision"
-	} else {
-		name += "+EWP"
-	}
-	if t.useECH {
-		name += "+ECH"
-	} else {
-		name += "+TLS"
-	}
-	return name
+func (t *Transport) bypass() *transport.BypassConfig {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.bypassCfg
 }
 
+// Dial opens a new WebSocket tunnel and returns a v2 TunnelConn.
+//
+// The dial path is:
+//   1. Build TLS config (TLS 1.3, optional ECH + Mozilla CA + PQ).
+//   2. TCP-dial via the bypass dialer (TUN mode) or net.Dialer.
+//   3. TLS-handshake.
+//   4. Issue WS upgrade to t.path with t.host as Host header.
+//   5. Wrap the resulting *gws.Conn in our Conn.
 func (t *Transport) Dial() (transport.TunnelConn, error) {
-	conn, err := t.dial()
+	host, port, err := net.SplitHostPort(t.serverAddr)
 	if err != nil {
-		if t.useECH && t.echManager != nil {
-			if echErr := t.handleECHRejection(err); echErr == nil {
-				log.Printf("[WebSocket] ECH rejected, retrying with updated config...")
-				conn, err = t.dial()
-				if err != nil {
-					return nil, fmt.Errorf("retry after ECH update failed: %w", err)
-				}
-			}
-		}
+		return nil, fmt.Errorf("ws: bad serverAddr %q: %w", t.serverAddr, err)
+	}
+
+	sni := t.sni
+	if sni == "" {
+		sni = host
+	}
+
+	cfg, err := commontls.NewSTDConfig(sni, t.useMozillaCA, t.enablePQC)
+	if err != nil {
+		return nil, fmt.Errorf("ws: tls cfg: %w", err)
+	}
+	tlsCfg, err := cfg.TLSConfig()
+	if err != nil {
+		return nil, err
+	}
+	tlsCfg.NextProtos = []string{"http/1.1"}
+	if t.useECH && t.echManager != nil {
+		echList, err := t.echManager.Get()
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("ws: ech fetch: %w", err)
+		}
+		tlsCfg.EncryptedClientHelloConfigList = echList
+		tlsCfg.EncryptedClientHelloRejectionVerify = func(cs tls.ConnectionState) error {
+			return errors.New("server rejected ECH")
 		}
 	}
+
+	dialer := &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
+	if bp := t.bypass(); bp != nil && bp.TCPDialer != nil {
+		dialer = bp.TCPDialer
+	}
+	rawConn, err := dialer.DialContext(context.Background(), "tcp", net.JoinHostPort(host, port))
+	if err != nil {
+		return nil, fmt.Errorf("ws: tcp dial: %w", err)
+	}
+	tlsConn := tls.Client(rawConn, tlsCfg)
+	if err := tlsConn.HandshakeContext(context.Background()); err != nil {
+		_ = rawConn.Close()
+		return nil, fmt.Errorf("ws: tls handshake: %w", err)
+	}
+	log.V("[ws] TLS established (%s)", commontls.GetConnectionInfo(tlsConn.ConnectionState()))
+
+	httpHost := t.host
+	if httpHost == "" {
+		httpHost = host
+	}
+
+	target := url.URL{Scheme: "wss", Host: net.JoinHostPort(httpHost, port), Path: t.path}
+	header := http.Header{}
+	header.Set("Host", httpHost)
+
+	conn := newConn()
+	socket, _, err := gws.NewClientFromConn(conn, &gws.ClientOption{
+		Addr:          target.String(),
+		RequestHeader: header,
+	}, tlsConn)
+	if err != nil {
+		_ = tlsConn.Close()
+		return nil, fmt.Errorf("ws: upgrade: %w", err)
+	}
+	conn.attach(socket)
+	go socket.ReadLoop()
+
 	return conn, nil
 }
 
-func (t *Transport) dial() (transport.TunnelConn, error) {
-	parsed, err := transport.ParseAddress(t.serverAddr)
-	if err != nil {
-		return nil, err
-	}
+// Compile-time check.
+var _ transport.Transport = (*Transport)(nil)
 
-	serverName := t.sni
-	if serverName == "" {
-		serverName = parsed.Host
-	}
-
-	httpHost := parsed.Host
-	if t.host != "" {
-		httpHost = t.host
-	}
-
-	var resolvedIP string
-	if !isIPAddress(parsed.Host) {
-		ip, err := transport.ResolveIP(t.bypassCfg, parsed.Host, parsed.Port)
-		if err != nil {
-			log.Printf("[WebSocket] DNS resolution failed for %s: %v", parsed.Host, err)
-			return nil, fmt.Errorf("DNS resolution failed: %w", err)
-		}
-		resolvedIP = ip
-	}
-
-	connectAddr := net.JoinHostPort(parsed.Host, parsed.Port)
-	if resolvedIP != "" {
-		connectAddr = net.JoinHostPort(resolvedIP, parsed.Port)
-	}
-	log.V("[WebSocket] Connecting to: %s (SNI: %s)", connectAddr, serverName)
-
-	tlsConfig, err := commontls.NewClient(commontls.ClientOptions{
-		ServerName:   serverName,
-		UseMozillaCA: t.useMozillaCA,
-		EnableECH:    t.useECH,
-		EnablePQC:    t.enablePQC,
-		ECHManager:   t.echManager,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("TLS config: %w", err)
-	}
-	stdConfig, err := tlsConfig.TLSConfig()
-	if err != nil {
-		return nil, err
-	}
-
-	dialCtx, dialCancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer dialCancel()
-
-	var rawConn net.Conn
-	if t.bypassCfg != nil && t.bypassCfg.TCPDialer != nil {
-		// P0-9: value-copy the shared Dialer before mutating Timeout to prevent
-		// a data race when multiple Dial() calls run concurrently.
-		localDialer := *t.bypassCfg.TCPDialer
-		localDialer.Timeout = 10 * time.Second
-		rawConn, err = localDialer.DialContext(dialCtx, "tcp", connectAddr)
-	} else {
-		rawConn, err = commonnet.DialTFO("tcp", connectAddr, 10*time.Second)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("TCP dial: %w", err)
-	}
-	log.V("[WebSocket] TCP connected: %s -> %s", rawConn.LocalAddr(), rawConn.RemoteAddr())
-
-	tlsConn := tls.Client(rawConn, stdConfig)
-	if deadline, ok := dialCtx.Deadline(); ok {
-		tlsConn.SetDeadline(deadline)
-	}
-	if err := tlsConn.HandshakeContext(dialCtx); err != nil {
-		rawConn.Close()
-		return nil, fmt.Errorf("TLS handshake: %w", err)
-	}
-	tlsConn.SetDeadline(time.Time{})
-	log.V("[WebSocket] TLS connected: %s (proto: %s)", connectAddr, tlsConn.ConnectionState().NegotiatedProtocol)
-
-	wsURL := fmt.Sprintf("wss://%s:%s%s", httpHost, parsed.Port, t.path)
-
-	reqHeader := http.Header{}
-	for k, v := range t.headers {
-		reqHeader.Set(k, v)
-	}
-	if t.useTrojan {
-		reqHeader.Set("Sec-WebSocket-Protocol", t.password)
-	} else {
-		reqHeader.Set("Sec-WebSocket-Protocol", t.token)
-	}
-
-	c := newConn(t.uuid, t.password, t.enableFlow, t.useTrojan)
-
-	socket, _, err := gws.NewClientFromConn(c, &gws.ClientOption{
-		Addr:           wsURL,
-		RequestHeader:  reqHeader,
-		ReadBufferSize: 65536,
-	}, tlsConn)
-	if err != nil {
-		tlsConn.Close()
-		return nil, fmt.Errorf("WS upgrade: %w", err)
-	}
-	c.socket = socket
-	go socket.ReadLoop()
-
-	log.V("[WebSocket] Connected to %s", wsURL)
-	return c, nil
-}
-
-func (t *Transport) SetBypassConfig(cfg *transport.BypassConfig) { t.bypassCfg = cfg }
-
-func (t *Transport) SetHost(host string) *Transport {
-	t.host = host
-	return t
-}
-
-func (t *Transport) SetSNI(sni string) *Transport {
-	t.sni = sni
-	return t
-}
-
-func (t *Transport) SetHeaders(headers map[string]string) *Transport {
-	t.headers = headers
-	return t
-}
-
-func isIPAddress(s string) bool {
-	return net.ParseIP(s) != nil
-}
-
-func (t *Transport) handleECHRejection(err error) error {
-	if err == nil {
-		return errors.New("nil error")
-	}
-	// P1-12: use errors.As with the concrete *tls.ECHRejectionError type instead
-	// of fragile string matching.  String matching breaks if Go ever changes the
-	// error message; errors.As is version-stable and faster.
-	var echRejErr *tls.ECHRejectionError
-	if !errors.As(err, &echRejErr) {
-		return errors.New("not ECH rejection")
-	}
-	if len(echRejErr.RetryConfigList) == 0 {
-		log.Printf("[WebSocket] Server rejected ECH without retry config (secure signal)")
-		return errors.New("empty retry config")
-	}
-	log.Printf("[WebSocket] Updating ECH config from server retry (%d bytes)", len(echRejErr.RetryConfigList))
-	return t.echManager.UpdateFromRetry(echRejErr.RetryConfigList)
-}
+// silence unused import warnings
+var _ = strings.HasPrefix

@@ -1,5 +1,3 @@
-//go:build !android
-
 package tun
 
 import (
@@ -20,23 +18,39 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 )
 
+// Config holds parameters for constructing a v2 TUN inbound.
+//
+// In v2 the TUN owns no transport. Outbounds are reached via the
+// engine, which is bound after construction with Handler.BindEngine.
 type Config struct {
-	IP              string
-	DNS             string
-	IPv6            string
-	IPv6DNS         string
-	MTU             int
-	Stack           string
-	Transport       transport.Transport
-	ServerAddr      string   // proxy server address; used to detect the physical outbound interface for bypass dialing
-	TunnelDoHServer string   // DoH server URL for tunnel DNS resolver (user traffic, default: https://dns.google/dns-query)
-	BypassDoHServers []string // DoH servers for bypass resolver (proxy server resolution, uses ech.doh_servers if set)
+	IP      string
+	DNS     string
+	IPv6    string
+	IPv6DNS string
+	MTU     int
+	Stack   string
+
+	// ServerAddr is the upstream EWP server's host:port. Used at
+	// Setup() time to probe the physical outbound interface and
+	// build a BypassConfig — without it, the OS routing table will
+	// loop the outbound's connections back through the TUN itself.
+	ServerAddr string
+
+	// BypassDoHServers seed the bypass resolver. Optional.
+	BypassDoHServers []string
+
+	// OnBypass, if non-nil, is invoked at Setup() with the resolved
+	// BypassConfig so the caller can install it on the outbound
+	// transport (e.g. ewpclient.SetBypassConfig). The TUN itself no
+	// longer manages the transport.
+	OnBypass func(*transport.BypassConfig)
 }
 
 type TUN struct {
 	device    tun.Device
 	stack     *ewpgvisor.Stack
 	handler   *Handler
+	fakePool  *dns.FakeIPPool
 	config    *Config
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -44,10 +58,15 @@ type TUN struct {
 	closeOnce sync.Once // ensures Close() is idempotent
 }
 
+// FakeIPPool returns the FakeIP pool owned by this TUN. Used by the
+// inbound binder to inject the same pool into the engine's DNS path.
+// Returns nil if the TUN has no FakeIP enabled (currently always non-nil).
+func (t *TUN) FakeIPPool() *dns.FakeIPPool { return t.fakePool }
+
 func New(cfg *Config) (*TUN, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	handler := NewHandler(ctx, cfg.Transport)
+	handler := NewHandler(ctx)
 
 	// Initialize FakeIP pool for instant DNS responses (< 1ms, no tunnel needed)
 	fakeIPPool := dns.NewFakeIPPool()
@@ -91,12 +110,13 @@ func New(cfg *Config) (*TUN, error) {
 	}
 
 	return &TUN{
-		device:  tunDevice,
-		stack:   stack,
-		handler: handler,
-		config:  cfg,
-		ctx:     ctx,
-		cancel:  cancel,
+		device:   tunDevice,
+		stack:    stack,
+		handler:  handler,
+		fakePool: fakeIPPool,
+		config:   cfg,
+		ctx:      ctx,
+		cancel:   cancel,
 	}, nil
 }
 
@@ -125,8 +145,10 @@ func (t *TUN) Setup() error {
 		if err != nil {
 			log.Printf("[TUN] Warning: bypass dialer init failed: %v (routing loop risk)", err)
 		} else {
-			// Pass BypassDoHServers from config (usually from ech.doh_servers)
-			t.config.Transport.SetBypassConfig(bd.ToBypassConfig(t.config.BypassDoHServers))
+			bcfg := bd.ToBypassConfig(t.config.BypassDoHServers)
+			if t.config.OnBypass != nil {
+				t.config.OnBypass(bcfg)
+			}
 			log.Printf("[TUN] Bypass dialer active on interface %s", ifName)
 		}
 	} else {
