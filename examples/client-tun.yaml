@@ -1,0 +1,42 @@
+# Linux desktop TUN client. Captures every TCP/UDP flow on the
+# system, runs them through an EWP v2 tunnel to the upstream VPS.
+# FakeIP DNS lives entirely on-device (zero-RTT for :53), Real-IP
+# flows preserve their remote src so STUN / WebRTC / Full-Cone
+# semantics are intact.
+#
+# Run as root (TUN device + route table + bypass dialer all need
+# CAP_NET_ADMIN). Stop with Ctrl-C; routes and TUN are torn down
+# automatically.
+
+inbounds:
+  - tag: tun-in
+    type: tun
+    ipv4: "10.233.0.2/24"
+    ipv4_dns: "10.233.0.1"
+    ipv6: "fd00:dead:beef::2/64"
+    ipv6_dns: "fd00:dead:beef::1"
+    mtu: 1420
+    # bypass_server is critical: without it the bypass dialer can't
+    # detect which physical interface to dial out on, and the
+    # outbound's TCP/UDP packets will loop back through the TUN.
+    # Should match the upstream EWP server (host or ip).
+    bypass_server: "example.com:443"
+
+outbounds:
+  - tag: my-vps
+    type: ewpclient
+    uuid: "01020304-0506-0708-090a-0b0c0d0e0f10"
+    transport:
+      kind: websocket
+      url: "wss://example.com/ewp"
+      sni: "example.com"
+      ech: true
+
+router:
+  default: my-vps
+
+ech:
+  bootstrap_doh:
+    servers:
+      - "https://1.1.1.1/dns-query"
+      - "https://dns.google/dns-query"

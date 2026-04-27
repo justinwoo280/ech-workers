@@ -31,3 +31,13 @@ dns:
       worker_pool: 16
       min_ttl_sec: 30
       max_ttl_sec: 3600
+
+# Reflexive address discovery for PROBE_RESP. At startup the binary
+# concurrently asks each STUN server "what's my public ip:port?", caches
+# the answer, and returns it to clients that send a UDP_PROBE_REQ. Skip
+# this block to silently disable PROBE_RESP (clients still get a
+# fall-back default and most NAT diagnostics still work).
+stun:
+  servers:
+    - "stun.cloudflare.com:3478"
+    - "stun.l.google.com:19302"
