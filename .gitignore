@@ -64,7 +64,9 @@ Thumbs.db
 **/.gradle/
 **/local.properties
 **/*.aar
+**/*.jar
 !ewp-android/app/libs/.gitkeep
+!ewp-android/gradle/wrapper/gradle-wrapper.jar
 ewp-core/output/
 
 # IDE

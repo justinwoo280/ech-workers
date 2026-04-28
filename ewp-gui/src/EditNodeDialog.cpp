@@ -42,6 +42,7 @@ void EditNodeDialog::setNode(const EWPNode &node)
     ui->editXHTTPPath->setText(node.xhttpPath);
 
     ui->checkEnableECH->setChecked(node.enableECH);
+    ui->editECHDomain->setText(node.echDomain);
     ui->editDoHServers->setText(node.dohServers);
 
     updateVisibility();
@@ -71,6 +72,7 @@ EWPNode EditNodeDialog::getNode() const
     if (node.xhttpPath.isEmpty()) node.xhttpPath = "/xhttp";
 
     node.enableECH  = ui->checkEnableECH->isChecked();
+    node.echDomain  = ui->editECHDomain->text().trimmed();
     node.dohServers = ui->editDoHServers->text().trimmed();
 
     return node;

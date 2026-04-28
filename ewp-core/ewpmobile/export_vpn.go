@@ -61,6 +61,10 @@ func (b *VPNConfigBuilder) SetPath(p string) *VPNConfigBuilder        { b.cfg.Pa
 func (b *VPNConfigBuilder) SetSNI(s string) *VPNConfigBuilder         { b.cfg.SNI = s; return b }
 func (b *VPNConfigBuilder) SetHost(h string) *VPNConfigBuilder        { b.cfg.Host = h; return b }
 func (b *VPNConfigBuilder) SetEnableECH(en bool) *VPNConfigBuilder    { b.cfg.EnableECH = en; return b }
+// SetECHDomain sets the host whose HTTPS RR carries the ECH key set.
+// Leave unset for the common case (server hosts its own ECH); set to
+// "cloudflare-ech.com" when fronting through Cloudflare.
+func (b *VPNConfigBuilder) SetECHDomain(d string) *VPNConfigBuilder    { b.cfg.ECHDomain = d; return b }
 func (b *VPNConfigBuilder) SetTUNMTU(mtu int) *VPNConfigBuilder       { b.cfg.TUNMTU = mtu; return b }
 func (b *VPNConfigBuilder) SetTUNIPv4(ip string) *VPNConfigBuilder    { b.cfg.TUNIPv4 = ip; return b }
 func (b *VPNConfigBuilder) SetTUNIPv6(ip string) *VPNConfigBuilder    { b.cfg.TUNIPv6 = ip; return b }

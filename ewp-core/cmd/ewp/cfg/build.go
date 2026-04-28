@@ -127,10 +127,22 @@ func buildClientTransport(c TransportCfg, echBootstrap []string, resolver *clien
 		// manager's built-in default DoH list — that's the whole
 		// point of having a dedicated ech.bootstrap_doh block in
 		// the YAML.
+		// Resolve which domain holds the ECH HTTPS RR.
+		// Priority: explicit ech_domain > sni > url-host. Centralised
+		// ECH (Cloudflare-style) lives on a totally unrelated public
+		// domain (cloudflare-ech.com), so the URL host is the wrong
+		// default in that case — users opt-in by setting ech_domain.
+		echDomain := c.ECHDomain
+		if echDomain == "" {
+			echDomain = c.SNI
+		}
+		if echDomain == "" {
+			echDomain = addrHost(addr)
+		}
 		if len(echBootstrap) > 0 {
-			echMgr = commontls.NewECHManager(addrHost(addr), echBootstrap...)
+			echMgr = commontls.NewECHManager(echDomain, echBootstrap...)
 		} else {
-			echMgr = commontls.NewECHManager(addrHost(addr))
+			echMgr = commontls.NewECHManager(echDomain)
 		}
 	}
 

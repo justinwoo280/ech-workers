@@ -86,6 +86,7 @@ EWPNode ShareLink::parseLink(const QString &link)
 
     // ECH defaults to true; only an explicit "0" turns it off.
     if (q.hasQueryItem("ech")) node.enableECH = q.queryItemValue("ech") != "0";
+    if (q.hasQueryItem("ech_domain")) node.echDomain = q.queryItemValue("ech_domain");
 
     // DoH list — accept both v2 `doh=` and legacy `dns=` aliases.
     QString doh = q.queryItemValue("doh");
@@ -128,7 +129,8 @@ QString ShareLink::generateLink(const EWPNode &node)
     }
     if (!node.host.isEmpty()) q.addQueryItem("host", node.host);
     if (!node.sni.isEmpty())  q.addQueryItem("sni",  node.sni);
-    if (!node.enableECH)      q.addQueryItem("ech",  "0");
+    if (!node.enableECH)        q.addQueryItem("ech", "0");
+    if (!node.echDomain.isEmpty()) q.addQueryItem("ech_domain", node.echDomain);
 
     if (!node.dohServers.isEmpty()) {
         q.addQueryItem("doh", QString::fromUtf8(QUrl::toPercentEncoding(node.dohServers)));

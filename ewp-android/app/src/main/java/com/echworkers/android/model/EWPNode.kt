@@ -38,6 +38,21 @@ data class EWPNode(
     /** Encrypted ClientHello toggle. v2 strongly recommends keeping it on. */
     val enableECH: Boolean = true,
 
+    /**
+     * Domain whose HTTPS resource record carries the ECH config. Distinct from
+     * SNI: SNI is the backend's real name (encrypted by ECH), echDomain is the
+     * public domain that *publishes* the ECH key.
+     *
+     * The two are unrelated for centralised ECH services — Cloudflare, for
+     * example, hosts ECH keys under "cloudflare-ech.com" while the actual
+     * backend SNI is the customer's own domain. Empty here ⇒ ECH config will
+     * be looked up against the SNI itself, which only works for self-hosted
+     * ECH deployments. We do NOT auto-derive it from SNI/host because RFC
+     * 9460 lookup of the backend domain typically returns no ECH config and
+     * the bootstrap would silently fall back to plain TLS.
+     */
+    val echDomain: String = "",
+
     /** Optional override of the umbrella DoH list used by ewpmobile. Comma-separated. Empty -> built-in default (AliDNS + DNSPod). */
     val dohServers: String = "",
 

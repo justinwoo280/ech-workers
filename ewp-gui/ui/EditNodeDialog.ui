@@ -110,8 +110,15 @@
         <property name="checked"><bool>true</bool></property>
        </widget>
       </item>
-      <item row="1" column="0"><widget class="QLabel"><property name="text"><string>DoH 服务器</string></property></widget></item>
+      <item row="1" column="0"><widget class="QLabel"><property name="text"><string>ECH 查询域名</string></property></widget></item>
       <item row="1" column="1">
+       <widget class="QLineEdit" name="editECHDomain">
+        <property name="placeholderText"><string>留空: 自动用 SNI/服务器地址 | Cloudflare 用户填: cloudflare-ech.com</string></property>
+        <property name="toolTip"><string>HTTPS RR 查询域名 — 集中式 ECH 服务 (如 Cloudflare) 把 ECH 公钥发布在独立公共域名上, 与你的实际后端无关. 自托管 ECH 留空即可.</string></property>
+       </widget>
+      </item>
+      <item row="2" column="0"><widget class="QLabel"><property name="text"><string>DoH 服务器</string></property></widget></item>
+      <item row="2" column="1">
        <widget class="QLineEdit" name="editDoHServers">
         <property name="placeholderText"><string>逗号分隔; 留空走内置默认 (AliDNS / DNSPod)</string></property>
        </widget>

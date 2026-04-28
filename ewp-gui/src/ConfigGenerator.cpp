@@ -115,6 +115,13 @@ QJsonObject ConfigGenerator::generateTransport(const EWPNode &node)
     if (!sni.isEmpty())       t["sni"]  = sni;
 
     t["ech"] = node.enableECH;
+    if (node.enableECH && !node.echDomain.isEmpty()) {
+        // Only emit when non-empty: an empty echDomain means
+        // "infer from sni / url" and the cmd/ewp side already
+        // implements that priority chain. Emitting empty would
+        // make the yaml noisier without changing behaviour.
+        t["ech_domain"] = node.echDomain;
+    }
     return t;
 }
 

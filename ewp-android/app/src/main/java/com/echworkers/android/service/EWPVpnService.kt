@@ -175,6 +175,7 @@ class EWPVpnService : VpnService(), SocketProtector {
             if (node.host.isNotEmpty()) setHost(node.host)
             if (node.sni.isNotEmpty()) setSNI(node.sni)
             setEnableECH(node.enableECH)
+            if (node.echDomain.isNotEmpty()) setECHDomain(node.echDomain)
             if (node.dohServers.isNotBlank()) setDoHServers(node.dohServers)
             setTUNMTU(VPN_MTU.toLong())
         }.build()

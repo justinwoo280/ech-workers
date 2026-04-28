@@ -51,6 +51,7 @@ fun NodeEditScreen(
     var xhttpPath by remember { mutableStateOf(existingNode?.xhttpPath ?: "/xhttp") }
 
     var enableECH by remember { mutableStateOf(existingNode?.enableECH ?: true) }
+    var echDomain by remember { mutableStateOf(existingNode?.echDomain ?: "") }
     var dohServers by remember { mutableStateOf(existingNode?.dohServers ?: "") }
 
     val canSave = name.isNotBlank() &&
@@ -83,6 +84,7 @@ fun NodeEditScreen(
                                 host = host,
                                 sni = sni,
                                 enableECH = enableECH,
+                                echDomain = echDomain.trim(),
                                 dohServers = dohServers,
                             )
                             if (existingNode == null) {
@@ -212,6 +214,15 @@ fun NodeEditScreen(
                 trailingContent = {
                     Switch(checked = enableECH, onCheckedChange = { enableECH = it })
                 },
+            )
+            OutlinedTextField(
+                value = echDomain,
+                onValueChange = { echDomain = it },
+                label = { Text("ECH 查询域名 (可选)") },
+                placeholder = { Text("Cloudflare 用户填 cloudflare-ech.com") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                supportingText = { Text("ECH 公钥发布的域名,与 SNI 是两件事。Cloudflare 集中托管 → cloudflare-ech.com;自建 → 留空走 SNI") },
             )
             OutlinedTextField(
                 value = dohServers,

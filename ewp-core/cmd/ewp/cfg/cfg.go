@@ -159,6 +159,14 @@ type TransportCfg struct {
 	Path string `yaml:"path" json:"path"`
 	ECH  bool   `yaml:"ech" json:"ech"`
 
+	// ECHDomain is the host we query for the ECH HTTPS resource record.
+	// Empty means "infer from sni / url" — fine for the common case
+	// where the server hosts its own ECH config. Cloudflare-fronted
+	// deployments must set this to "cloudflare-ech.com" because
+	// Cloudflare manages ECH keys centrally on a public domain that
+	// has no relation to your backend's URL.
+	ECHDomain string `yaml:"ech_domain" json:"ech_domain"`
+
 	// Server side TLS:
 	CertFile string `yaml:"cert" json:"cert"`
 	KeyFile  string `yaml:"key" json:"key"`

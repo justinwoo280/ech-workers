@@ -41,6 +41,11 @@ type VPNConfig struct {
 	Host string
 
 	EnableECH bool
+	// ECHDomain holds the host whose HTTPS RR carries the ECH key set.
+	// Empty = use SNI / ServerAddr; set to "cloudflare-ech.com" for
+	// Cloudflare-fronted deployments (the most common reason this
+	// field is non-empty).
+	ECHDomain string
 
 	DoHServers []string
 
@@ -101,9 +106,15 @@ func (vm *vpnManager) Start(tunFD int, cfg *VPNConfig) error {
 
 	// 2. ECH manager (optional).
 	if cfg.EnableECH {
-		domain := cfg.SNI
+		// ECH lookup-domain priority chain. The ONLY reason we don't
+		// always use SNI is centralised ECH services like Cloudflare's,
+		// where the ECH HTTPS RR lives on cloudflare-ech.com and has
+		// nothing to do with the user's actual backend hostname.
+		domain := cfg.ECHDomain
 		if domain == "" {
-			// Fall back to the apex of ServerAddr (strip port).
+			domain = cfg.SNI
+		}
+		if domain == "" {
 			domain = hostOnly(cfg.ServerAddr)
 		}
 		vm.echMgr = commontls.NewECHManager(domain, dohServers...)

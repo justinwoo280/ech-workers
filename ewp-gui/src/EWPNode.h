@@ -33,6 +33,19 @@ struct EWPNode {
     QString sni;               // Empty -> derived from host -> server
 
     bool enableECH = true;
+    /**
+     * Domain that publishes the ECH public key (HTTPS DNS RR). Distinct
+     * from sni — sni is the backend's real name (encrypted by ECH),
+     * echDomain is the *public* domain hosting the ECH config.
+     *
+     * Centralised ECH services like Cloudflare keep the key under
+     * "cloudflare-ech.com" while the customer's backend SNI is some
+     * customer-specific domain. We do NOT auto-derive echDomain from
+     * sni: an HTTPS RR lookup of the backend usually returns no ECH
+     * config, and the bootstrap would silently fall back to plain TLS.
+     * Empty here ⇒ fall back to sni (only correct for self-hosted ECH).
+     */
+    QString echDomain;
     QString dohServers;        // Optional CSV; empty -> built-in default (AliDNS + DNSPod)
 
     int latency = 0;           // ms; 0 = untested, -1 = failed
@@ -53,6 +66,7 @@ struct EWPNode {
         o["xhttpPath"]       = xhttpPath;
         o["sni"]             = sni;
         o["enableECH"]       = enableECH;
+        if (!echDomain.isEmpty()) o["echDomain"] = echDomain;
         o["dohServers"]      = dohServers;
         return o;
     }
@@ -69,6 +83,7 @@ struct EWPNode {
         n.xhttpPath       = obj["xhttpPath"].toString("/xhttp");
         n.sni             = obj["sni"].toString();
         n.enableECH       = obj["enableECH"].toBool(true);
+        n.echDomain       = obj["echDomain"].toString();
         n.dohServers      = obj["dohServers"].toString();
         n.server          = obj["server"].toString();
         n.host            = obj["host"].toString();
